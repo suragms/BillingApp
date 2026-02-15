@@ -13,7 +13,7 @@ namespace HexaBill.Api.Migrations
             migrationBuilder.AddColumn<bool>(
                 name: "IsActive",
                 table: "Routes",
-                type: "INTEGER",
+                type: "boolean",
                 nullable: false,
                 defaultValue: false);
 
@@ -32,7 +32,7 @@ namespace HexaBill.Api.Migrations
             migrationBuilder.AddColumn<bool>(
                 name: "IsActive",
                 table: "Branches",
-                type: "INTEGER",
+                type: "boolean",
                 nullable: false,
                 defaultValue: false);
 

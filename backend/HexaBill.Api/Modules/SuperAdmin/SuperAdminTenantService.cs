@@ -57,7 +57,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 var suspendedTenants = await _context.Tenants.CountAsync(t => t.Status == TenantStatus.Suspended);
                 var expiredTenants = await _context.Tenants.CountAsync(t => t.Status == TenantStatus.Expired);
                 
-                var startOfMonth = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1);
+                var startOfMonth = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
                 var newTenantsThisMonth = await _context.Tenants.CountAsync(t => t.CreatedAt >= startOfMonth);
 
                 var totalInvoices = await _context.Sales.CountAsync(s => !s.IsDeleted);
