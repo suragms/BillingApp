@@ -20,12 +20,16 @@ namespace HexaBill.Api.Shared.Services
             if (tenantId <= 0) return null; // SuperAdmin
             var r = role?.Trim().ToLowerInvariant() ?? "";
             if (r == "owner" || r == "admin" || r == "manager") return null; // No restriction
-            // Staff: only routes they are assigned to
-            var routeIds = await _context.RouteStaff
+            // Staff: only routes they are assigned to (RouteStaff or Route.AssignedStaffId)
+            var fromRouteStaff = await _context.RouteStaff
                 .Where(rs => rs.UserId == userId && rs.Route.TenantId == tenantId)
                 .Select(rs => rs.RouteId)
-                .Distinct()
-                .ToArrayAsync();
+                .ToListAsync();
+            var fromAssignedStaff = await _context.Routes
+                .Where(rt => rt.TenantId == tenantId && rt.AssignedStaffId == userId)
+                .Select(rt => rt.Id)
+                .ToListAsync();
+            var routeIds = fromRouteStaff.Union(fromAssignedStaff).Distinct().ToArray();
             if (routeIds.Length == 0) return Array.Empty<int>(); // Staff with no route sees nothing
             return routeIds;
         }

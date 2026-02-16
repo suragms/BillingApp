@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Download,
@@ -12,7 +12,12 @@ import {
   Eye,
   RefreshCw,
   DollarSign,
-  ShieldCheck
+  ShieldCheck,
+  Building2,
+  Clock,
+  ChevronDown,
+  ChevronRight,
+  Users
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { isAdminOrOwner } from '../../utils/roles'
@@ -20,7 +25,7 @@ import { formatCurrency, formatBalance } from '../../utils/currency'
 import toast from 'react-hot-toast'
 import { LoadingCard } from '../../components/Loading'
 import { Input, Select } from '../../components/Form'
-import { reportsAPI, productsAPI, customersAPI, profitAPI, paymentsAPI, branchesAPI, routesAPI } from '../../services'
+import { reportsAPI, productsAPI, customersAPI, profitAPI, paymentsAPI, branchesAPI, routesAPI, adminAPI } from '../../services'
 import {
   LineChart,
   Line,
@@ -55,6 +60,14 @@ const ReportsPage = () => {
     category: '',
     status: '' // Pending, Paid, Partial for sales report
   })
+  const [appliedFilters, setAppliedFilters] = useState({
+    branch: '',
+    route: '',
+    product: '',
+    customer: '',
+    category: '',
+    status: ''
+  })
 
   const [reportData, setReportData] = useState({
     summary: null,
@@ -63,11 +76,15 @@ const ReportsPage = () => {
     products: [],
     customers: [],
     expenses: [],
+    branchComparison: [],
+    agingReport: null,
     profitLoss: null,
     outstandingBills: [],
+    staffReport: [],
     aiSuggestions: null,
   })
   const [loadingSales, setLoadingSales] = useState(false)
+  const [expandedBranchId, setExpandedBranchId] = useState(null) // Branch Report: which branch row is expanded for route sub-rows
   const [productsList, setProductsList] = useState([])
   const [customersList, setCustomersList] = useState([])
   const [branchesList, setBranchesList] = useState([])
@@ -86,6 +103,7 @@ const ReportsPage = () => {
   const lastRequestParamsRef = useRef(null) // Track last request params to prevent duplicates
   const hasInitialLoadRef = useRef(false) // Track if initial load has happened
   const initialLoadTimeoutRef = useRef(null) // Timeout for initial load
+  const tabDataCacheRef = useRef({}) // Lazy load: cache loaded tab data keyed by tab+params to avoid refetch on tab switch
 
   const { user } = useAuth()
 
@@ -95,8 +113,11 @@ const ReportsPage = () => {
     { id: 'products', name: 'Product Analysis', icon: PieChart },
     { id: 'customers', name: 'Customer Report', icon: FileText },
     { id: 'expenses', name: 'Expenses', icon: TrendingDown },
+    { id: 'branch', name: 'Branch Report', icon: Building2 },
+    { id: 'aging', name: 'Customer Aging', icon: Clock },
     { id: 'profit-loss', name: 'Profit & Loss', icon: TrendingUp, adminOnly: true },
     { id: 'outstanding', name: 'Outstanding Bills', icon: DollarSign },
+    { id: 'staff', name: 'Staff Performance', icon: Users, adminOnly: true },
     { id: 'ai', name: 'AI Insights', icon: Eye, adminOnly: true }
   ].filter(tab => !tab.adminOnly || isAdminOrOwner(user))
 
@@ -163,12 +184,19 @@ const ReportsPage = () => {
       return
     }
 
-    // Create request signature to prevent duplicates
+    // Create request signature to prevent duplicates (use appliedFilters, not draft filters)
     const requestSignature = JSON.stringify({
       dateRange,
       activeTab,
-      filters
+      filters: appliedFilters
     })
+
+    // LAZY LOAD: Skip fetch if we already have this tab's data cached (same params)
+    const tabCacheKey = `${activeTab}_${requestSignature}`
+    if (!force && tabDataCacheRef.current[tabCacheKey]) {
+      isFetchingRef.current = false
+      return
+    }
 
     // AGGRESSIVE: Prevent duplicate requests (same params)
     if (!force && lastRequestParamsRef.current === requestSignature) {
@@ -216,8 +244,8 @@ const ReportsPage = () => {
       const summaryParams = {
         fromDate: dateRange.from,
         toDate: dateRange.to,
-        branchId: filters.branch ? parseInt(filters.branch, 10) : undefined,
-        routeId: filters.route ? parseInt(filters.route, 10) : undefined
+        branchId: appliedFilters.branch ? parseInt(appliedFilters.branch, 10) : undefined,
+        routeId: appliedFilters.route ? parseInt(appliedFilters.route, 10) : undefined
       }
 
       // Note: Most API calls don't support AbortSignal directly, but we track cancellation
@@ -257,10 +285,10 @@ const ReportsPage = () => {
           const salesResponse = await reportsAPI.getSalesReport({
             fromDate: dateRange.from,
             toDate: dateRange.to,
-            customerId: filters.customer ? parseInt(filters.customer) : undefined,
-            status: filters.status || undefined,
-            branchId: filters.branch ? parseInt(filters.branch, 10) : undefined,
-            routeId: filters.route ? parseInt(filters.route, 10) : undefined,
+            customerId: appliedFilters.customer ? parseInt(appliedFilters.customer) : undefined,
+            status: appliedFilters.status || undefined,
+            branchId: appliedFilters.branch ? parseInt(appliedFilters.branch, 10) : undefined,
+            routeId: appliedFilters.route ? parseInt(appliedFilters.route, 10) : undefined,
             page: 1,
             pageSize: 100
           })
@@ -335,8 +363,8 @@ const ReportsPage = () => {
           const productsResponse = await reportsAPI.getProductSalesReport({
             fromDate: dateRange.from,
             toDate: dateRange.to,
-            productId: filters.product ? parseInt(filters.product) : undefined,
-            category: filters.category || undefined,
+            productId: appliedFilters.product ? parseInt(appliedFilters.product) : undefined,
+            category: appliedFilters.category || undefined,
             top: 20
           })
 
@@ -364,7 +392,7 @@ const ReportsPage = () => {
           }
         } catch (error) {
           console.error('Error loading product sales:', error)
-          toast.error(error?.response?.data?.message || 'Failed to load product sales report')
+          if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load product sales report')
           setReportData(prev => ({ ...prev, products: [] }))
         } finally {
           setLoading(false)
@@ -406,7 +434,7 @@ const ReportsPage = () => {
           }
         } catch (error) {
           console.error('Error loading customers:', error)
-          toast.error(error?.response?.data?.message || 'Failed to load customer report')
+          if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load customer report')
           setReportData(prev => ({ ...prev, customers: [] }))
         } finally {
           setLoading(false)
@@ -419,7 +447,7 @@ const ReportsPage = () => {
           const expensesResponse = await reportsAPI.getExpensesByCategory({
             fromDate: dateRange.from,
             toDate: dateRange.to,
-            branchId: filters.branch ? parseInt(filters.branch, 10) : undefined
+            branchId: appliedFilters.branch ? parseInt(appliedFilters.branch, 10) : undefined
           })
 
           console.log('Expenses response:', expensesResponse)
@@ -446,8 +474,46 @@ const ReportsPage = () => {
           }
         } catch (error) {
           console.error('Error loading expenses:', error)
-          toast.error(error?.response?.data?.message || 'Failed to load expense report')
+          if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load expense report')
           setReportData(prev => ({ ...prev, expenses: [] }))
+        } finally {
+          setLoading(false)
+        }
+      } else if (activeTab === 'branch') {
+        try {
+          setLoading(true)
+          const branchRes = await reportsAPI.getBranchComparison({
+            fromDate: dateRange.from,
+            toDate: dateRange.to
+          })
+          if (branchRes?.success && branchRes?.data) {
+            setReportData(prev => ({ ...prev, branchComparison: branchRes.data || [] }))
+          } else {
+            setReportData(prev => ({ ...prev, branchComparison: [] }))
+          }
+        } catch (err) {
+          const msg = err?.response?.status === 404
+            ? 'Branch report API not found. Restart the backend to enable this report.'
+            : (err?.response?.data?.message || 'Failed to load branch report')
+          if (!err?._handledByInterceptor) toast.error(msg)
+          setReportData(prev => ({ ...prev, branchComparison: [] }))
+        } finally {
+          setLoading(false)
+        }
+      } else if (activeTab === 'aging') {
+        try {
+          setLoading(true)
+          const agingRes = await reportsAPI.getAgingReport({
+            asOfDate: dateRange.to || new Date().toISOString().split('T')[0]
+          })
+          if (agingRes?.success && agingRes?.data) {
+            setReportData(prev => ({ ...prev, agingReport: agingRes.data }))
+          } else {
+            setReportData(prev => ({ ...prev, agingReport: null }))
+          }
+        } catch (err) {
+          if (!err?._handledByInterceptor) toast.error(err?.response?.data?.message || 'Failed to load aging report')
+          setReportData(prev => ({ ...prev, agingReport: null }))
         } finally {
           setLoading(false)
         }
@@ -500,7 +566,7 @@ const ReportsPage = () => {
           }
         } catch (error) {
           console.error('Error loading profit & loss:', error)
-          toast.error(error?.response?.data?.message || 'Failed to load profit & loss report')
+          if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load profit & loss report')
           setReportData(prev => ({ ...prev, profitLoss: null }))
         } finally {
           setLoading(false)
@@ -542,11 +608,33 @@ const ReportsPage = () => {
           }
         } catch (error) {
           console.error('Error loading outstanding bills:', error)
-          toast.error(error?.response?.data?.message || 'Failed to load outstanding bills')
+          if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load outstanding bills')
           setReportData(prev => ({
             ...prev,
             outstandingBills: []
           }))
+        } finally {
+          setLoading(false)
+        }
+      } else if (activeTab === 'staff') {
+        try {
+          setLoading(true)
+          const staffRes = await reportsAPI.getStaffPerformance({
+            fromDate: dateRange.from,
+            toDate: dateRange.to
+          })
+          if (staffRes?.success && staffRes?.data) {
+            setReportData(prev => ({ ...prev, staffReport: staffRes.data || [] }))
+          } else {
+            setReportData(prev => ({ ...prev, staffReport: [] }))
+          }
+        } catch (error) {
+          console.error('Error loading staff performance:', error)
+          const msg = error?.response?.status === 404
+            ? 'Staff performance API not found. Restart the backend to enable this report.'
+            : (error?.response?.data?.message || 'Failed to load staff performance')
+          if (!error?._handledByInterceptor) toast.error(msg)
+          setReportData(prev => ({ ...prev, staffReport: [] }))
         } finally {
           setLoading(false)
         }
@@ -603,6 +691,8 @@ const ReportsPage = () => {
           console.error('Error loading AI suggestions:', error)
         }
       }
+      // Lazy load: mark this tab as loaded so we skip refetch when switching back
+      tabDataCacheRef.current[tabCacheKey] = true
     } catch (error) {
       // Check if request was aborted (cancelled)
       const currentSignal = fetchAbortControllerRef.current?.signal
@@ -633,7 +723,7 @@ const ReportsPage = () => {
       setLoading(false)
       isFetchingRef.current = false
     }
-  }, [dateRange, activeTab, filters])
+  }, [dateRange, activeTab, appliedFilters])
 
   // Store latest fetchReportData in ref to avoid dependency issues
   useEffect(() => {
@@ -715,6 +805,11 @@ const ReportsPage = () => {
     loadFilterData()
   }, [])
 
+  const handleApplyFilters = () => {
+    setAppliedFilters({ ...filters })
+    tabDataCacheRef.current = {}
+  }
+
   // Load routes when branch filter changes (route dropdown filtered by branch)
   useEffect(() => {
     if (!filters.branch) {
@@ -794,7 +889,7 @@ const ReportsPage = () => {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateRange, activeTab, filters]) // Only refresh when these change
+  }, [dateRange, activeTab, appliedFilters]) // Only refresh when these change
 
   // Auto-refresh interval (separate useEffect) - DISABLED to prevent 429 errors
   useEffect(() => {
@@ -823,7 +918,7 @@ const ReportsPage = () => {
       toast.success(`${format.toUpperCase()} report exported successfully!`)
     } catch (error) {
       console.error('Failed to export report:', error)
-      toast.error('Failed to export report')
+      if (!error?._handledByInterceptor) toast.error('Failed to export report')
     }
   }
 
@@ -942,37 +1037,13 @@ const ReportsPage = () => {
             label="From Date"
             type="date"
             value={dateRange.from}
-            onChange={(e) => {
-              setDateRange(prev => ({ ...prev, from: e.target.value }))
-            }}
-            onBlur={() => {
-              // AGGRESSIVE debounce - wait 3 seconds before fetching
-              if (!isFetchingRef.current) {
-                setTimeout(() => {
-                  if (!isFetchingRef.current) {
-                    fetchReportData(true)
-                  }
-                }, 3000) // 3 second delay (increased from 500ms)
-              }
-            }}
+            onChange={(e) => setDateRange(prev => ({ ...prev, from: e.target.value }))}
           />
           <Input
             label="To Date"
             type="date"
             value={dateRange.to}
-            onChange={(e) => {
-              setDateRange(prev => ({ ...prev, to: e.target.value }))
-            }}
-            onBlur={() => {
-              // AGGRESSIVE debounce - wait 3 seconds before fetching
-              if (!isFetchingRef.current) {
-                setTimeout(() => {
-                  if (!isFetchingRef.current) {
-                    fetchReportData(true)
-                  }
-                }, 3000) // 3 second delay (increased from 500ms)
-              }
-            }}
+            onChange={(e) => setDateRange(prev => ({ ...prev, to: e.target.value }))}
           />
           <Select
             label="Branch"
@@ -981,12 +1052,7 @@ const ReportsPage = () => {
               ...branchesList.map(b => ({ value: String(b.id), label: b.name || 'Branch' }))
             ]}
             value={filters.branch}
-            onChange={(e) => {
-              setFilters(prev => ({ ...prev, branch: e.target.value, route: '' }))
-              if (!isFetchingRef.current) {
-                setTimeout(() => { if (!isFetchingRef.current) fetchReportData(true) }, 3000)
-              }
-            }}
+            onChange={(e) => setFilters(prev => ({ ...prev, branch: e.target.value, route: '' }))}
           />
           <Select
             label="Route"
@@ -995,12 +1061,7 @@ const ReportsPage = () => {
               ...routesList.map(r => ({ value: String(r.id), label: r.name || 'Route' }))
             ]}
             value={filters.route}
-            onChange={(e) => {
-              setFilters(prev => ({ ...prev, route: e.target.value }))
-              if (!isFetchingRef.current) {
-                setTimeout(() => { if (!isFetchingRef.current) fetchReportData(true) }, 3000)
-              }
-            }}
+            onChange={(e) => setFilters(prev => ({ ...prev, route: e.target.value }))}
           />
           <Select
             label="Product"
@@ -1009,17 +1070,7 @@ const ReportsPage = () => {
               ...productsList.map(p => ({ value: p.id?.toString(), label: p.nameEn || p.sku || 'Unknown' }))
             ]}
             value={filters.product}
-            onChange={(e) => {
-              setFilters(prev => ({ ...prev, product: e.target.value }))
-              // AGGRESSIVE debounce - wait 3 seconds before fetching
-              if (!isFetchingRef.current) {
-                setTimeout(() => {
-                  if (!isFetchingRef.current) {
-                    fetchReportData(true)
-                  }
-                }, 3000) // 3 second delay (increased from 500ms)
-              }
-            }}
+            onChange={(e) => setFilters(prev => ({ ...prev, product: e.target.value }))}
           />
           <Select
             label="Customer"
@@ -1028,17 +1079,7 @@ const ReportsPage = () => {
               ...customersList.map(c => ({ value: c.id?.toString(), label: c.name || 'Unknown' }))
             ]}
             value={filters.customer}
-            onChange={(e) => {
-              setFilters(prev => ({ ...prev, customer: e.target.value }))
-              // AGGRESSIVE debounce - wait 3 seconds before fetching
-              if (!isFetchingRef.current) {
-                setTimeout(() => {
-                  if (!isFetchingRef.current) {
-                    fetchReportData(true)
-                  }
-                }, 3000) // 3 second delay (increased from 500ms)
-              }
-            }}
+            onChange={(e) => setFilters(prev => ({ ...prev, customer: e.target.value }))}
           />
           {/* Status filter for Sales Report */}
           {activeTab === 'sales' && (
@@ -1051,18 +1092,18 @@ const ReportsPage = () => {
                 { value: 'Partial', label: 'Partial' }
               ]}
               value={filters.status}
-              onChange={(e) => {
-                setFilters(prev => ({ ...prev, status: e.target.value }))
-                if (!isFetchingRef.current) {
-                  setTimeout(() => {
-                    if (!isFetchingRef.current) {
-                      fetchReportData(true)
-                    }
-                  }, 3000)
-                }
-              }}
+              onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
             />
           )}
+          <div className="flex items-end">
+            <button
+              onClick={handleApplyFilters}
+              className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 flex items-center gap-2"
+            >
+              <Filter className="h-4 w-4" />
+              Apply Filters
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1160,7 +1201,7 @@ const ReportsPage = () => {
                         <XAxis dataKey="date" axisLine={false} tickLine={false} />
                         <YAxis axisLine={false} tickLine={false} />
                         <Tooltip formatter={(value) => formatCurrency(value)} />
-                        <Line type="monotone" dataKey="amount" stroke="#10B981" strokeWidth={2} />
+                        <Line type="linear" dataKey="amount" stroke="#10B981" strokeWidth={2} />
                       </LineChart>
                     </ResponsiveContainer>
                   ) : (
@@ -1527,6 +1568,194 @@ const ReportsPage = () => {
             </div>
           )}
 
+          {/* Branch Report Tab */}
+          {activeTab === 'branch' && (
+            <div className="space-y-6">
+              {reportData.branchComparison?.length > 0 ? (
+                <>
+                  {reportData.branchComparison[0] && (
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 rounded-xl p-6 border-2 border-amber-200">
+                      <p className="text-sm font-medium text-amber-700">🏆 Top Branch</p>
+                      <p className="text-xl font-bold text-amber-900 mt-1">{reportData.branchComparison[0].branchName}</p>
+                      <p className="text-2xl font-bold text-amber-800 mt-2">{formatCurrency(reportData.branchComparison[0].totalSales || 0)}</p>
+                      {reportData.branchComparison[0].growthPercent != null && (
+                        <span className={`inline-flex items-center mt-2 text-sm font-medium ${(reportData.branchComparison[0].growthPercent || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {(reportData.branchComparison[0].growthPercent || 0) >= 0 ? '↑' : '↓'} {Math.abs(reportData.branchComparison[0].growthPercent || 0).toFixed(1)}% vs previous period
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase w-8" />
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rank</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Branch</th>
+                            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Sales</th>
+                            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Expenses</th>
+                            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Profit</th>
+                            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Growth</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {reportData.branchComparison.map((row, idx) => {
+                            const routes = row.routes || []
+                            const hasRoutes = routes.length > 0
+                            const isExpanded = expandedBranchId === row.branchId
+                            return (
+                              <React.Fragment key={row.branchId}>
+                                <tr className="hover:bg-blue-50">
+                                  <td className="px-2 py-3">
+                                    {hasRoutes ? (
+                                      <button type="button" onClick={() => setExpandedBranchId(isExpanded ? null : row.branchId)} className="p-0.5 cursor-pointer">
+                                        {isExpanded ? <ChevronDown className="h-4 w-4 text-gray-500" /> : <ChevronRight className="h-4 w-4 text-gray-500" />}
+                                      </button>
+                                    ) : <span className="w-4 inline-block" />}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm font-medium text-gray-900">#{idx + 1}</td>
+                                  <td
+                                    className="px-4 py-3 text-sm font-medium text-blue-600 cursor-pointer hover:underline"
+                                    onClick={() => navigate(`/branches/${row.branchId}?from=${dateRange.from}&to=${dateRange.to}`)}
+                                  >
+                                    {row.branchName}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-right text-gray-900">{formatCurrency(row.totalSales || 0)}</td>
+                                  <td className="px-4 py-3 text-sm text-right text-red-600">{formatCurrency(row.totalExpenses || 0)}</td>
+                                  <td className={`px-4 py-3 text-sm text-right font-medium ${(row.profit || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                    {formatCurrency(row.profit || 0)}
+                                  </td>
+                                  <td className="px-4 py-3 text-right">
+                                    {row.growthPercent != null ? (
+                                      <span className={row.growthPercent >= 0 ? 'text-green-600' : 'text-red-600'}>
+                                        {row.growthPercent >= 0 ? '↑' : '↓'} {Math.abs(row.growthPercent).toFixed(1)}%
+                                      </span>
+                                    ) : (
+                                      <span className="text-gray-400">—</span>
+                                    )}
+                                  </td>
+                                </tr>
+                                {isExpanded && hasRoutes && routes.map((rt) => (
+                                  <tr
+                                    key={rt.routeId}
+                                    onClick={() => navigate(`/routes/${rt.routeId}?from=${dateRange.from}&to=${dateRange.to}`)}
+                                    className="bg-gray-50 hover:bg-blue-50/50 cursor-pointer"
+                                  >
+                                    <td className="px-2 py-2" />
+                                    <td className="px-4 py-2 text-sm text-gray-500" />
+                                    <td className="px-4 py-2 text-sm text-gray-700 pl-8">↳ {rt.routeName || rt.name}</td>
+                                    <td className="px-4 py-2 text-sm text-right text-gray-700">{formatCurrency(rt.totalSales || 0)}</td>
+                                    <td className="px-4 py-2 text-sm text-right text-red-600">{formatCurrency(rt.totalExpenses || 0)}</td>
+                                    <td className={`px-4 py-2 text-sm text-right font-medium ${(rt.profit || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                      {formatCurrency(rt.profit || 0)}
+                                    </td>
+                                    <td className="px-4 py-2" />
+                                  </tr>
+                                ))}
+                              </React.Fragment>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div className="bg-white border border-gray-200 rounded-lg p-6">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4">Branch Comparison Chart</h3>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={reportData.branchComparison.map(b => ({ name: b.branchName, sales: Number(b.totalSales || 0), expenses: Number(b.totalExpenses || 0), profit: Number(b.profit || 0) }))} margin={{ top: 20, right: 30, left: 20, bottom: 80 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" angle={-45} textAnchor="end" height={80} />
+                        <YAxis tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+                        <Tooltip formatter={(v) => formatCurrency(v)} />
+                        <Legend />
+                        <Bar dataKey="sales" name="Sales" fill="#3B82F6" />
+                        <Bar dataKey="expenses" name="Expenses" fill="#EF4444" />
+                        <Bar dataKey="profit" name="Profit" fill="#10B981" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
+              ) : (
+                <div className="bg-white border border-gray-200 rounded-lg p-12 text-center text-gray-500">
+                  {loading ? 'Loading branch report...' : 'No branches found or no data for the selected period.'}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Customer Aging Tab */}
+          {activeTab === 'aging' && (
+            <div className="space-y-6">
+              {reportData.agingReport ? (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                    <div className="bg-green-50 rounded-lg p-4 border border-green-200">
+                      <p className="text-xs font-medium text-green-700">0-30 Days</p>
+                      <p className="text-lg font-bold text-green-900">{formatCurrency(reportData.agingReport.bucket0_30?.total || 0)}</p>
+                      <p className="text-xs text-green-600">{reportData.agingReport.bucket0_30?.count || 0} invoices</p>
+                    </div>
+                    <div className="bg-yellow-50 rounded-lg p-4 border border-yellow-200">
+                      <p className="text-xs font-medium text-yellow-700">31-60 Days</p>
+                      <p className="text-lg font-bold text-yellow-900">{formatCurrency(reportData.agingReport.bucket31_60?.total || 0)}</p>
+                      <p className="text-xs text-yellow-600">{reportData.agingReport.bucket31_60?.count || 0} invoices</p>
+                    </div>
+                    <div className="bg-orange-50 rounded-lg p-4 border border-orange-200">
+                      <p className="text-xs font-medium text-orange-700">61-90 Days</p>
+                      <p className="text-lg font-bold text-orange-900">{formatCurrency(reportData.agingReport.bucket61_90?.total || 0)}</p>
+                      <p className="text-xs text-orange-600">{reportData.agingReport.bucket61_90?.count || 0} invoices</p>
+                    </div>
+                    <div className="bg-red-50 rounded-lg p-4 border border-red-200">
+                      <p className="text-xs font-medium text-red-700">90+ Days</p>
+                      <p className="text-lg font-bold text-red-900">{formatCurrency(reportData.agingReport.bucket90Plus?.total || 0)}</p>
+                      <p className="text-xs text-red-600">{reportData.agingReport.bucket90Plus?.count || 0} invoices</p>
+                    </div>
+                    <div className="bg-neutral-100 rounded-lg p-4 border border-neutral-200">
+                      <p className="text-xs font-medium text-neutral-600">Total Outstanding</p>
+                      <p className="text-lg font-bold text-neutral-900">{formatCurrency(reportData.agingReport.totalOutstanding || 0)}</p>
+                    </div>
+                  </div>
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <h3 className="px-4 py-3 bg-gray-50 font-medium">Invoice Details</h3>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Invoice</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                            <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Balance</th>
+                            <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Days Overdue</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {(reportData.agingReport.invoices || []).map((inv) => (
+                            <tr key={inv.id}>
+                              <td className="px-4 py-2 text-sm font-medium">{inv.invoiceNo || inv.invoice_no}</td>
+                              <td className="px-4 py-2 text-sm">{inv.customerName || inv.customer_name || '—'}</td>
+                              <td className="px-4 py-2 text-sm">{inv.invoiceDate ? new Date(inv.invoiceDate).toLocaleDateString() : '—'}</td>
+                              <td className="px-4 py-2 text-sm text-right font-medium">{formatCurrency(inv.balanceAmount ?? inv.balance_amount ?? 0)}</td>
+                              <td className={`px-4 py-2 text-sm text-right ${(inv.daysOverdue ?? inv.days_overdue ?? 0) > 90 ? 'text-red-600 font-medium' : ''}`}>
+                                {inv.daysOverdue ?? inv.days_overdue ?? 0}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {(!reportData.agingReport.invoices || reportData.agingReport.invoices.length === 0) && (
+                      <p className="px-4 py-8 text-center text-gray-500">No outstanding invoices</p>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="bg-white border border-gray-200 rounded-lg p-12 text-center text-gray-500">
+                  {loading ? 'Loading aging report...' : 'No aging data available.'}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Profit & Loss Tab */}
           {activeTab === 'profit-loss' && (
             <div className="space-y-6">
@@ -1578,8 +1807,9 @@ const ReportsPage = () => {
                             : '0.00')}%
                         </p>
                       </div>
-                      <TrendingUp className={`h-16 w-16 ${(reportData.profitLoss.netProfit || 0) >= 0 ? 'text-green-600' : 'text-red-600 rotate-180'
-                        }`} />
+                      {(reportData.profitLoss.netProfit || 0) >= 0
+                        ? <TrendingUp className="h-16 w-16 text-green-600" />
+                        : <TrendingDown className="h-16 w-16 text-red-600" />}
                     </div>
                   </div>
 
@@ -1613,9 +1843,9 @@ const ReportsPage = () => {
                             }}
                           />
                           <Legend />
-                          <Line type="monotone" dataKey="profit" stroke="#10B981" strokeWidth={2} name="Profit" />
-                          <Line type="monotone" dataKey="sales" stroke="#3B82F6" strokeWidth={2} name="Sales" />
-                          <Line type="monotone" dataKey="expenses" stroke="#EF4444" strokeWidth={2} name="Expenses" />
+                          <Line type="linear" dataKey="profit" stroke="#10B981" strokeWidth={2} name="Profit" />
+                          <Line type="linear" dataKey="sales" stroke="#3B82F6" strokeWidth={2} name="Sales" />
+                          <Line type="linear" dataKey="expenses" stroke="#EF4444" strokeWidth={2} name="Expenses" />
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
@@ -1698,7 +1928,7 @@ const ReportsPage = () => {
                       } catch (error) {
                         console.error('Failed to export PDF:', error)
                         toast.dismiss()
-                        toast.error(error.message || 'Failed to export PDF')
+                        if (!error?._handledByInterceptor) toast.error(error.message || 'Failed to export PDF')
                       }
                     }}
                     className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2 transition-colors"
@@ -1712,7 +1942,7 @@ const ReportsPage = () => {
                 {reportData.outstandingBills && reportData.outstandingBills.length > 0 ? (
                   <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
+                      <thead className="bg-gray-50 sticky top-0 z-10">
                         <tr>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Invoice No</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Customer</th>
@@ -1755,16 +1985,22 @@ const ReportsPage = () => {
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                              {bill.daysOverdue > 0 ? (
-                                <span className={`font-medium ${bill.daysOverdue > 90 ? 'text-red-600' :
-                                  bill.daysOverdue > 60 ? 'text-orange-600' :
-                                    'text-yellow-600'
-                                  }`}>
-                                  {bill.daysOverdue} days
-                                </span>
-                              ) : (
-                                <span className="text-gray-400">-</span>
-                              )}
+                              {(() => {
+                                const dueDate = bill.dueDate ? new Date(bill.dueDate) : (bill.planDate ? new Date(bill.planDate) : null)
+                                const daysOverdue = bill.daysOverdue ?? (dueDate
+                                  ? Math.max(0, Math.floor((Date.now() - dueDate.getTime()) / 86400000))
+                                  : 0)
+                                return daysOverdue > 0 ? (
+                                  <span className={`font-medium ${daysOverdue > 90 ? 'text-red-600' :
+                                    daysOverdue > 60 ? 'text-orange-600' :
+                                      'text-yellow-600'
+                                    }`}>
+                                    {daysOverdue} days
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-400">-</span>
+                                )
+                              })()}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-center text-sm">
                               <button
@@ -1808,6 +2044,73 @@ const ReportsPage = () => {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Staff Performance Tab */}
+          {activeTab === 'staff' && (
+            <div className="space-y-6">
+              <h3 className="text-lg font-semibold text-gray-900">Staff Performance Report</h3>
+              <p className="text-sm text-gray-600">Sales and collection metrics per staff member for the selected date range</p>
+              {reportData.staffReport && reportData.staffReport.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50 sticky top-0">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Staff Name</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Assigned Routes</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">Invoices</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">Total Billed</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">Collected</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">Collection Rate</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">Avg Days to Pay</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {reportData.staffReport.map((staff, idx) => (
+                        <tr key={staff.userId} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                            {staff.userName}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate" title={staff.assignedRoutes}>
+                            {staff.assignedRoutes}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                            {staff.invoicesCreated}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                            {formatCurrency(staff.totalBilled)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-green-600">
+                            {formatCurrency(staff.cashCollected)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                            <span className={staff.collectionRatePercent >= 80 ? 'text-green-600 font-medium' : staff.collectionRatePercent >= 50 ? 'text-yellow-600' : 'text-red-600'}>
+                              {staff.collectionRatePercent}%
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-600">
+                            {staff.avgDaysToPay > 0 ? `${staff.avgDaysToPay} days` : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {reportData.staffReport.length > 0 && (
+                    <div className="mt-3 flex items-center justify-between text-sm text-gray-500">
+                      <span>Best Collector: {reportData.staffReport.reduce((best, s) =>
+                        (s.totalBilled > 0 && (s.collectionRatePercent > (best?.collectionRatePercent ?? -1))) ? s : best
+                      , reportData.staffReport[0] || null)?.userName ?? '-'}</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                  <Users className="h-12 w-12 mb-2 text-gray-400" />
+                  <p>No staff performance data for this period</p>
+                  <p className="text-sm mt-1">Add Staff users and assign them to routes to see metrics</p>
+                </div>
+              )}
             </div>
           )}
 

@@ -21,16 +21,16 @@ export function useAutoRefresh(fetchFunction, intervalMs = 30000, dependencies =
     fetchRef.current = fetchFunction
   }, [fetchFunction])
 
-  // Set up auto-refresh
+  // Set up auto-refresh — only poll when tab is visible
   useEffect(() => {
     if (!enabled) return
 
     // Initial fetch
     fetchRef.current()
 
-    // Set up interval
+    // Set up interval — skip fetch when tab is hidden
     intervalRef.current = setInterval(() => {
-      fetchRef.current()
+      if (document.visibilityState === 'visible') fetchRef.current()
     }, intervalMs)
 
     // Cleanup

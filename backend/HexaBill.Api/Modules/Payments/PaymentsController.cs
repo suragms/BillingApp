@@ -26,6 +26,41 @@ namespace HexaBill.Api.Modules.Payments
             _paymentService = paymentService;
         }
 
+        [HttpGet("duplicate-check")]
+        public async Task<ActionResult<ApiResponse<object>>> CheckDuplicatePayment(
+            [FromQuery] int customerId,
+            [FromQuery] decimal amount,
+            [FromQuery] string paymentDate)
+        {
+            try
+            {
+                if (customerId <= 0 || amount <= 0 || string.IsNullOrWhiteSpace(paymentDate))
+                {
+                    return Ok(new ApiResponse<object> { Success = true, Data = new { hasDuplicate = false } });
+                }
+                if (!DateTime.TryParse(paymentDate, out var date))
+                {
+                    return Ok(new ApiResponse<object> { Success = true, Data = new { hasDuplicate = false } });
+                }
+                var tenantId = CurrentTenantId;
+                var hasDuplicate = await _paymentService.CheckDuplicatePaymentAsync(tenantId, customerId, amount, date);
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Data = new { hasDuplicate }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object>
+                {
+                    Success = false,
+                    Message = "Error checking for duplicate payment",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
         [HttpGet]
         public async Task<ActionResult<ApiResponse<PagedResponse<PaymentDto>>>> GetPayments(
             [FromQuery] int page = 1,

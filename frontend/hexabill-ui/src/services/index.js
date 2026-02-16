@@ -376,6 +376,14 @@ export const customersAPI = {
 }
 
 export const paymentsAPI = {
+  checkDuplicatePayment: async (customerId, amount, paymentDate) => {
+    if (!customerId || !amount || !paymentDate) return { success: true, data: { hasDuplicate: false } }
+    const response = await api.get('/payments/duplicate-check', {
+      params: { customerId, amount, paymentDate }
+    })
+    return response.data
+  },
+
   getPayments: async (params = {}) => {
     const response = await api.get('/payments', { params })
     return response.data
@@ -525,6 +533,15 @@ export const reportsAPI = {
     return response.data
   },
 
+  getBranchComparison: async (params = {}) => {
+    const response = await api.get('/reports/branch-comparison', { params })
+    return response.data
+  },
+  getStaffPerformance: async (params = {}) => {
+    const response = await api.get('/reports/staff-performance', { params })
+    return response.data
+  },
+
   getChequeReport: async () => {
     const response = await api.get('/reports/cheque')
     return response.data
@@ -583,6 +600,13 @@ export const settingsAPI = {
   },
   clearData: async () => {
     const response = await api.post('/settings/clear-data')
+    return response.data
+  }
+}
+
+export const usersAPI = {
+  getMyAssignedRoutes: async () => {
+    const response = await api.get('/users/me/assigned-routes')
     return response.data
   }
 }
@@ -725,6 +749,10 @@ export const alertsAPI = {
   },
   markAllAsRead: async () => {
     const response = await api.post('/alerts/mark-all-read')
+    return response.data
+  },
+  markAllAsResolved: async () => {
+    const response = await api.post('/alerts/resolve-all')
     return response.data
   },
   clearResolved: async () => {
@@ -983,6 +1011,11 @@ export const superAdminAPI = {
     return response.data
   },
 
+  getTenantActivity: async () => {
+    const response = await api.get('/superadmin/tenant-activity')
+    return response.data
+  },
+
   getTenants: async (params = {}) => {
     const response = await api.get('/superadmin/tenant', { params })
     return response.data
@@ -1033,6 +1066,21 @@ export const superAdminAPI = {
     return response.data
   },
 
+  getTenantHealth: async (id) => {
+    const response = await api.get(`/superadmin/tenant/${id}/health`)
+    return response.data
+  },
+
+  getTenantLimits: async (id) => {
+    const response = await api.get(`/superadmin/tenant/${id}/limits`)
+    return response.data
+  },
+
+  updateTenantLimits: async (id, data) => {
+    const response = await api.put(`/superadmin/tenant/${id}/limits`, data)
+    return response.data
+  },
+
   deleteTenant: async (id) => {
     const response = await api.delete(`/superadmin/tenant/${id}`)
     return response.data
@@ -1055,6 +1103,11 @@ export const superAdminAPI = {
 
   resetTenantUserPassword: async (tenantId, userId, passwordData) => {
     const response = await api.put(`/superadmin/tenant/${tenantId}/users/${userId}/reset-password`, passwordData)
+    return response.data
+  },
+
+  forceLogoutTenantUser: async (tenantId, userId) => {
+    const response = await api.post(`/superadmin/tenant/${tenantId}/users/${userId}/force-logout`)
     return response.data
   },
 
@@ -1081,8 +1134,28 @@ export const superAdminAPI = {
     return response.data
   },
 
+  getPlatformSettings: async () => {
+    const response = await api.get('/superadmin/platform-settings')
+    return response.data
+  },
+
+  updatePlatformSettings: async (data) => {
+    const response = await api.put('/superadmin/platform-settings', data)
+    return response.data
+  },
+
   applyMigrations: async () => {
     const response = await api.post('/migrate')
+    return response.data
+  },
+
+  impersonateEnter: async (tenantId) => {
+    const response = await api.post('/superadmin/tenant/impersonate/enter', { tenantId })
+    return response.data
+  },
+
+  impersonateExit: async (tenantId, tenantName) => {
+    const response = await api.post('/superadmin/tenant/impersonate/exit', { tenantId, tenantName })
     return response.data
   }
 }
@@ -1135,6 +1208,11 @@ export const routesAPI = {
     const response = await api.get(`/routes/${id}/summary`, { params })
     return response.data
   },
+  getRouteCollectionSheet: async (routeId, date = null) => {
+    const params = date ? { date } : {}
+    const response = await api.get(`/routes/${routeId}/collection-sheet`, { params })
+    return response.data
+  },
   createRoute: async (data) => {
     const response = await api.post('/routes', data)
     return response.data
@@ -1172,6 +1250,10 @@ export const routesAPI = {
   },
   createRouteExpense: async (routeId, data) => {
     const response = await api.post(`/routes/${routeId}/expenses`, data)
+    return response.data
+  },
+  updateRouteExpense: async (routeId, expenseId, data) => {
+    const response = await api.put(`/routes/${routeId}/expenses/${expenseId}`, data)
     return response.data
   },
   deleteRouteExpense: async (routeId, expenseId) => {

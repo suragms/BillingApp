@@ -133,6 +133,22 @@ namespace HexaBill.Api.Modules.Billing
                 }
 
                 var tenantId = CurrentTenantId; // CRITICAL: Get from JWT
+                var role = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+
+                // RISK-4: Staff route validation — reject if Staff submits routeId they are not assigned to
+                if (tenantId > 0 && string.Equals(role, "Staff", StringComparison.OrdinalIgnoreCase) && request.RouteId.HasValue)
+                {
+                    var allowedRouteIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userId, tenantId, role);
+                    if (allowedRouteIds != null && (allowedRouteIds.Length == 0 || !allowedRouteIds.Contains(request.RouteId.Value)))
+                    {
+                        return StatusCode(403, new ApiResponse<SaleDto>
+                        {
+                            Success = false,
+                            Message = "You are not assigned to this route. Invoice creation is restricted to your assigned routes."
+                        });
+                    }
+                }
+
                 var result = await _saleService.CreateSaleAsync(request, userId, tenantId);
                 return CreatedAtAction(nameof(GetSale), new { id = result.Id }, new ApiResponse<SaleDto>
                 {

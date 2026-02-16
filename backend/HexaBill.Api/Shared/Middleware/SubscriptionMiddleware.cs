@@ -88,6 +88,7 @@ namespace HexaBill.Api.Shared.Middleware
 
             // Check if subscription is expired or inactive
             bool isExpired = false;
+            DateTime? expiryDate = null;
             string? reason = null;
 
             // Check subscription status
@@ -96,6 +97,7 @@ namespace HexaBill.Api.Shared.Middleware
                 subscription.Status == SubscriptionStatus.Suspended)
             {
                 isExpired = true;
+                expiryDate = subscription.ExpiresAt ?? subscription.CancelledAt ?? subscription.TrialEndDate ?? DateTime.UtcNow;
                 reason = $"Subscription status is {subscription.Status}";
             }
             // Check if trial expired
@@ -104,6 +106,7 @@ namespace HexaBill.Api.Shared.Middleware
                 if (DateTime.UtcNow > subscription.TrialEndDate.Value)
                 {
                     isExpired = true;
+                    expiryDate = subscription.TrialEndDate.Value;
                     reason = "Trial period has expired";
                 }
             }
@@ -111,20 +114,50 @@ namespace HexaBill.Api.Shared.Middleware
             else if (subscription.ExpiresAt.HasValue && DateTime.UtcNow > subscription.ExpiresAt.Value)
             {
                 isExpired = true;
+                expiryDate = subscription.ExpiresAt.Value;
                 reason = "Subscription expiration date has passed";
             }
             // Check if subscription is PastDue
             else if (subscription.Status == SubscriptionStatus.PastDue)
             {
                 isExpired = true;
+                expiryDate = subscription.ExpiresAt ?? DateTime.UtcNow;
                 reason = "Subscription payment is past due";
             }
 
-            // If subscription is expired or inactive, block ALL requests
+            // If subscription is expired or inactive
             if (isExpired)
             {
+                if (!expiryDate.HasValue)
+                    expiryDate = DateTime.UtcNow.AddDays(-1); // No date = block immediately
+
+                var graceDays = 5;
+                var graceSetting = await dbContext.Settings
+                    .Where(s => s.OwnerId == 0 && s.Key == "PLATFORM_SUBSCRIPTION_GRACE_DAYS")
+                    .Select(s => s.Value)
+                    .FirstOrDefaultAsync();
+                if (int.TryParse(graceSetting, out var gd) && gd >= 0 && gd <= 30)
+                    graceDays = gd;
+
+                var graceEndDate = expiryDate.Value.AddDays(graceDays);
+                var now = DateTime.UtcNow;
+
+                if (now < graceEndDate)
+                {
+                    // GRACE PERIOD: Allow full access, add headers so frontend can show warning banner
+                    context.Response.OnStarting(() =>
+                    {
+                        context.Response.Headers["X-Subscription-Grace-Period"] = "true";
+                        context.Response.Headers["X-Subscription-Grace-End"] = graceEndDate.ToString("O");
+                        context.Response.Headers["X-Subscription-Expired-At"] = expiryDate.Value.ToString("O");
+                        return Task.CompletedTask;
+                    });
+                    await _next(context);
+                    return;
+                }
+
                 _logger.LogWarning(
-                    "Blocking request for tenant {TenantId} - Subscription expired. Reason: {Reason}. Path: {Path}",
+                    "Blocking request for tenant {TenantId} - Subscription expired (grace period ended). Reason: {Reason}. Path: {Path}",
                     tenantId.Value, reason, path);
 
                 context.Response.StatusCode = 402; // Payment Required

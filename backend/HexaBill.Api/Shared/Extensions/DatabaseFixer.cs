@@ -74,6 +74,7 @@ namespace HexaBill.Api.Shared.Extensions
                     ("ALTER TABLE Customers ADD COLUMN TotalPayments decimal(18,2) DEFAULT 0", "Customers", "TotalPayments"),
                     ("ALTER TABLE Customers ADD COLUMN PendingBalance decimal(18,2) DEFAULT 0", "Customers", "PendingBalance"),
                     ("ALTER TABLE Customers ADD COLUMN RowVersion BLOB", "Customers", "RowVersion"),
+                    ("ALTER TABLE Customers ADD COLUMN PaymentTerms TEXT NULL", "Customers", "PaymentTerms"),
                     // Note: CreatedAt and UpdatedAt should already exist from InitialCreate, but add if missing
                     // SQLite doesn't support computed defaults in ALTER TABLE, so we add without default and update after
                     ("ALTER TABLE Customers ADD COLUMN CreatedAt TEXT", "Customers", "CreatedAt"),

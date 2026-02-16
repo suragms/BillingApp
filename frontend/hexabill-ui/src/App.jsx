@@ -42,6 +42,7 @@ import Layout from './components/Layout'
 import SuperAdminLayout from './components/SuperAdminLayout'
 import ConnectionStatus from './components/ConnectionStatus'
 import ErrorBoundary from './components/ErrorBoundary'
+import { MaintenanceOverlay } from './components/MaintenanceOverlay'
 
 function App() {
   const { user, loading, impersonatedTenantId } = useAuth()
@@ -63,6 +64,7 @@ function App() {
   if (isPublicRoute) {
     return (
       <ErrorBoundary>
+        <MaintenanceOverlay />
         <Routes>
           <Route path="/signup" element={<SignupPage />} />
           <Route path="/login" element={<Login />} />
@@ -91,6 +93,7 @@ function App() {
 
   return (
     <ErrorBoundary>
+      <MaintenanceOverlay />
       <ConnectionStatus />
       <Routes>
         <Route path="/" element={<Navigate to={getRootPath()} replace />} />

@@ -5,26 +5,41 @@ Date: 2025-11-11
 */
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Shared.Validation;
 using HexaBill.Api.Models;
 using HexaBill.Api.Modules.Customers;
+using HexaBill.Api.Shared.Extensions;
+using HexaBill.Api.Data;
 
 namespace HexaBill.Api.Shared.Validation
 {
     [ApiController]
     [Route("api/[controller]")]
     [Authorize(Roles = "Admin")]
-    public class ValidationController : ControllerBase
+    public class ValidationController : TenantScopedController
     {
         private readonly IBalanceService _balanceService;
+        private readonly AppDbContext _context;
         private readonly ILogger<ValidationController> _logger;
 
         public ValidationController(
             IBalanceService balanceService,
+            AppDbContext context,
             ILogger<ValidationController> logger)
         {
             _balanceService = balanceService;
+            _context = context;
             _logger = logger;
+        }
+
+        /// <summary>Ensure customer belongs to current tenant (or user is Super Admin).</summary>
+        private async Task<bool> CanAccessCustomerAsync(int customerId)
+        {
+            if (IsSystemAdmin) return true;
+            return await _context.Customers
+                .Where(c => c.Id == customerId && c.TenantId == CurrentTenantId)
+                .AnyAsync();
         }
 
         /// <summary>
@@ -35,6 +50,8 @@ namespace HexaBill.Api.Shared.Validation
         {
             try
             {
+                if (!await CanAccessCustomerAsync(customerId))
+                    return NotFound(new ApiResponse<BalanceValidationResult> { Success = false, Message = "Customer not found" });
                 var result = await _balanceService.ValidateCustomerBalanceAsync(customerId);
                 return Ok(new ApiResponse<BalanceValidationResult>
                 {
@@ -63,7 +80,9 @@ namespace HexaBill.Api.Shared.Validation
         {
             try
             {
-                var mismatches = await _balanceService.DetectAllBalanceMismatchesAsync();
+                // CRITICAL: Filter by tenant for non-Super Admin to prevent cross-tenant data leakage
+                var tenantId = IsSystemAdmin ? null : (int?)CurrentTenantId;
+                var mismatches = await _balanceService.DetectAllBalanceMismatchesAsync(tenantId);
                 return Ok(new ApiResponse<List<BalanceMismatch>>
                 {
                     Success = true,
@@ -91,6 +110,8 @@ namespace HexaBill.Api.Shared.Validation
         {
             try
             {
+                if (!await CanAccessCustomerAsync(customerId))
+                    return NotFound(new ApiResponse<bool> { Success = false, Message = "Customer not found" });
                 var success = await _balanceService.FixBalanceMismatchAsync(customerId);
                 return Ok(new ApiResponse<bool>
                 {
@@ -119,7 +140,8 @@ namespace HexaBill.Api.Shared.Validation
         {
             try
             {
-                var mismatches = await _balanceService.DetectAllBalanceMismatchesAsync();
+                var tenantId = IsSystemAdmin ? null : (int?)CurrentTenantId;
+                var mismatches = await _balanceService.DetectAllBalanceMismatchesAsync(tenantId);
                 var results = new Dictionary<string, object>();
                 var successCount = 0;
                 var failCount = 0;
@@ -162,6 +184,8 @@ namespace HexaBill.Api.Shared.Validation
         {
             try
             {
+                if (!await CanAccessCustomerAsync(customerId))
+                    return NotFound(new ApiResponse<bool> { Success = false, Message = "Customer not found" });
                 await _balanceService.RecalculateCustomerBalanceAsync(customerId);
                 return Ok(new ApiResponse<bool>
                 {

@@ -85,7 +85,7 @@ const ExpensesPage = () => {
       }
     } catch (error) {
       console.error('Failed to load categories:', error)
-      toast.error('Failed to load expense categories')
+      if (!error?._handledByInterceptor) toast.error('Failed to load expense categories')
       setCategories([])
     }
   }, [])
@@ -121,7 +121,7 @@ const ExpensesPage = () => {
         } catch (error) {
           console.error('Error loading aggregated expenses:', error)
           const errorMessage = error?.response?.data?.message || error?.message || 'Failed to load aggregated expenses'
-          toast.error(errorMessage)
+          if (!error?._handledByInterceptor) toast.error(errorMessage)
           setAggregatedData([])
           // Don't fail the entire fetch if aggregated view fails
         }
@@ -159,7 +159,7 @@ const ExpensesPage = () => {
       }
     } catch (error) {
       console.error('Error loading expenses:', error)
-      toast.error(error?.response?.data?.message || 'Failed to load expenses')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load expenses')
       setExpenses([])
       setFilteredExpenses([])
       setExpenseSummary(null)
@@ -203,9 +203,9 @@ const ExpensesPage = () => {
         })
 
         if (response?.success) {
-          toast.success('Expense updated successfully!')
+          toast.success('Expense updated successfully!', { id: 'expense-update', duration: 4000 })
         } else {
-          toast.error(response?.message || 'Failed to update expense')
+          toast.error(response?.message || 'Failed to update expense', { id: 'expense-update' })
           return
         }
       } else {
@@ -217,9 +217,9 @@ const ExpensesPage = () => {
         })
 
         if (response?.success) {
-          toast.success('Expense added successfully!')
+          toast.success('Expense added successfully!', { id: 'expense-add', duration: 4000 })
         } else {
-          toast.error(response?.message || 'Failed to create expense')
+          toast.error(response?.message || 'Failed to create expense', { id: 'expense-add' })
           return
         }
       }
@@ -232,7 +232,7 @@ const ExpensesPage = () => {
       fetchExpenses()
     } catch (error) {
       console.error('Error saving expense:', error)
-      toast.error(error?.response?.data?.message || 'Failed to save expense')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to save expense')
     }
   }
 
@@ -260,10 +260,10 @@ const ExpensesPage = () => {
           const response = await expensesAPI.deleteExpense(expenseId)
 
           if (response?.success) {
-            toast.success('Expense deleted successfully!')
+            toast.success('Expense deleted successfully!', { id: 'expense-delete', duration: 4000 })
             fetchExpenses()
           } else {
-            toast.error(response?.message || 'Failed to delete expense')
+            toast.error(response?.message || 'Failed to delete expense', { id: 'expense-delete' })
           }
         } catch (error) {
           console.error('Error deleting expense:', error)
@@ -308,7 +308,7 @@ const ExpensesPage = () => {
         colorCode: '#3B82F6'
       })
       if (response?.success) {
-        toast.success('Category created successfully!')
+        toast.success('Category created successfully!', { id: 'category-add', duration: 4000 })
         await fetchCategories()
         setValue('category', response.data.id.toString())
       } else {
@@ -316,7 +316,7 @@ const ExpensesPage = () => {
       }
     } catch (error) {
       console.error('Error creating category:', error)
-      toast.error(error?.response?.data?.message || 'Failed to create category')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to create category')
     } finally {
       setCreatingCategory(false)
     }

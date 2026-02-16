@@ -15,16 +15,21 @@ import {
   MessageCircle,
   Mail,
   Download,
-  CheckCircle
+  CheckCircle,
+  Lock,
+  Bookmark,
+  RotateCcw
 } from 'lucide-react'
-import { productsAPI, salesAPI, customersAPI, branchesAPI, routesAPI } from '../../services'
+import { productsAPI, salesAPI, customersAPI, branchesAPI, routesAPI, usersAPI } from '../../services'
 import { formatCurrency, formatBalance, formatBalanceWithColor } from '../../utils/currency'
 import { useAuth } from '../../hooks/useAuth'
+import { isAdminOrOwner } from '../../utils/roles'
 import { useBranding } from '../../contexts/TenantBrandingContext'
 import toast from 'react-hot-toast'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
+const POS_HELD_KEY = 'hexabill_pos_held'
 
 const PosPage = () => {
   const navigate = useNavigate()
@@ -39,6 +44,7 @@ const PosPage = () => {
   const [selectedCustomer, setSelectedCustomer] = useState(null)
   const [customerSearchTerm, setCustomerSearchTerm] = useState('')
   const [showCustomerSearch, setShowCustomerSearch] = useState(false)
+  const [showQuickCustomerDropdown, setShowQuickCustomerDropdown] = useState(false)
   const [showProductDropdown, setShowProductDropdown] = useState({})
   const [productSearchTerms, setProductSearchTerms] = useState({}) // Search term for each row
   const [paymentMethod, setPaymentMethod] = useState('Cash')
@@ -50,7 +56,6 @@ const PosPage = () => {
   const [loadingProducts, setLoadingProducts] = useState(true)
   const [showInvoiceOptionsModal, setShowInvoiceOptionsModal] = useState(false)
   const [lastCreatedInvoice, setLastCreatedInvoice] = useState(null)
-  const [nextInvoiceNumber, setNextInvoiceNumber] = useState('0001')
   const [isEditMode, setIsEditMode] = useState(false)
   const [editingSaleId, setEditingSaleId] = useState(null)
   const [editingSale, setEditingSale] = useState(null)
@@ -68,6 +73,20 @@ const PosPage = () => {
   const [routes, setRoutes] = useState([])
   const [selectedBranchId, setSelectedBranchId] = useState('')
   const [selectedRouteId, setSelectedRouteId] = useState('')
+
+  // Hold/Resume invoice — saved to localStorage
+  const [heldInvoices, setHeldInvoices] = useState(() => {
+    try {
+      const raw = localStorage.getItem(POS_HELD_KEY)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  })
+  const [showHoldModal, setShowHoldModal] = useState(false)
+  const [showResumeModal, setShowResumeModal] = useState(false)
+  const [holdNameInput, setHoldNameInput] = useState('')
 
   const [dangerModal, setDangerModal] = useState({
     isOpen: false,
@@ -93,7 +112,7 @@ const PosPage = () => {
         setProducts(response.data.items || [])
       }
     } catch (error) {
-      toast.error('Failed to load products')
+      if (!error?._handledByInterceptor) toast.error('Failed to load products')
     } finally {
       setLoadingProducts(false)
     }
@@ -106,54 +125,52 @@ const PosPage = () => {
         setCustomers(response.data.items)
       }
     } catch (error) {
-      toast.error('Failed to load customers')
+      if (!error?._handledByInterceptor) toast.error('Failed to load customers')
     }
   }, [])
 
   const loadBranchesAndRoutes = useCallback(async () => {
     try {
+      const isManagerOrAdmin = user?.role === 'Owner' || user?.role === 'Admin' || user?.role === 'Manager'
+      // RISK-4: Staff use server-side assigned routes (not localStorage) to prevent spoofing
+      let serverAssignedRouteIds = []
+      let serverAssignedBranchIds = []
+      if (!isManagerOrAdmin) {
+        try {
+          const meRes = await usersAPI.getMyAssignedRoutes()
+          if (meRes?.success && meRes?.data) {
+            serverAssignedRouteIds = meRes.data.assignedRouteIds || []
+            serverAssignedBranchIds = meRes.data.assignedBranchIds || []
+          }
+        } catch (_) { /* fallback to localStorage if API fails */ }
+      }
+
       const [bRes, rRes] = await Promise.all([
         branchesAPI.getBranches().catch(() => ({ success: false })),
         routesAPI.getRoutes().catch(() => ({ success: false }))
       ])
 
-      // Filter for non-admin users
-      const isManagerOrAdmin = user?.role === 'Owner' || user?.role === 'Admin' || user?.role === 'Manager'
-
       if (bRes?.success && bRes?.data) {
         let branchList = bRes.data
-        if (!isManagerOrAdmin && user?.branchId) {
-          branchList = branchList.filter(b => b.id === user.branchId)
-          setSelectedBranchId(user.branchId)
+        if (!isManagerOrAdmin && (serverAssignedBranchIds.length > 0 || user?.assignedBranchIds?.length > 0)) {
+          const allowedBranchIds = serverAssignedBranchIds.length > 0 ? serverAssignedBranchIds : (user.assignedBranchIds || [])
+          branchList = branchList.filter(b => allowedBranchIds.includes(b.id))
+          if (branchList.length === 1) setSelectedBranchId(String(branchList[0].id))
         }
         setBranches(branchList)
       }
 
       if (rRes?.success && rRes?.data) {
         let routeList = rRes.data
-        if (!isManagerOrAdmin && user?.routeId) {
-          routeList = routeList.filter(r => r.id === user.routeId)
-          setSelectedRouteId(user.routeId)
+        if (!isManagerOrAdmin && (serverAssignedRouteIds.length > 0 || user?.assignedRouteIds?.length > 0)) {
+          const allowedRouteIds = serverAssignedRouteIds.length > 0 ? serverAssignedRouteIds : (user.assignedRouteIds || [])
+          routeList = routeList.filter(r => allowedRouteIds.includes(r.id))
+          if (routeList.length === 1) setSelectedRouteId(String(routeList[0].id))
         }
         setRoutes(routeList)
       }
     } catch (_) { /* ignore */ }
   }, [user])
-
-  // Load next invoice number when customer is selected
-  const loadNextInvoiceNumber = useCallback(async () => {
-    try {
-      const response = await salesAPI.getNextInvoiceNumber()
-      if (response.success && response.data) {
-        const invoiceNo = response.data.invoiceNo || response.data
-        // Format as 4-digit number if needed
-        const formatted = invoiceNo.length === 1 ? invoiceNo.padStart(4, '0') : invoiceNo
-        setNextInvoiceNumber(formatted)
-      }
-    } catch (error) {
-      console.error('Failed to load invoice number:', error)
-    }
-  }, [])
 
   // Load sale for editing
   const loadSaleForEdit = useCallback(async (saleId) => {
@@ -231,7 +248,7 @@ const PosPage = () => {
           setInvoiceDate(date.toISOString().split('T')[0])
         }
 
-        toast.success(`Invoice ${sale.invoiceNo || saleId} loaded for editing`)
+        toast.success(`Invoice ${sale.invoiceNo || saleId} loaded for editing`, { id: 'invoice-load', duration: 3000 })
       } else {
         toast.error(response.message || 'Failed to load invoice')
         // Clear edit mode if failed
@@ -241,7 +258,7 @@ const PosPage = () => {
       }
     } catch (error) {
       console.error('Failed to load sale for edit:', error)
-      toast.error(error?.response?.data?.message || 'Failed to load invoice for editing')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load invoice for editing')
       setIsEditMode(false)
       setEditingSaleId(null)
       setSearchParams({}) // Clear URL param
@@ -292,6 +309,13 @@ const PosPage = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [loadProducts, loadCustomers, loadBranchesAndRoutes])
+
+  // Persist held invoices to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(POS_HELD_KEY, JSON.stringify(heldInvoices))
+    } catch (_) { /* quota exceeded */ }
+  }, [heldInvoices])
 
   // Check for editId in URL - load sale even if customers aren't loaded yet
   useEffect(() => {
@@ -407,8 +431,7 @@ const PosPage = () => {
         return newTerms
       })
 
-      // Visual feedback for mobile
-      toast.success(`Added ${product.nameEn}`, { duration: 1500, icon: '✓' })
+      // Silent - cart update is visual feedback
     } else {
       // Otherwise, check if product already exists in cart
       const existingItemIndex = cart.findIndex(item => item.productId === product.id)
@@ -425,7 +448,7 @@ const PosPage = () => {
           }
           return item
         }))
-        toast.success(`Updated ${product.nameEn} quantity`, { duration: 1500, icon: '✓' })
+        // Silent - quantity update is visual feedback
       } else {
         // Add new item to cart
         setCart([...cart, {
@@ -438,7 +461,7 @@ const PosPage = () => {
           vatAmount: vatAmount,
           lineTotal: lineTotal
         }])
-        toast.success(`Added ${product.nameEn}`, { duration: 1500, icon: '✓' })
+        // Silent - cart update is visual feedback
       }
 
       // Close all dropdowns
@@ -490,10 +513,7 @@ const PosPage = () => {
   const removeFromCart = (index) => {
     const item = cart[index]
     setCart(cart.filter((_, i) => i !== index))
-    // Visual feedback for removal
-    if (item?.productName) {
-      toast.success(`Removed ${item.productName}`, { duration: 1500 })
-    }
+    // Silent - removal is visual feedback
   }
 
   const calculateTotals = () => {
@@ -523,10 +543,10 @@ const PosPage = () => {
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
-      toast.success('Invoice PDF downloaded')
+      toast.success('Invoice PDF downloaded', { id: 'invoice-pdf-download', duration: 3000 })
     } catch (error) {
       console.error('Failed to download PDF:', error)
-      toast.error('Failed to download PDF')
+      if (!error?._handledByInterceptor) toast.error('Failed to download PDF')
     }
   }
 
@@ -560,9 +580,8 @@ const PosPage = () => {
         pdfBlob = await salesAPI.getInvoicePdf(saleId)
       } catch (apiError) {
         console.error('PDF API Error:', apiError)
-        // If PDF generation fails, show clear error
         toast.dismiss('print-toast')
-        toast.error(apiError.message || 'Failed to generate PDF. Please try again.')
+        if (!apiError?._handledByInterceptor) toast.error(apiError.message || 'Failed to generate PDF. Please try again.')
         return
       }
 
@@ -657,7 +676,7 @@ const PosPage = () => {
         } catch (err) {
           console.error('Print setup error:', err)
           toast.dismiss('print-toast')
-          toast.error('Failed to open print dialog. PDF downloaded instead.')
+          if (!err?._handledByInterceptor) toast.error('Failed to open print dialog. PDF downloaded instead.')
 
           // Fallback: download PDF
           const a = document.createElement('a')
@@ -726,7 +745,7 @@ const PosPage = () => {
         } catch (downloadErr) {
           console.error('Download fallback also failed:', downloadErr)
           toast.dismiss('download-toast')
-          toast.error('Failed to download PDF. Please try again later.')
+          if (!downloadErr?._handledByInterceptor) toast.error('Failed to download PDF. Please try again later.')
         }
       }, 1000)
     }
@@ -759,7 +778,7 @@ const PosPage = () => {
       } catch (apiError) {
         console.error('PDF API Error:', apiError)
         toast.dismiss('whatsapp-share')
-        toast.error(apiError.message || 'Failed to generate PDF. Please try again.')
+        if (!apiError?._handledByInterceptor) toast.error(apiError.message || 'Failed to generate PDF. Please try again.')
         return
       }
 
@@ -820,7 +839,7 @@ const PosPage = () => {
     } catch (error) {
       console.error('WhatsApp share error:', error)
       toast.dismiss('whatsapp-share')
-      toast.error(error.message || 'Failed to share via WhatsApp')
+      if (!error?._handledByInterceptor) toast.error(error.message || 'Failed to share via WhatsApp')
     }
   }
 
@@ -1019,13 +1038,12 @@ const PosPage = () => {
         if (response.success) {
           const invoiceNo = response.data?.invoiceNo
           const saleId = response.data?.id
-          toast.success(`Invoice ${invoiceNo || editingSaleId} updated successfully!`)
+          toast.success(`Invoice ${invoiceNo || editingSaleId} updated successfully!`, { id: 'invoice-update', duration: 4000 })
 
           // Refresh products and customers after update (non-blocking for better UX)
           Promise.all([
             loadProducts(),
             loadCustomers(),
-            loadNextInvoiceNumber()
           ]).catch(err => console.error('Error refreshing data:', err))
 
           // Clear edit mode and URL param
@@ -1092,13 +1110,12 @@ const PosPage = () => {
             return
           }
 
-          toast.success(`Invoice ${invoiceNo || 'saved'} successfully!`)
+          toast.success(invoiceNo ? `Invoice #${invoiceNo} created successfully` : 'Invoice created successfully', { id: 'invoice-save', duration: 5000 })
 
           // Refresh products and customers after billing (non-blocking for better UX)
           Promise.all([
             loadProducts(),
-            loadCustomers(),
-            loadNextInvoiceNumber() // Refresh invoice number for next invoice
+            loadCustomers()
           ]).catch(err => console.error('Error refreshing data:', err))
 
           // Store invoice data and show options modal
@@ -1223,6 +1240,65 @@ const PosPage = () => {
     setInvoiceDate(today.toISOString().split('T')[0])
   }
 
+  const handleHold = () => {
+    const validItems = cart.filter(item => item.productId && (item.qty > 0 || item.qty === ''))
+    if (validItems.length === 0) {
+      toast.error('Add at least one item before holding')
+      return
+    }
+    setHoldNameInput('')
+    setShowHoldModal(true)
+  }
+
+  const handleHoldConfirm = () => {
+    const name = (holdNameInput || 'Held Invoice').trim()
+    const validCart = cart.filter(item => item.productId && (Number(item.qty) > 0) && (Number(item.unitPrice) >= 0))
+    if (validCart.length === 0) {
+      toast.error('No valid items to hold')
+      setShowHoldModal(false)
+      return
+    }
+    const held = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      name,
+      cart: validCart,
+      selectedCustomer: selectedCustomer ? { id: selectedCustomer.id, name: selectedCustomer.name } : null,
+      invoiceDate,
+      notes,
+      discount,
+      discountInput,
+      selectedBranchId,
+      selectedRouteId,
+      createdAt: new Date().toISOString()
+    }
+    setHeldInvoices(prev => [held, ...prev])
+    handleNewInvoice()
+    setShowHoldModal(false)
+    toast.success(`Invoice held as "${name}"`)
+  }
+
+  const handleResume = (held) => {
+    setCart(held.cart || [])
+    const cust = held.selectedCustomer
+    setSelectedCustomer(cust ? customers.find(c => c.id === cust.id) || cust : null)
+    setInvoiceDate(held.invoiceDate || new Date().toISOString().split('T')[0])
+    setNotes(held.notes || '')
+    setDiscount(held.discount ?? 0)
+    setDiscountInput(String(held.discountInput ?? ''))
+    setSelectedBranchId(held.selectedBranchId || '')
+    setSelectedRouteId(held.selectedRouteId || '')
+    setIsEditMode(false)
+    setEditingSaleId(null)
+    setEditingSale(null)
+    setHeldInvoices(prev => prev.filter(h => h.id !== held.id))
+    setShowResumeModal(false)
+    toast.success(`Resumed "${held.name}"`)
+  }
+
+  const handleRemoveHeld = (held) => {
+    setHeldInvoices(prev => prev.filter(h => h.id !== held.id))
+  }
+
   // Disable form inputs while saving or loading a sale for edit (fixes ReferenceError: isFormDisabled is not defined)
   const isFormDisabled = loading || loadingSale
 
@@ -1247,6 +1323,29 @@ const PosPage = () => {
               <span className="truncate text-xs sm:text-sm">{selectedCustomer ? selectedCustomer.name : 'Select Customer'}</span>
             </button>
             <button
+              onClick={handleHold}
+              disabled={isFormDisabled || cart.filter(i => i.productId && (Number(i.qty) > 0)).length === 0}
+              className="px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium bg-amber-600 text-white border-2 border-amber-700 rounded-lg hover:bg-amber-700 transition-colors shadow-md flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+              title="Hold current invoice to resume later"
+            >
+              <Bookmark className="h-3 w-3 sm:h-3.5" />
+              Hold
+            </button>
+            <button
+              onClick={() => setShowResumeModal(true)}
+              disabled={isFormDisabled || heldInvoices.length === 0}
+              className={`px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium rounded-lg transition-colors shadow-md flex-shrink-0 flex items-center gap-1 relative ${heldInvoices.length > 0 ? 'bg-emerald-600 text-white border-2 border-emerald-700 hover:bg-emerald-700' : 'bg-gray-400 text-gray-200 border-2 border-gray-500 cursor-not-allowed'}`}
+              title={heldInvoices.length > 0 ? `${heldInvoices.length} held invoice(s) - click to resume` : 'No held invoices'}
+            >
+              <RotateCcw className="h-3 w-3 sm:h-3.5" />
+              Resume
+              {heldInvoices.length > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] text-[10px] font-bold bg-red-500 text-white rounded-full flex items-center justify-center px-1">
+                  {heldInvoices.length}
+                </span>
+              )}
+            </button>
+            <button
               onClick={handleNewInvoice}
               className="px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium bg-blue-800 text-white border-2 border-blue-900 rounded-lg hover:bg-blue-900 transition-colors shadow-md flex-shrink-0"
             >
@@ -1256,32 +1355,138 @@ const PosPage = () => {
         </div>
       </div>
 
-      {/* Branch / Route context (optional - applied to new invoices) */}
-      {(branches.length > 0 || routes.length > 0) && (
-        <div className="bg-white border-b border-neutral-200 px-3 py-1.5 flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-neutral-500">Context:</span>
-          <select
-            value={selectedBranchId}
-            onChange={(e) => { setSelectedBranchId(e.target.value); setSelectedRouteId('') }}
-            className="border border-neutral-300 rounded px-2 py-1 text-sm bg-white min-w-[100px]"
-            title="Branch for this invoice"
-          >
-            <option value="">No branch</option>
-            {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-          <select
-            value={selectedRouteId}
-            onChange={(e) => setSelectedRouteId(e.target.value)}
-            className="border border-neutral-300 rounded px-2 py-1 text-sm bg-white min-w-[100px]"
-            title="Route for this invoice"
-          >
-            <option value="">No route</option>
-            {(selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : routes).map(r => (
-              <option key={r.id} value={r.id}>{r.name}</option>
-            ))}
-          </select>
+      {/* Hold Invoice Modal */}
+      {showHoldModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-4">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Hold Invoice</h3>
+            <p className="text-sm text-gray-600 mb-3">Save this invoice to resume later. Enter a name (optional):</p>
+            <input
+              type="text"
+              placeholder="e.g. Customer interrupted, Table 5"
+              value={holdNameInput}
+              onChange={(e) => setHoldNameInput(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              autoFocus
+              onKeyDown={(e) => e.key === 'Enter' && handleHoldConfirm()}
+            />
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setShowHoldModal(false)}
+                className="flex-1 px-3 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleHoldConfirm}
+                className="flex-1 px-3 py-2 text-sm font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700"
+              >
+                Hold
+              </button>
+            </div>
+          </div>
         </div>
       )}
+
+      {/* Resume Held Invoice Modal */}
+      {showResumeModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full max-h-[80vh] flex flex-col">
+            <div className="p-4 border-b flex items-center justify-between">
+              <h3 className="text-lg font-bold text-gray-900">Resume Held Invoice</h3>
+              <button onClick={() => setShowResumeModal(false)} className="p-1 rounded hover:bg-gray-100">
+                <X className="h-5 w-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {heldInvoices.length === 0 ? (
+                <p className="text-sm text-gray-500">No held invoices.</p>
+              ) : (
+                heldInvoices.map((held) => {
+                  const itemCount = (held.cart || []).filter(i => i.productId).length
+                  const subtotal = (held.cart || []).reduce((s, i) => s + (Number(i.lineTotal) || 0), 0)
+                  return (
+                    <div key={held.id} className="border border-gray-200 rounded-lg p-3 flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-gray-900 truncate">{held.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {itemCount} item(s) · AED {subtotal.toFixed(2)}
+                          {held.selectedCustomer?.name && ` · ${held.selectedCustomer.name}`}
+                        </p>
+                      </div>
+                      <div className="flex gap-1 flex-shrink-0">
+                        <button
+                          onClick={() => handleResume(held)}
+                          className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded hover:bg-emerald-700"
+                        >
+                          Resume
+                        </button>
+                        <button
+                          onClick={() => handleRemoveHeld(held)}
+                          className="px-2 py-1.5 text-xs font-medium text-gray-600 hover:text-red-600 hover:bg-red-50 rounded"
+                          title="Discard"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Branch / Route — Staff users with assigned route see read-only labels; Admin/Owner can change */}
+      {(branches.length > 0 || routes.length > 0) && (() => {
+        const staffHasAssignedRoute = !isAdminOrOwner(user) && (user?.routeId || user?.branchId)
+        const branchName = branches.find(b => String(b.id) === String(selectedBranchId))?.name || 'No branch'
+        const routeName = routes.find(r => String(r.id) === String(selectedRouteId))?.name || 'No route'
+        return (
+          <div className="bg-white border-b border-neutral-200 px-3 py-1.5 flex items-center gap-2 flex-wrap">
+            {staffHasAssignedRoute ? (
+              <>
+                <span className="text-xs text-neutral-500">Branch:</span>
+                <span className="inline-flex items-center gap-1 px-2 py-1 text-sm font-medium text-neutral-700 bg-neutral-100 rounded border border-neutral-200">
+                  <Lock className="h-3.5 w-3.5 text-neutral-500" />
+                  {branchName}
+                </span>
+                <span className="text-xs text-neutral-500">Route:</span>
+                <span className="inline-flex items-center gap-1 px-2 py-1 text-sm font-medium text-neutral-700 bg-neutral-100 rounded border border-neutral-200">
+                  <Lock className="h-3.5 w-3.5 text-neutral-500" />
+                  {routeName}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-xs text-neutral-500">Branch:</span>
+                <select
+                  value={selectedBranchId}
+                  onChange={(e) => { setSelectedBranchId(e.target.value); setSelectedRouteId('') }}
+                  className="border border-neutral-300 rounded px-2 py-1 text-sm bg-white min-w-[100px]"
+                  title="Branch for this invoice"
+                >
+                  <option value="">No branch</option>
+                  {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+                <span className="text-xs text-neutral-500">Route:</span>
+                <select
+                  value={selectedRouteId}
+                  onChange={(e) => setSelectedRouteId(e.target.value)}
+                  className="border border-neutral-300 rounded px-2 py-1 text-sm bg-white min-w-[100px]"
+                  title="Route for this invoice"
+                >
+                  <option value="">No route</option>
+                  {(selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : routes).map(r => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+              </>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Edit Mode Indicator */}
       {isEditMode && (
@@ -1308,15 +1513,68 @@ const PosPage = () => {
             <span className="font-medium text-blue-700">Invoice No:</span>
             <span className={`ml-1 sm:ml-2 font-semibold font-mono text-xs sm:text-sm ${isEditMode ? 'text-primary-700' : 'text-[#0F172A]'
               }`}>
-              {isEditMode && editingSale ? editingSale.invoiceNo : nextInvoiceNumber}
+              {isEditMode && editingSale ? editingSale.invoiceNo : '(Auto-generated)'}
             </span>
             {isEditMode && <span className="ml-2 text-xs text-blue-600">(Read-only)</span>}
           </div>
-          <div className="bg-[#F8FAFC] rounded-xl px-3 py-2 border border-[#E5E7EB]">
-            <span className="font-medium text-primary-700">Customer:</span>
-            <span className="ml-2 text-[#0F172A] font-semibold">
-              {selectedCustomer ? selectedCustomer.name : 'Cash Customer'}
-            </span>
+          <div className="bg-[#F8FAFC] rounded-xl px-3 py-2 border border-[#E5E7EB] relative">
+            <span className="font-medium text-primary-700 block mb-0.5">Customer:</span>
+            {selectedCustomer ? (
+              <div className="flex items-center gap-2">
+                <span className="text-[#0F172A] font-semibold">{selectedCustomer.name}</span>
+                <button
+                  type="button"
+                  onClick={() => setShowCustomerSearch(true)}
+                  className="text-xs text-primary-600 hover:underline"
+                >
+                  Change
+                </button>
+              </div>
+            ) : (
+              <div className="relative mt-1">
+                <input
+                  type="text"
+                  placeholder="Search customer (name/phone)..."
+                  value={customerSearchTerm}
+                  onChange={(e) => {
+                    setCustomerSearchTerm(e.target.value)
+                    setShowQuickCustomerDropdown(true)
+                  }}
+                  onFocus={() => setShowQuickCustomerDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowQuickCustomerDropdown(false), 150)}
+                  className="w-full px-2 py-1.5 border border-neutral-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+                {showQuickCustomerDropdown && (
+                  <div className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg z-50 max-h-48 overflow-y-auto">
+                    <div
+                      className="p-2 hover:bg-primary-50 cursor-pointer border-b border-neutral-100"
+                      onMouseDown={(e) => { e.preventDefault(); setSelectedCustomer(null); setCustomerSearchTerm(''); setShowQuickCustomerDropdown(false); if (isEditMode) setCustomerChangedDuringEdit(true) }}
+                    >
+                      <p className="font-medium text-neutral-900">Cash Customer</p>
+                    </div>
+                    {customers.filter(c =>
+                      c.name?.toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
+                      c.phone?.includes(customerSearchTerm)
+                    ).slice(0, 8).map((c) => (
+                      <div
+                        key={c.id}
+                        className="p-2 hover:bg-primary-50 cursor-pointer"
+                        onMouseDown={(e) => { e.preventDefault(); setSelectedCustomer(c); setCustomerSearchTerm(''); setShowQuickCustomerDropdown(false); if (isEditMode) setCustomerChangedDuringEdit(true) }}
+                      >
+                        <p className="font-medium text-neutral-900">{c.name}</p>
+                        {c.phone && <p className="text-xs text-neutral-500">{c.phone}</p>}
+                      </div>
+                    ))}
+                    {customerSearchTerm && customers.filter(c =>
+                      c.name?.toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
+                      c.phone?.includes(customerSearchTerm)
+                    ).length === 0 && (
+                      <div className="p-3 text-sm text-neutral-500 text-center">No customers found</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="bg-[#F8FAFC] rounded-xl px-3 py-2 border border-[#E5E7EB]">
             <span className="font-medium text-primary-700">Address:</span>
@@ -1330,13 +1588,33 @@ const PosPage = () => {
               {selectedCustomer?.trn || '-'}
             </span>
           </div>
-          <div className="bg-[#F8FAFC] rounded-xl px-3 py-2 border border-[#E5E7EB]">
-            <span className="font-medium text-primary-700">Balance:</span>
-            <span className={`ml-2 font-bold ${selectedCustomer?.balance < 0 ? 'text-[#10B981]' : selectedCustomer?.balance > 0 ? 'text-primary-600' : 'text-[#475569]'}`}>
-              {formatBalance(selectedCustomer?.balance || 0)}
-            </span>
-          </div>
+          {selectedCustomer && selectedCustomer.id !== 'cash' && (
+            <div className="bg-[#F8FAFC] rounded-xl px-3 py-2 border border-[#E5E7EB]">
+              <span className="font-medium text-primary-700">Balance:</span>
+              <span className={`ml-2 font-bold ${selectedCustomer?.balance < 0 ? 'text-[#10B981]' : selectedCustomer?.balance > 0 ? 'text-primary-600' : 'text-[#475569]'}`}>
+                {formatBalance(selectedCustomer?.balance || 0)}
+              </span>
+            </div>
+          )}
         </div>
+        {/* Credit limit warning — when balance + invoice total exceeds limit */}
+        {selectedCustomer && selectedCustomer.id !== 'cash' && (() => {
+          const creditLimit = Number(selectedCustomer?.creditLimit) || 0
+          const customerBalance = Number(selectedCustomer?.balance) || 0
+          const invoiceTotal = totals.grandTotal || 0
+          const totalAfterInvoice = customerBalance + invoiceTotal
+          if (creditLimit > 0 && totalAfterInvoice > creditLimit) {
+            return (
+              <div className="mt-2 flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                <AlertTriangle className="h-4 w-4 sm:h-5 sm:w-5 text-amber-600 flex-shrink-0" />
+                <span className="text-xs sm:text-sm text-amber-800 font-medium">
+                  Credit limit exceeded: Balance {formatBalance(customerBalance)} + This invoice {formatCurrency(invoiceTotal)} = {formatBalance(totalAfterInvoice)} (Limit: {formatCurrency(creditLimit)})
+                </span>
+              </div>
+            )
+          }
+          return null
+        })()}
       </div>
 
       {/* Main Content - pb-20 for bottom nav on mobile; mobile: no duplicate summary (only sticky bottom bar) */}
@@ -1346,7 +1624,9 @@ const PosPage = () => {
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
               <span className="font-medium text-neutral-600">Invoice No:</span>
-              <span className="ml-2 text-neutral-900 font-mono">(Auto-generated on save)</span>
+              <span className="ml-2 text-neutral-900 font-mono">
+                {isEditMode && editingSale ? editingSale.invoiceNo : '(Auto-generated)'}
+              </span>
             </div>
             <div className="text-right flex items-center justify-end gap-3">
               <label className="font-medium text-neutral-600">Invoice Date:</label>
@@ -1941,6 +2221,7 @@ const PosPage = () => {
               <button
                 onClick={handleSave}
                 disabled={loading || loadingSale || cart.length === 0}
+                title={cart.length === 0 && !loading && !loadingSale ? 'Add at least one item to checkout' : undefined}
                 className={`w-full px-3 sm:px-4 py-2.5 sm:py-3 rounded-lg font-bold text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center shadow-lg transition-all active:scale-95 ${isEditMode
                   ? 'bg-blue-600 text-white hover:bg-blue-700'
                   : 'bg-green-600 text-white hover:bg-green-700'
@@ -1968,6 +2249,7 @@ const PosPage = () => {
         <button
           onClick={() => (cart.length > 0 ? setShowPaymentSheet(true) : null)}
           disabled={loading || loadingSale || cart.length === 0}
+          title={cart.length === 0 && !loading && !loadingSale ? 'Add at least one item to checkout' : undefined}
           className="flex-1 max-w-[200px] px-4 py-3 rounded-xl font-bold text-sm bg-primary-600 text-white hover:bg-primary-700 active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
           {(loading || loadingSale) ? (
@@ -2067,6 +2349,7 @@ const PosPage = () => {
                   setShowPaymentSheet(false)
                 }}
                 disabled={loading || loadingSale || cart.length === 0}
+                title={cart.length === 0 && !loading && !loadingSale ? 'Add at least one item to checkout' : undefined}
                 className="w-full py-3.5 rounded-xl font-bold text-white bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors duration-150 min-h-[48px]"
               >
                 {(loading || loadingSale) ? (
@@ -2119,7 +2402,6 @@ const PosPage = () => {
                     if (isEditMode) {
                       setCustomerChangedDuringEdit(true)
                     }
-                    loadNextInvoiceNumber() // Load invoice number when cash customer selected
                     setShowCustomerSearch(false)
                     setCustomerSearchTerm('')
                   }}
@@ -2136,7 +2418,6 @@ const PosPage = () => {
                       if (isEditMode) {
                         setCustomerChangedDuringEdit(true)
                       }
-                      loadNextInvoiceNumber() // Load invoice number when customer selected
                       setShowCustomerSearch(false)
                       setCustomerSearchTerm('')
                     }}
@@ -2221,11 +2502,10 @@ const PosPage = () => {
                       if (response.success) {
                         const invoiceNo = response.data?.invoiceNo
                         const saleId = response.data?.id
-                        toast.success(`Invoice ${invoiceNo || editingSaleId} updated successfully!`)
+                        toast.success(`Invoice ${invoiceNo || editingSaleId} updated successfully!`, { id: 'invoice-update', duration: 4000 })
                         await Promise.all([
                           loadProducts(),
                           loadCustomers(),
-                          loadNextInvoiceNumber()
                         ])
                         setIsEditMode(false)
                         setEditingSaleId(null)
@@ -2253,7 +2533,7 @@ const PosPage = () => {
                         error?.response?.data?.errors?.[0] ||
                         error?.message ||
                         'Failed to update invoice. Please try again.'
-                      toast.error(errorMsg)
+                      if (!error?._handledByInterceptor) toast.error(errorMsg)
                     } finally {
                       setLoading(false)
                     }
@@ -2347,11 +2627,10 @@ const PosPage = () => {
                       if (response.success) {
                         const invoiceNo = response.data?.invoiceNo
                         const saleId = response.data?.id
-                        toast.success(`Invoice ${invoiceNo || editingSaleId} updated successfully!`)
+                        toast.success(`Invoice ${invoiceNo || editingSaleId} updated successfully!`, { id: 'invoice-update', duration: 4000 })
                         await Promise.all([
                           loadProducts(),
                           loadCustomers(),
-                          loadNextInvoiceNumber()
                         ])
                         setIsEditMode(false)
                         setEditingSaleId(null)
@@ -2380,7 +2659,7 @@ const PosPage = () => {
                         error?.response?.data?.errors?.[0] ||
                         error?.message ||
                         'Failed to update invoice. Please try again.'
-                      toast.error(errorMsg)
+                      if (!error?._handledByInterceptor) toast.error(errorMsg)
                     } finally {
                       setLoading(false)
                     }

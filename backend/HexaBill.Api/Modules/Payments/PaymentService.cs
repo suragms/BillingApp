@@ -17,6 +17,7 @@ namespace HexaBill.Api.Modules.Payments
 {
     public interface IPaymentService
     {
+        Task<bool> CheckDuplicatePaymentAsync(int tenantId, int customerId, decimal amount, DateTime paymentDate);
         Task<PagedResponse<PaymentDto>> GetPaymentsAsync(int tenantId, int page = 1, int pageSize = 10);
         Task<PaymentDto?> GetPaymentByIdAsync(int id, int tenantId);
         Task<CreatePaymentResponse> CreatePaymentAsync(CreatePaymentRequest request, int userId, int tenantId, string? idempotencyKey = null);
@@ -48,6 +49,20 @@ namespace HexaBill.Api.Modules.Payments
             _validationService = validationService;
             _balanceService = balanceService;
             _alertService = alertService;
+        }
+
+        public async Task<bool> CheckDuplicatePaymentAsync(int tenantId, int customerId, decimal amount, DateTime paymentDate)
+        {
+            var dayStart = paymentDate.Date;
+            var dayEnd = dayStart.AddDays(1);
+            var exists = await _context.Payments
+                .AnyAsync(p =>
+                    p.TenantId == tenantId &&
+                    p.CustomerId == customerId &&
+                    Math.Abs(p.Amount - amount) < 0.01m &&
+                    p.PaymentDate >= dayStart &&
+                    p.PaymentDate < dayEnd);
+            return exists;
         }
 
         public async Task<PagedResponse<PaymentDto>> GetPaymentsAsync(int tenantId, int page = 1, int pageSize = 10)

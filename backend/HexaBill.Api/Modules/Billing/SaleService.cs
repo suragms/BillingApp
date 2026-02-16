@@ -400,6 +400,30 @@ namespace HexaBill.Api.Modules.Billing
                     }
                 }
 
+                // RISK-4 FIX: Staff route lock — validate Staff can only assign invoices to their assigned routes
+                var creatingUser = await _context.Users.AsNoTracking()
+                    .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId);
+                var userRole = creatingUser?.Role.ToString() ?? "";
+                if (request.RouteId.HasValue && tenantId > 0 &&
+                    userRole.Equals("Staff", StringComparison.OrdinalIgnoreCase))
+                {
+                    var allowedRouteIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userId, tenantId, userRole);
+                    if (allowedRouteIds != null && allowedRouteIds.Length > 0)
+                    {
+                        if (!allowedRouteIds.Contains(request.RouteId.Value))
+                        {
+                            throw new UnauthorizedAccessException(
+                                "You can only create invoices for routes assigned to you. The selected route is not in your assigned routes.");
+                        }
+                    }
+                    else
+                    {
+                        // Staff with no assigned routes cannot assign any route
+                        throw new UnauthorizedAccessException(
+                            "You have no routes assigned. Contact your admin to get route access.");
+                    }
+                }
+
                 // Calculate totals
                 var vatPercent = await GetVatPercentAsync();
                 decimal subtotal = 0;

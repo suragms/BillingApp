@@ -238,6 +238,7 @@ builder.Services.AddScoped<HexaBill.Api.Modules.SuperAdmin.IDemoRequestService, 
 builder.Services.AddScoped<IErrorLogService, ErrorLogService>(); // Enterprise: persist 500 errors for SuperAdmin
 builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.LogOnlyAutomationProvider>(); // Goal Step 4: log-only, plug WhatsApp/Email later
 builder.Services.AddSingleton<HexaBill.Api.Modules.Auth.ILoginLockoutService, HexaBill.Api.Modules.Auth.LoginLockoutService>(); // Login lockout 5 attempts, 15 min
+builder.Services.AddSingleton<HexaBill.Api.Shared.Services.ITenantActivityService, HexaBill.Api.Shared.Services.TenantActivityService>(); // SuperAdmin Live Activity
 
 // Background services
 builder.Services.AddHostedService<DailyBackupScheduler>();
@@ -318,8 +319,14 @@ app.UseAuthentication();
 // CRITICAL: Tenant Context Middleware - MUST be after authentication, before authorization
 app.UseTenantContext();
 
+// Tenant Activity - Record API calls per tenant for SuperAdmin Live Activity (must be after TenantContext)
+app.UseTenantActivity();
+
 // Subscription Middleware - Enforce subscription limits and status
 app.UseSubscriptionMiddleware();
+
+// Maintenance Mode - Returns 503 for tenant requests when platform is under maintenance (SA bypasses)
+app.UseMiddleware<HexaBill.Api.Shared.Middleware.MaintenanceMiddleware>();
 
 app.UseAuthorization();
 
@@ -363,6 +370,31 @@ app.MapGet("/health/ready", async (HttpContext ctx) =>
     }
 }).AllowAnonymous();
 app.MapGet("/", () => Results.Ok(new { service = "HexaBill.Api", status = "Running", version = "2.0" })).AllowAnonymous();
+
+// Maintenance check - anonymous, bypassed by MaintenanceMiddleware so frontend can show message
+app.MapGet("/api/maintenance-check", async (HttpContext ctx) =>
+{
+    try
+    {
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var mode = await db.Settings.AsNoTracking()
+            .Where(s => s.OwnerId == 0 && s.Key == "PLATFORM_MAINTENANCE_MODE")
+            .Select(s => s.Value)
+            .FirstOrDefaultAsync();
+        var msg = await db.Settings.AsNoTracking()
+            .Where(s => s.OwnerId == 0 && s.Key == "PLATFORM_MAINTENANCE_MESSAGE")
+            .Select(s => s.Value)
+            .FirstOrDefaultAsync();
+        var maintenanceMode = string.Equals(mode, "true", StringComparison.OrdinalIgnoreCase);
+        var displayMsg = maintenanceMode ? (msg ?? "System under maintenance. Back shortly.") : "";
+        return Results.Json(new { maintenanceMode, message = displayMsg });
+    }
+    catch
+    {
+        return Results.Json(new { maintenanceMode = false, message = "" });
+    }
+}).AllowAnonymous();
 
 // Error monitoring endpoint - shows error statistics
 app.MapGet("/api/diagnostics/errors", () =>
@@ -841,7 +873,29 @@ _ = Task.Run(async () =>
                 }
 
                 await context.SaveChangesAsync();
-                
+
+                // FIX 403: In Development, activate any tenant with expired trial or suspended status
+                var isDev = builder.Environment.IsDevelopment();
+                if (isDev)
+                {
+                    var problematicTenants = await context.Tenants
+                        .Where(t => t.Status == TenantStatus.Suspended || t.Status == TenantStatus.Expired ||
+                            (t.Status == TenantStatus.Trial && t.TrialEndDate.HasValue && t.TrialEndDate.Value < DateTime.UtcNow))
+                        .ToListAsync();
+                    if (problematicTenants.Any())
+                    {
+                        foreach (var t in problematicTenants)
+                        {
+                            var oldStatus = t.Status;
+                            t.Status = TenantStatus.Active;
+                            t.TrialEndDate = null;
+                            initLogger.LogInformation("Activated tenant {TenantId} ({Name}) for development (was {Status})", t.Id, t.Name, oldStatus);
+                        }
+                        await context.SaveChangesAsync();
+                        initLogger.LogInformation("Fixed {Count} tenant(s) with expired/suspended status for development", problematicTenants.Count);
+                    }
+                }
+
                 // SEED SETTINGS FOR BOTH OWNERS
                 var existingSettings = await context.Settings.ToListAsync();
                 if (!existingSettings.Any())

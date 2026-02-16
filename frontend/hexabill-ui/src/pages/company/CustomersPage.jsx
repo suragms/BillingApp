@@ -111,7 +111,7 @@ const CustomersPage = () => {
     } catch (error) {
       console.error('Failed to load customers:', error)
       // Only show error if it's not a network error (handled by interceptor)
-      if (error.response || (!error.code || error.code !== 'ERR_NETWORK')) {
+      if (!error?._handledByInterceptor && (error.response || (!error.code || error.code !== 'ERR_NETWORK'))) {
         toast.error(error?.response?.data?.message || 'Failed to load customers')
       }
       setCustomers([])
@@ -177,7 +177,7 @@ const CustomersPage = () => {
       }
     } catch (error) {
       console.error('Failed to save customer:', error)
-      toast.error(error?.response?.data?.message || 'Failed to save customer')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to save customer')
     } finally {
       setSaving(false)
     }
@@ -254,7 +254,7 @@ const CustomersPage = () => {
       }
     } catch (error) {
       console.error('Failed to delete customer:', error)
-      toast.error(error?.response?.data?.message || 'Failed to delete customer')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to delete customer')
     }
   }
 
@@ -267,7 +267,7 @@ const CustomersPage = () => {
       }
       setShowLedgerModal(true)
     } catch (error) {
-      toast.error('Failed to load ledger data')
+      if (!error?._handledByInterceptor) toast.error('Failed to load ledger data')
       setShowLedgerModal(true)
     }
   }
@@ -284,7 +284,7 @@ const CustomersPage = () => {
       }
     } catch (error) {
       console.error('Failed to recalculate balance:', error)
-      toast.error(error?.response?.data?.message || 'Failed to recalculate balance')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to recalculate balance')
     }
   }
 
@@ -308,7 +308,7 @@ const CustomersPage = () => {
       toast.success('Statement exported successfully!')
     } catch (error) {
       console.error('Failed to export statement:', error)
-      toast.error('Failed to export statement')
+      if (!error?._handledByInterceptor) toast.error('Failed to export statement')
     }
   }
 

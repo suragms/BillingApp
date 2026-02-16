@@ -37,7 +37,7 @@ const PrintOptionsModal = ({ saleId, invoiceNo, onClose, onPrint }) => {
       onClose()
     } catch (error) {
       console.error('Print error:', error)
-      toast.error('Failed to open print dialog')
+      if (!error?._handledByInterceptor) toast.error('Failed to open print dialog')
     }
   }
 

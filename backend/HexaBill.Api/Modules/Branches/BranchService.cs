@@ -114,42 +114,76 @@ namespace HexaBill.Api.Modules.Branches
             var from = fromDate ?? DateTime.UtcNow.Date.AddYears(-1);
             var to = (toDate ?? DateTime.UtcNow).Date.AddDays(1).AddTicks(-1);
 
-            var routeIds = await _context.Routes.Where(r => r.BranchId == branchId).Select(r => r.Id).ToListAsync();
+            var routeIds = await _context.Routes.Where(r => r.BranchId == branchId && (tenantId <= 0 || r.TenantId == tenantId)).Select(r => r.Id).ToListAsync();
             var salesByRoute = await _context.Sales
-                .Where(s => s.RouteId != null && routeIds.Contains(s.RouteId!.Value) && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
+                .Where(s => s.RouteId != null && routeIds.Contains(s.RouteId!.Value) && (tenantId <= 0 || s.TenantId == tenantId) && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
                 .GroupBy(s => s.RouteId)
                 .Select(g => new { RouteId = g.Key!.Value, Total = g.Sum(s => s.GrandTotal) })
                 .ToListAsync();
+
+            var saleIdsInBranch = await _context.Sales
+                .Where(s => s.RouteId != null && routeIds.Contains(s.RouteId!.Value) && (tenantId <= 0 || s.TenantId == tenantId) && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
+                .Select(s => s.Id)
+                .ToListAsync();
+
+            var cogsByRouteList = new List<(int RouteId, decimal Cogs)>();
+            if (saleIdsInBranch.Count > 0)
+            {
+                var cogsQuery = await (from si in _context.SaleItems
+                    join p in _context.Products on si.ProductId equals p.Id
+                    join s in _context.Sales on si.SaleId equals s.Id
+                    where saleIdsInBranch.Contains(si.SaleId) && s.RouteId != null
+                    group new { si.Qty, p.CostPrice } by s.RouteId!.Value into g
+                    select new { RouteId = g.Key, Cogs = g.Sum(x => x.Qty * x.CostPrice) })
+                    .ToListAsync();
+                cogsByRouteList = cogsQuery.Select(x => (x.RouteId, x.Cogs)).ToList();
+            }
             var expensesByRoute = await _context.RouteExpenses
-                .Where(e => routeIds.Contains(e.RouteId) && e.ExpenseDate >= from && e.ExpenseDate <= to)
+                .Where(e => routeIds.Contains(e.RouteId) && (tenantId <= 0 || e.TenantId == tenantId) && e.ExpenseDate >= from && e.ExpenseDate <= to)
                 .GroupBy(e => e.RouteId)
                 .Select(g => new { RouteId = g.Key, Total = g.Sum(e => e.Amount) })
                 .ToListAsync();
 
+            // Branch-level expenses (Rent, Utilities, etc.) - separate from route expenses
+            var branchExpensesTotal = await _context.Expenses
+                .Where(e => e.BranchId == branchId && (tenantId <= 0 || e.TenantId == tenantId) && e.Date >= from && e.Date <= to)
+                .SumAsync(e => e.Amount);
+
             var routeList = await _context.Routes
                 .AsNoTracking()
-                .Where(r => r.BranchId == branchId)
+                .Where(r => r.BranchId == branchId && (tenantId <= 0 || r.TenantId == tenantId))
                 .Select(r => new { r.Id, r.Name })
                 .ToListAsync();
 
-            var routes = routeList.Select(r => new RouteSummaryDto
+            var routes = routeList.Select(r =>
             {
-                RouteId = r.Id,
-                RouteName = r.Name,
-                BranchName = branch.Name,
-                TotalSales = salesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0,
-                TotalExpenses = expensesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0
+                var sales = salesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0;
+                var expenses = expensesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0;
+                var cogs = cogsByRouteList.FirstOrDefault(x => x.RouteId == r.Id).Cogs;
+                return new RouteSummaryDto
+                {
+                    RouteId = r.Id,
+                    RouteName = r.Name,
+                    BranchName = branch.Name,
+                    TotalSales = sales,
+                    TotalExpenses = expenses,
+                    CostOfGoodsSold = cogs,
+                    Profit = sales - cogs - expenses
+                };
             }).ToList();
-            foreach (var r in routes)
-                r.Profit = r.TotalSales - r.TotalExpenses;
 
+            var routeExpensesTotal = routes.Sum(r => r.TotalExpenses);
+            var totalExpenses = routeExpensesTotal + branchExpensesTotal;
+            var totalSales = routes.Sum(r => r.TotalSales);
+            var totalCogs = routes.Sum(r => r.CostOfGoodsSold);
             return new BranchSummaryDto
             {
                 BranchId = branch.Id,
                 BranchName = branch.Name,
-                TotalSales = routes.Sum(r => r.TotalSales),
-                TotalExpenses = routes.Sum(r => r.TotalExpenses),
-                Profit = routes.Sum(r => r.Profit),
+                TotalSales = totalSales,
+                TotalExpenses = totalExpenses,
+                CostOfGoodsSold = totalCogs,
+                Profit = totalSales - totalCogs - totalExpenses,
                 Routes = routes
             };
         }

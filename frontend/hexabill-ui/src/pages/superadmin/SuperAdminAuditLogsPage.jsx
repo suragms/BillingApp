@@ -18,7 +18,8 @@ const SuperAdminAuditLogsPage = () => {
     userId: '',
     action: '',
     fromDate: '',
-    toDate: ''
+    toDate: '',
+    superAdminOnly: false
   })
   const [appliedFilters, setAppliedFilters] = useState({})
 
@@ -26,10 +27,11 @@ const SuperAdminAuditLogsPage = () => {
     try {
       setError(null)
       setLoading(true)
+      const actionFilter = appliedFilters.superAdminOnly ? 'SuperAdmin' : (appliedFilters.action || undefined)
       const params = {
         tenantId: appliedFilters.tenantId ? parseInt(appliedFilters.tenantId, 10) : undefined,
         userId: appliedFilters.userId ? parseInt(appliedFilters.userId, 10) : undefined,
-        action: appliedFilters.action || undefined,
+        action: actionFilter,
         fromDate: appliedFilters.fromDate || undefined,
         toDate: appliedFilters.toDate || undefined
       }
@@ -59,8 +61,14 @@ const SuperAdminAuditLogsPage = () => {
   }
 
   const handleClearFilters = () => {
-    setFilters({ tenantId: '', userId: '', action: '', fromDate: '', toDate: '' })
+    setFilters({ tenantId: '', userId: '', action: '', fromDate: '', toDate: '', superAdminOnly: false })
     setAppliedFilters({})
+    setPage(1)
+  }
+
+  const handleSuperAdminOnly = () => {
+    setFilters(f => ({ ...f, superAdminOnly: true, action: '' }))
+    setAppliedFilters(prev => ({ ...prev, superAdminOnly: true, action: '' }))
     setPage(1)
   }
 
@@ -131,12 +139,19 @@ const SuperAdminAuditLogsPage = () => {
             className="px-3 py-2 border border-neutral-200 rounded-lg text-sm"
           />
         </div>
-        <div className="flex gap-2 mt-3">
+        <div className="flex flex-wrap gap-2 mt-3">
           <button
             onClick={handleApplyFilters}
             className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
           >
             Apply
+          </button>
+          <button
+            onClick={handleSuperAdminOnly}
+            className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700"
+            title="Show only SuperAdmin actions (suspend, activate, clear data, etc.)"
+          >
+            SuperAdmin Actions Only
           </button>
           <button
             onClick={handleClearFilters}

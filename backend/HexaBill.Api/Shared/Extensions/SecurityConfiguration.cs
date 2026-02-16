@@ -32,7 +32,8 @@ namespace HexaBill.Api.Shared.Extensions
                         ValidateAudience = true,
                         ValidAudience = jwtSettings["Audience"],
                         ValidateLifetime = true,
-                        ClockSkew = TimeSpan.Zero,
+                        // Allow 2 min clock skew - avoids false 401 on POST when token near expiry (server/client time drift)
+                        ClockSkew = TimeSpan.FromMinutes(2),
                         RequireExpirationTime = true
                     };
 
@@ -96,7 +97,14 @@ namespace HexaBill.Api.Shared.Extensions
             {
                 options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
                 options.AddPolicy("StaffOrAdmin", policy => policy.RequireRole("Staff", "Admin"));
+                // Production-ready: case-insensitive Admin/Owner/SystemAdmin for JWT interoperability
+                options.AddPolicy("AdminOrOwner", policy =>
+                    policy.Requirements.Add(new HexaBill.Api.Shared.Authorization.AdminOrOwnerRequirement()));
+                options.AddPolicy("AdminOrOwnerOrStaff", policy =>
+                    policy.Requirements.Add(new HexaBill.Api.Shared.Authorization.AdminOrOwnerOrStaffRequirement()));
             });
+            services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler, HexaBill.Api.Shared.Authorization.AdminOrOwnerAuthorizationHandler>();
+            services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler, HexaBill.Api.Shared.Authorization.AdminOrOwnerOrStaffAuthorizationHandler>();
 
             // Enhanced CORS with environment-based configuration
             // Support both appsettings.json and ALLOWED_ORIGINS environment variable

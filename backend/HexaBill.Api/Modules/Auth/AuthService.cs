@@ -323,7 +323,8 @@ namespace HexaBill.Api.Modules.Auth
                 new Claim(ClaimTypes.Role, user.Role.ToString()),
                 new Claim(ClaimTypes.Name, user.Name),
                 new Claim("owner_id", user.TenantId?.ToString() ?? "0"),
-                new Claim("tenant_id", user.TenantId?.ToString() ?? "0")
+                new Claim("tenant_id", user.TenantId?.ToString() ?? "0"),
+                new Claim("session_version", user.SessionVersion.ToString())
             };
             if (!user.TenantId.HasValue)
                 claims.Add(new Claim(ClaimTypes.Role, "SystemAdmin"));

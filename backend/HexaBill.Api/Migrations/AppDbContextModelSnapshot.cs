@@ -158,7 +158,7 @@ namespace HexaBill.Api.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Location")
                         .HasMaxLength(200)
@@ -261,6 +261,10 @@ namespace HexaBill.Api.Migrations
 
                     b.Property<int>("OwnerId")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("PaymentTerms")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
 
                     b.Property<decimal>("PendingBalance")
                         .ValueGeneratedOnAdd()
@@ -1083,7 +1087,7 @@ namespace HexaBill.Api.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -1815,6 +1819,9 @@ namespace HexaBill.Api.Migrations
                     b.Property<string>("Role")
                         .IsRequired()
                         .HasColumnType("TEXT");
+
+                    b.Property<int>("SessionVersion")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int?>("TenantId")
                         .HasColumnType("INTEGER");

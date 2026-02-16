@@ -4,10 +4,10 @@ Author: AI Assistant
 Date: 2025
 */
 
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
@@ -36,13 +36,15 @@ namespace HexaBill.Api.Shared.Middleware
 
             if (token != null)
             {
-                await AttachUserToContextAsync(context, token);
+                var attached = await AttachUserToContextAsync(context, token);
+                if (!attached)
+                    return; // Session expired, response already sent
             }
 
             await _next(context);
         }
 
-        private async Task AttachUserToContextAsync(HttpContext context, string token)
+        private async Task<bool> AttachUserToContextAsync(HttpContext context, string token)
         {
             try
             {
@@ -60,7 +62,9 @@ namespace HexaBill.Api.Shared.Middleware
                 }, out SecurityToken validatedToken);
 
                 var jwtToken = (JwtSecurityToken)validatedToken;
-                var userId = int.Parse(jwtToken.Claims.First(x => x.Type == "id").Value);
+                var userIdClaim = jwtToken.Claims.FirstOrDefault(x => x.Type == "id" || x.Type == ClaimTypes.NameIdentifier || x.Type == "sub");
+                if (userIdClaim == null) return true;
+                var userId = int.Parse(userIdClaim.Value);
 
                 // Attach user to context
                 var user = await _context.Users
@@ -69,6 +73,14 @@ namespace HexaBill.Api.Shared.Middleware
 
                 if (user != null)
                 {
+                    // Force Logout: session_version must match. Old tokens without the claim are allowed.
+                    var tokenSessionVersion = jwtToken.Claims.FirstOrDefault(x => x.Type == "session_version")?.Value;
+                    if (tokenSessionVersion != null && int.TryParse(tokenSessionVersion, out var tokVer) && tokVer != user.SessionVersion)
+                    {
+                        context.Response.StatusCode = 401;
+                        await context.Response.WriteAsJsonAsync(new { success = false, message = "Session expired. Please login again.", code = "SESSION_EXPIRED" });
+                        return false;
+                    }
                     // Determine tenant ID: prefer TenantId, fallback to OwnerId during migration
                     var tenantId = user.TenantId?.ToString() ?? user.OwnerId?.ToString() ?? "0";
                     
@@ -92,6 +104,7 @@ namespace HexaBill.Api.Shared.Middleware
                 // Do nothing if token validation fails
                 // The request will continue without a user being attached
             }
+            return true;
         }
     }
 

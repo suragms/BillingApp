@@ -20,6 +20,7 @@ namespace HexaBill.Api.Modules.Notifications
         Task MarkAsResolvedAsync(int id, int userId);
         Task<int> GetUnreadCountAsync(int? tenantId = null);
         Task<int> MarkAllAsReadAsync(); // Mark all alerts as read
+        Task<int> MarkAllAsResolvedAsync(int userId, int? tenantId = null); // Mark all alerts as resolved
         Task<int> ClearResolvedAlertsAsync(); // Delete resolved alerts
         Task CheckAndCreateAlertsAsync(); // Background job to check for conditions
         Task DismissSimilarAlertsAsync(AlertType type, DateTime cutoffTime); // Dismiss duplicate alerts
@@ -170,6 +171,31 @@ namespace HexaBill.Api.Modules.Notifications
                     await _context.SaveChangesAsync();
                     
                 return count;
+            }
+            catch (PostgresException pgEx) when (pgEx.Message.Contains("does not exist"))
+            {
+                _logger.LogWarning("Alerts table does not exist yet.");
+                return 0;
+            }
+        }
+
+        public async Task<int> MarkAllAsResolvedAsync(int userId, int? tenantId = null)
+        {
+            try
+            {
+                var query = _context.Alerts.Where(a => !a.IsResolved);
+                if (tenantId.HasValue)
+                    query = query.Where(a => a.TenantId == tenantId.Value || a.TenantId == null || a.TenantId == 0);
+                var unresolvedAlerts = await query.ToListAsync();
+                foreach (var alert in unresolvedAlerts)
+                {
+                    alert.IsResolved = true;
+                    alert.ResolvedAt = DateTime.UtcNow;
+                    alert.ResolvedBy = userId;
+                }
+                if (unresolvedAlerts.Count > 0)
+                    await _context.SaveChangesAsync();
+                return unresolvedAlerts.Count;
             }
             catch (PostgresException pgEx) when (pgEx.Message.Contains("does not exist"))
             {

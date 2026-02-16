@@ -1,6 +1,10 @@
+import React from 'react'
 import axios from 'axios'
+import camelcaseKeys from 'camelcase-keys'
 import toast from 'react-hot-toast'
 import { connectionManager } from './connectionManager'
+import { showMaintenanceOverlay } from '../components/MaintenanceOverlay'
+import { setSubscriptionGraceFromResponse } from '../components/SubscriptionGraceBanner'
 
 // API base URL: prefer build-time env (Vercel) then production hostname, else localhost
 const envApi = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
@@ -35,12 +39,12 @@ const getRequestKey = (config) => {
   return `${method}_${url}_${JSON.stringify(params)}`
 }
 
-const showThrottledError = (message, isNetworkError = false) => {
+const showThrottledError = (message, isNetworkError = false, options = {}) => {
   const now = Date.now()
   const throttleTime = isNetworkError ? NETWORK_ERROR_THROTTLE_MS : ERROR_THROTTLE_MS
   const lastToast = isNetworkError ? lastNetworkErrorToast : lastErrorToast
 
-  if (lastToast && (now - lastToast) < throttleTime) {
+  if (lastToast && (now - lastToast) < throttleTime && !options.forceShow) {
     errorToastCount++
     return // Skip this error, already showing one
   }
@@ -53,20 +57,42 @@ const showThrottledError = (message, isNetworkError = false) => {
 
   errorToastCount = 1
 
-  // For network errors, show longer duration and less intrusive style
+  const withRetry = options.withRetry !== false && (isNetworkError || options.isServerError)
+  const toastContent = withRetry
+    ? (t) =>
+        React.createElement(
+          'span',
+          { className: 'flex items-center gap-2' },
+          message,
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: () => {
+                toast.dismiss(t.id)
+                window.location.reload()
+              },
+              className: 'ml-2 px-2 py-1 text-sm font-medium bg-primary-600 text-white rounded hover:bg-primary-700'
+            },
+            'Retry'
+          )
+        )
+    : message
+
   if (isNetworkError) {
-    toast.error(message, {
-      duration: 6000,
-      id: 'network-error', // Use same ID to replace previous toast
+    toast.error(withRetry ? toastContent : message, {
+      duration: withRetry ? 12000 : 6000,
+      id: 'network-error',
       position: 'top-center'
     })
   } else {
-    toast.error(message, { duration: 4000 })
+    toast.error(withRetry ? toastContent : message, { duration: withRetry ? 10000 : 4000 })
   }
 }
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  timeout: 30000, // 30 seconds - show "request taking too long" instead of blank loading
   headers: {
     'Content-Type': 'application/json',
   },
@@ -158,6 +184,17 @@ api.interceptors.request.use(
   }
 )
 
+// Recursively convert PascalCase keys to camelCase in API responses.
+// Eliminates need for fallbacks like entry.grandTotal || entry.GrandTotal
+const transformResponseKeys = (obj) => {
+  if (obj == null) return obj
+  if (Array.isArray(obj)) return obj.map(transformResponseKeys)
+  if (typeof obj === 'object' && obj.constructor === Object) {
+    return camelcaseKeys(obj, { deep: true })
+  }
+  return obj
+}
+
 // Response interceptor to handle errors and cleanup
 // Offline detection and error handling
 api.interceptors.response.use(
@@ -170,6 +207,18 @@ api.interceptors.response.use(
       pendingRequests.delete(response.config._requestKey)
     }
 
+    // Normalize PascalCase to camelCase in response data
+    if (response?.data != null) {
+      try {
+        if (typeof response.data === 'object') {
+          response.data = transformResponseKeys(response.data)
+        }
+      } catch (_) { /* ignore transform errors */ }
+    }
+
+    // Subscription grace period: check for X-Subscription-Grace-Period header
+    setSubscriptionGraceFromResponse(response)
+
     return response
   },
   async (error) => {
@@ -178,8 +227,10 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    // Handle network/connection errors
+    // Handle network/connection errors (includes timeout ECONNABORTED)
+    const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout')
     const isNetworkError = !error.response && (
+      isTimeout ||
       error.message === 'Network Error' ||
       error.code === 'ERR_NETWORK' ||
       error.code === 'ERR_CORS' ||
@@ -193,12 +244,15 @@ api.interceptors.response.use(
       // Mark connection as failed
       connectionManager.markDisconnected()
 
-      // Show throttled error message
-      const errorMsg = error.code === 'ERR_CORS'
-        ? 'Backend server may have stopped. Please restart the backend.'
-        : `Cannot connect to server. Please ensure the backend is running at ${API_BASE_URL.replace('/api', '')}`
+      // Show throttled error message (timeout gets specific message)
+      const errorMsg = isTimeout
+        ? 'The request timed out. If using Render free tier, the backend may be starting (cold start). Wait 30-60 seconds and try again.'
+        : error.code === 'ERR_CORS'
+          ? 'Backend server may have stopped. Please restart the backend.'
+          : `Cannot connect to server. Please ensure the backend is running at ${API_BASE_URL.replace('/api', '')}`
 
       showThrottledError(errorMsg, true)
+      error._handledByInterceptor = true
 
       // Only log once per error type
       if (errorToastCount === 1) {
@@ -227,6 +281,7 @@ api.interceptors.response.use(
       const message = `Too many requests. Please wait ${retryAfter} seconds before trying again.`
 
       showThrottledError(message, false)
+      error._handledByInterceptor = true
 
       // Don't log every 429 error to prevent console flooding
       if (errorToastCount === 1) {
@@ -245,6 +300,7 @@ api.interceptors.response.use(
     // Handle rate limited requests
     if (error.isRateLimited) {
       showThrottledError('Too many requests in progress. Please wait...', false)
+      error._handledByInterceptor = true
       return Promise.reject(error)
     }
 
@@ -258,7 +314,37 @@ api.interceptors.response.use(
           'Branches & Routes API not found. Stop the API, then run backend/HexaBill.Api/run-api.ps1 (or: dotnet build && dotnet ef database update && dotnet run in that folder), then restart.',
           false
         )
+        error._handledByInterceptor = true
       }
+      return Promise.reject(error)
+    }
+
+    // Handle 403 Forbidden - tenant suspended/expired or insufficient permissions
+    if (error.response?.status === 403) {
+      connectionManager.markConnected()
+      const body = error.response?.data
+      const msg = typeof body === 'string'
+        ? body
+        : (body?.message || body?.errors?.[0] || 'Access denied')
+      const isTenantBlock = /tenant|trial|suspended|expired/i.test(msg)
+      const url = (error.config?.url || '').toLowerCase()
+      const isAdminEndpoint = url.includes('/admin/') || url.includes('/backup/')
+      const displayMsg = isTenantBlock
+        ? `${msg} Please contact your administrator.`
+        : isAdminEndpoint && !msg
+          ? 'Admin or Owner access required for this feature.'
+          : msg
+      showThrottledError(displayMsg, false)
+      error._handledByInterceptor = true
+      return Promise.reject(error)
+    }
+
+    // Handle 503 Maintenance Mode - show branded maintenance screen, no toast
+    if (error.response?.status === 503) {
+      connectionManager.markConnected()
+      const msg = error.response?.data?.message || 'System under maintenance. Back shortly.'
+      showMaintenanceOverlay(msg)
+      error._handledByInterceptor = true
       return Promise.reject(error)
     }
 
@@ -270,17 +356,21 @@ api.interceptors.response.use(
       const authFailure = error.response?.headers?.['x-auth-failure']
       const errorMessage = error.response?.data?.message || ''
       const tokenExpired = error.response?.headers?.['token-expired'] === 'true'
+      const method = (error.config?.method || '').toUpperCase()
+      const isMutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
 
       // Only logout + redirect when we HAD a token (user was logged in, now session invalid).
       // If we had no token, this is a public/unauthenticated request (e.g. login page) - don't redirect.
+      // For mutating requests (POST/PUT), only force logout on clear token-expired - avoid false logout from timing/validation bugs
       const isAuthFailure = hadToken && (
-        authFailure ||
         tokenExpired ||
-        errorMessage.toLowerCase().includes('session') ||
-        errorMessage.toLowerCase().includes('expired') ||
-        errorMessage.toLowerCase().includes('token') ||
-        errorMessage.toLowerCase().includes('authentication') ||
-        errorMessage.toLowerCase().includes('login')
+        authFailure === 'Token-Expired' ||
+        (!isMutating && (authFailure ||
+          errorMessage.toLowerCase().includes('session') ||
+          errorMessage.toLowerCase().includes('expired') ||
+          errorMessage.toLowerCase().includes('token') ||
+          errorMessage.toLowerCase().includes('authentication') ||
+          errorMessage.toLowerCase().includes('login')))
       )
 
       if (isAuthFailure) {
@@ -294,14 +384,19 @@ api.interceptors.response.use(
             'Authentication required. Please login again.')
 
         toast.error(message, { duration: 3000 })
+        error._handledByInterceptor = true
 
         // Small delay to let the toast show before redirect
         setTimeout(() => {
           window.location.href = '/login'
         }, 1500)
       } else if (hadToken) {
-        // Had token but 401 without clear auth-failure - could be permission or expired
-        showThrottledError(errorMessage || 'You are not authorized to perform this action')
+        // Had token but 401 - for POST/PUT/DELETE, likely session expired; for GET, permission issue
+        const msg = isMutating
+          ? (errorMessage || 'Your session may have expired. Please log in again.')
+          : (errorMessage || 'You are not authorized to perform this action')
+        showThrottledError(msg)
+        error._handledByInterceptor = true
       }
       // If no token: silent fail (e.g. BrandingProvider on login page) - no toast, no redirect
     } else if (error.response?.status >= 500) {
@@ -315,7 +410,8 @@ api.interceptors.response.use(
       const correlationId = error.response?.data?.correlationId || error.response?.headers?.['x-correlation-id']
       const baseMessage = error.response?.data?.message || 'Server is having trouble. Check that the backend is running and try again.'
       const errorMsg = correlationId ? `${baseMessage} (Ref: ${correlationId})` : baseMessage
-      showThrottledError(errorMsg)
+      showThrottledError(errorMsg, false, { isServerError: true })
+      error._handledByInterceptor = true
     } else if (error.response?.data?.message) {
       // Server is responding with message
       connectionManager.markConnected()
@@ -323,6 +419,7 @@ api.interceptors.response.use(
       const baseMessage = error.response.data.message
       const errorMsg = correlationId ? `Something went wrong. Ref: ${correlationId}` : baseMessage
       showThrottledError(errorMsg)
+      error._handledByInterceptor = true
     } else if (error.response?.data?.errors && Array.isArray(error.response.data.errors)) {
       // Server is responding with errors array
       connectionManager.markConnected()
@@ -330,16 +427,19 @@ api.interceptors.response.use(
       const errorMsg = error.response.data.errors.join(', ')
       const finalMsg = correlationId ? `Something went wrong. Ref: ${correlationId}` : errorMsg
       showThrottledError(finalMsg)
+      error._handledByInterceptor = true
     } else if (error.response?.data) {
       // Server is responding but structure is different
       connectionManager.markConnected()
       const correlationId = error.response?.data?.correlationId || error.response?.headers?.['x-correlation-id']
       const errorMsg = correlationId ? `Something went wrong. Ref: ${correlationId}` : 'An error occurred. Please try again.'
       showThrottledError(errorMsg)
+      error._handledByInterceptor = true
     } else {
       // Unknown error
       connectionManager.markConnected()
       showThrottledError('An error occurred. Please try again.')
+      error._handledByInterceptor = true
     }
 
     return Promise.reject(error)

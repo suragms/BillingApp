@@ -55,7 +55,7 @@ const Select = forwardRef(({
   className = '',
   required = false,
   options = [],
-  placeholder = 'Select an option',
+  placeholder = '',
   children,
   id,
   icon,

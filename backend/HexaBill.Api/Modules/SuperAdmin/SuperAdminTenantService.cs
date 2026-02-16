@@ -30,10 +30,21 @@ namespace HexaBill.Api.Modules.SuperAdmin
         Task<UserDto> UpdateTenantUserAsync(int tenantId, int userId, UpdateUserRequest request);
         Task<bool> DeleteTenantUserAsync(int tenantId, int userId);
         Task<bool> ResetTenantUserPasswordAsync(int tenantId, int userId, string newPassword);
+        Task<bool> ForceLogoutUserAsync(int tenantId, int userId, int adminUserId);
         Task<bool> ClearTenantDataAsync(int tenantId, int adminUserId);
         Task<SubscriptionDto?> UpdateTenantSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle);
         /// <summary>Duplicate data from source tenant to target tenant (Products, Settings). SystemAdmin only.</summary>
         Task<DuplicateDataResultDto> DuplicateDataToTenantAsync(int targetTenantId, int sourceTenantId, IReadOnlyList<string> dataTypes);
+        Task<TenantLimitsDto> GetTenantLimitsAsync(int tenantId);
+        Task UpdateTenantLimitsAsync(int tenantId, TenantLimitsDto dto);
+    }
+
+    public class TenantLimitsDto
+    {
+        public int MaxRequestsPerMinute { get; set; } = 200;
+        public int MaxConcurrentUsers { get; set; } = 50;
+        public int MaxStorageMb { get; set; } = 1024;
+        public int MaxInvoicesPerMonth { get; set; } = 1000;
     }
 
     public class SuperAdminTenantService : ISuperAdminTenantService
@@ -130,6 +141,16 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 var storageEstimate = totalInvoices + totalCustomers + totalProducts + totalUsers;
                 var estimatedStorageUsedMb = (int)Math.Ceiling(storageEstimate * 0.002); // rough row-based proxy
+
+                // Trials expiring in next 7 days
+                var now = DateTime.UtcNow;
+                var weekFromNow = now.AddDays(7);
+                var trialsExpiring = await _context.Tenants
+                    .Where(t => t.Status == TenantStatus.Trial && t.TrialEndDate.HasValue && t.TrialEndDate.Value >= now && t.TrialEndDate.Value <= weekFromNow)
+                    .OrderBy(t => t.TrialEndDate)
+                    .Select(t => new TrialExpiringDto { TenantId = t.Id, Name = t.Name, TrialEndDate = t.TrialEndDate!.Value })
+                    .Take(20)
+                    .ToListAsync();
                 
                 // Calculate platform infrastructure cost
                 // Formula: DB size cost + Storage cost + API requests cost
@@ -156,6 +177,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     AvgSalesPerTenant = avgSalesPerTenant,
                     TopTenants = topTenantsDto,
                     Mrr = mrr,
+                    TrialsExpiringThisWeek = trialsExpiring,
                     StorageEstimate = storageEstimate,
                     EstimatedStorageUsedMb = estimatedStorageUsedMb,
                     InfraCostEstimate = infraCostEstimate,
@@ -191,6 +213,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     AvgSalesPerTenant = 0,
                     TopTenants = new List<TopTenantBySalesDto>(),
                     Mrr = 0,
+                    TrialsExpiringThisWeek = new List<TrialExpiringDto>(),
                     StorageEstimate = 0,
                     EstimatedStorageUsedMb = 0,
                     InfraCostEstimate = 0,
@@ -272,12 +295,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     .Select(s => (DateTime?)(s.LastModifiedAt ?? s.CreatedAt))
                     .OrderByDescending(d => d)
                     .FirstOrDefaultAsync();
-                // Plan name from latest subscription
-                tenant.PlanName = await _context.Subscriptions
-                    .Where(s => s.TenantId == tenantId)
+                // Plan name and MRR from latest subscription (Plan can be null if deleted)
+                var subInfo = await _context.Subscriptions
+                    .Where(s => s.TenantId == tenantId && (s.Status == SubscriptionStatus.Active || s.Status == SubscriptionStatus.Trial) && s.Plan != null)
                     .OrderByDescending(s => s.CreatedAt)
-                    .Select(s => s.Plan.Name)
+                    .Select(s => new { s.Plan!.Name, s.Plan!.MonthlyPrice })
                     .FirstOrDefaultAsync();
+                tenant.PlanName = subInfo?.Name;
+                tenant.Mrr = subInfo?.MonthlyPrice ?? 0;
             }
 
             return new PagedResponse<TenantDto>
@@ -467,10 +492,12 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 try
                 {
+                    var initialSubStatus = (request.Status == TenantStatus.Active) ? SubscriptionStatus.Active : (SubscriptionStatus?)null;
                     await _subscriptionService.CreateSubscriptionAsync(
                         tenant.Id,
                         defaultPlan.Id,
-                        BillingCycle.Monthly
+                        BillingCycle.Monthly,
+                        initialSubStatus
                     );
                 }
                 catch (Exception)
@@ -567,7 +594,16 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 }
             }
             if (request.TrialEndDate.HasValue)
+            {
                 tenant.TrialEndDate = request.TrialEndDate;
+                // Sync to subscription so middleware and expiry jobs use updated date
+                var sub = await _context.Subscriptions
+                    .Where(s => s.TenantId == tenantId && s.Status == SubscriptionStatus.Trial)
+                    .OrderByDescending(s => s.CreatedAt)
+                    .FirstOrDefaultAsync();
+                if (sub != null)
+                    sub.TrialEndDate = request.TrialEndDate.Value;
+            }
 
             await _context.SaveChangesAsync();
 
@@ -745,6 +781,27 @@ namespace HexaBill.Api.Modules.SuperAdmin
             return true;
         }
 
+        public async Task<bool> ForceLogoutUserAsync(int tenantId, int userId, int adminUserId)
+        {
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId);
+            if (user == null) return false;
+
+            user.SessionVersion++;
+            await _context.SaveChangesAsync();
+
+            _context.AuditLogs.Add(new AuditLog
+            {
+                TenantId = tenantId,
+                OwnerId = 0,
+                UserId = adminUserId,
+                Action = "SuperAdmin:ForceLogoutUser",
+                Details = $"Force logout user {user.Email} (Id={userId}) in tenant {tenantId}",
+                CreatedAt = DateTime.UtcNow
+            });
+            await _context.SaveChangesAsync();
+            return true;
+        }
+
         public async Task<TenantUsageMetricsDto> GetTenantUsageMetricsAsync(int tenantId)
         {
             var invoiceCount = await _context.Sales.CountAsync(s => s.TenantId == tenantId && !s.IsDeleted);
@@ -913,11 +970,21 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 // Inventory Transactions
                 await _context.InventoryTransactions.Where(i => i.TenantId == tenantId).ExecuteDeleteAsync();
 
-                // Sales Returns
-                await _context.SaleReturns.Where(sr => sr.TenantId == tenantId).ExecuteDeleteAsync();
+                // Sales Returns (delete items first - FK constraint)
+                var saleReturnIds = await _context.SaleReturns.Where(sr => sr.TenantId == tenantId).Select(sr => sr.Id).ToListAsync();
+                if (saleReturnIds.Any())
+                {
+                    await _context.SaleReturnItems.Where(sri => saleReturnIds.Contains(sri.SaleReturnId)).ExecuteDeleteAsync();
+                    await _context.SaleReturns.Where(sr => sr.TenantId == tenantId).ExecuteDeleteAsync();
+                }
 
-                // Purchase Returns
-                await _context.PurchaseReturns.Where(pr => pr.TenantId == tenantId).ExecuteDeleteAsync();
+                // Purchase Returns (delete items first - FK constraint)
+                var purchaseReturnIds = await _context.PurchaseReturns.Where(pr => pr.TenantId == tenantId).Select(pr => pr.Id).ToListAsync();
+                if (purchaseReturnIds.Any())
+                {
+                    await _context.PurchaseReturnItems.Where(pri => purchaseReturnIds.Contains(pri.PurchaseReturnId)).ExecuteDeleteAsync();
+                    await _context.PurchaseReturns.Where(pr => pr.TenantId == tenantId).ExecuteDeleteAsync();
+                }
 
                 // Purchases
                 var purchaseIds = await _context.Purchases.Where(p => p.TenantId == tenantId).Select(p => p.Id).ToListAsync();
@@ -932,10 +999,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     .Where(p => p.TenantId == tenantId && p.StockQty != 0)
                     .ExecuteUpdateAsync(p => p.SetProperty(x => x.StockQty, 0));
 
-                // Reset customer balances to 0 (keep customers)
+                // Reset customer balances and totals to 0 (keep customers)
                 await _context.Customers
-                    .Where(c => c.TenantId == tenantId && c.Balance != 0)
-                    .ExecuteUpdateAsync(c => c.SetProperty(x => x.Balance, 0));
+                    .Where(c => c.TenantId == tenantId)
+                    .ExecuteUpdateAsync(c => c
+                        .SetProperty(x => x.Balance, 0)
+                        .SetProperty(x => x.PendingBalance, 0)
+                        .SetProperty(x => x.TotalSales, 0)
+                        .SetProperty(x => x.TotalPayments, 0));
 
                 // Clear alerts
                 await _context.Alerts.Where(a => a.TenantId == tenantId).ExecuteDeleteAsync();
@@ -943,6 +1014,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 // Create audit log entry
                 var auditLog = new AuditLog
                 {
+                    TenantId = tenantId,
+                    OwnerId = tenantId,
                     UserId = adminUserId,
                     Action = "TENANT_DATA_CLEAR",
                     Details = $"Data cleared for tenant ID {tenantId} ({tenant.Name}).",
@@ -1010,6 +1083,47 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             await _context.SaveChangesAsync();
             return true;
+        }
+
+        private const int PLATFORM_OWNER_ID = 0;
+
+        public async Task<TenantLimitsDto> GetTenantLimitsAsync(int tenantId)
+        {
+            var key = $"TENANT_LIMITS_{tenantId}";
+            var setting = await _context.Settings
+                .FirstOrDefaultAsync(s => s.Key == key && s.OwnerId == PLATFORM_OWNER_ID);
+            if (setting == null || string.IsNullOrEmpty(setting.Value))
+                return new TenantLimitsDto();
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize<TenantLimitsDto>(setting.Value) ?? new TenantLimitsDto();
+            }
+            catch { return new TenantLimitsDto(); }
+        }
+
+        public async Task UpdateTenantLimitsAsync(int tenantId, TenantLimitsDto dto)
+        {
+            var key = $"TENANT_LIMITS_{tenantId}";
+            var value = System.Text.Json.JsonSerializer.Serialize(new TenantLimitsDto
+            {
+                MaxRequestsPerMinute = dto.MaxRequestsPerMinute > 0 ? dto.MaxRequestsPerMinute : 200,
+                MaxConcurrentUsers = dto.MaxConcurrentUsers > 0 ? dto.MaxConcurrentUsers : 50,
+                MaxStorageMb = dto.MaxStorageMb > 0 ? dto.MaxStorageMb : 1024,
+                MaxInvoicesPerMonth = dto.MaxInvoicesPerMonth > 0 ? dto.MaxInvoicesPerMonth : 1000
+            });
+            var existing = await _context.Settings
+                .FirstOrDefaultAsync(s => s.Key == key && s.OwnerId == PLATFORM_OWNER_ID);
+            var now = DateTime.UtcNow;
+            if (existing != null)
+            {
+                existing.Value = value;
+                existing.UpdatedAt = now;
+            }
+            else
+            {
+                _context.Settings.Add(new Setting { Key = key, OwnerId = PLATFORM_OWNER_ID, Value = value, CreatedAt = now, UpdatedAt = now });
+            }
+            await _context.SaveChangesAsync();
         }
 
         public async Task<DuplicateDataResultDto> DuplicateDataToTenantAsync(int targetTenantId, int sourceTenantId, IReadOnlyList<string> dataTypes)
@@ -1118,6 +1232,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public decimal AvgSalesPerTenant { get; set; }
         public List<TopTenantBySalesDto> TopTenants { get; set; } = new();
         public decimal Mrr { get; set; }
+        public List<TrialExpiringDto> TrialsExpiringThisWeek { get; set; } = new();
         public int StorageEstimate { get; set; }
         public int EstimatedStorageUsedMb { get; set; }
         public decimal InfraCostEstimate { get; set; }
@@ -1131,6 +1246,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public int TenantId { get; set; }
         public string TenantName { get; set; } = string.Empty;
         public decimal TotalSales { get; set; }
+    }
+
+    public class TrialExpiringDto
+    {
+        public int TenantId { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public DateTime TrialEndDate { get; set; }
     }
 
     public class TenantDto
@@ -1160,6 +1282,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public DateTime? LastLogin { get; set; }
         public DateTime? LastActivity { get; set; }
         public string? PlanName { get; set; }
+        public decimal Mrr { get; set; }
     }
 
     public class TenantDetailDto : TenantDto

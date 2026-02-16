@@ -15,7 +15,7 @@ namespace HexaBill.Api.Modules.Subscription
         Task<List<SubscriptionPlanDto>> GetPlansAsync();
         Task<SubscriptionPlanDto?> GetPlanByIdAsync(int planId);
         Task<SubscriptionDto?> GetTenantSubscriptionAsync(int tenantId);
-        Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle);
+        Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle, SubscriptionStatus? initialStatus = null);
         Task<SubscriptionDto> UpdateSubscriptionAsync(int subscriptionId, int? planId, BillingCycle? billingCycle);
         Task<bool> CancelSubscriptionAsync(int subscriptionId, string reason);
         Task<bool> RenewSubscriptionAsync(int subscriptionId);
@@ -112,7 +112,7 @@ namespace HexaBill.Api.Modules.Subscription
             return MapToDto(subscription);
         }
 
-        public async Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle)
+        public async Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle, SubscriptionStatus? initialStatus = null)
         {
             var plan = await _context.SubscriptionPlans.FindAsync(planId);
             if (plan == null)
@@ -129,15 +129,20 @@ namespace HexaBill.Api.Modules.Subscription
                 throw new InvalidOperationException("Tenant already has an active subscription");
             }
 
+            var isPaidActivation = initialStatus == SubscriptionStatus.Active;
+            var subStatus = isPaidActivation ? SubscriptionStatus.Active : SubscriptionStatus.Trial;
+            var trialEndDate = isPaidActivation ? (DateTime?)null : DateTime.UtcNow.AddDays(plan.TrialDays);
+
             var subscription = new HexaBill.Api.Models.Subscription
             {
                 TenantId = tenantId,
                 PlanId = planId,
                 Plan = plan, // Explicitly set navigation property
-                Status = SubscriptionStatus.Trial,
+                Status = subStatus,
                 BillingCycle = billingCycle,
                 StartDate = DateTime.UtcNow,
-                TrialEndDate = DateTime.UtcNow.AddDays(plan.TrialDays),
+                TrialEndDate = trialEndDate,
+                NextBillingDate = isPaidActivation ? DateTime.UtcNow.AddMonths(1) : trialEndDate,
                 Amount = billingCycle == BillingCycle.Monthly ? plan.MonthlyPrice : plan.YearlyPrice,
                 Currency = plan.Currency,
                 CreatedAt = DateTime.UtcNow
@@ -146,9 +151,9 @@ namespace HexaBill.Api.Modules.Subscription
             _context.Subscriptions.Add(subscription);
             await _context.SaveChangesAsync();
 
-            // Update tenant status
+            // Update tenant status only when creating Trial subscription (preserve caller-set Active when isPaidActivation)
             var tenant = await _context.Tenants.FindAsync(tenantId);
-            if (tenant != null)
+            if (tenant != null && !isPaidActivation)
             {
                 tenant.Status = TenantStatus.Trial;
                 tenant.TrialEndDate = subscription.TrialEndDate;

@@ -32,13 +32,15 @@ namespace HexaBill.Api.Modules.Branches
             }
             catch (Exception ex)
             {
+                var inner = ex.InnerException?.Message ?? "";
                 Console.WriteLine($"❌ GetRoutes Error: {ex.Message}");
-                if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+                if (!string.IsNullOrEmpty(inner)) Console.WriteLine($"❌ Inner: {inner}");
+                Console.WriteLine($"❌ Stack: {ex.StackTrace}");
                 return StatusCode(500, new ApiResponse<List<RouteDto>>
                 {
                     Success = false,
                     Message = "Failed to load routes. Check that the Routes table exists and migrations are applied.",
-                    Errors = new List<string> { ex.Message }
+                    Errors = new List<string> { ex.Message, inner }.Where(s => !string.IsNullOrEmpty(s)).ToList()
                 });
             }
         }
@@ -61,6 +63,17 @@ namespace HexaBill.Api.Modules.Branches
             var summary = await _routeService.GetRouteSummaryAsync(id, tenantId, fromDate, toDate);
             if (summary == null) return NotFound(new ApiResponse<RouteSummaryDto> { Success = false, Message = "Route not found." });
             return Ok(new ApiResponse<RouteSummaryDto> { Success = true, Data = summary });
+        }
+
+        [HttpGet("{id}/collection-sheet")]
+        public async Task<ActionResult<ApiResponse<RouteCollectionSheetDto>>> GetRouteCollectionSheet(int id, [FromQuery] DateTime? date)
+        {
+            var tenantId = CurrentTenantId;
+            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+            var sheetDate = date ?? DateTime.UtcNow.Date;
+            var sheet = await _routeService.GetRouteCollectionSheetAsync(id, tenantId, sheetDate);
+            if (sheet == null) return NotFound(new ApiResponse<RouteCollectionSheetDto> { Success = false, Message = "Route not found." });
+            return Ok(new ApiResponse<RouteCollectionSheetDto> { Success = true, Data = sheet });
         }
 
         [HttpPost]

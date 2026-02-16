@@ -18,7 +18,7 @@ export const useBranding = () => {
 }
 
 const getApiBaseUrl = () => {
-  const env = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001/api'
+  const env = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
   return env.replace(/\/api\/?$/, '')
 }
 

@@ -106,10 +106,19 @@ const Login = ({ isSuperAdminLogin = false }) => {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-50 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-neutral-50 flex">
+      {/* Task 31: Split screen - left brand (desktop), right form */}
+      <div className="hidden lg:flex lg:w-1/2 lg:flex-col lg:items-center lg:justify-center lg:bg-primary-50 lg:border-r lg:border-primary-200">
+        <div className="max-w-sm px-8 text-center">
+          <Logo size="large" showText={true} />
+          <p className="mt-6 text-lg text-primary-700 font-medium">Billing & inventory for Indian SMBs</p>
+          <p className="mt-2 text-sm text-primary-600">Professional invoices, POS, and reports in one place.</p>
+        </div>
+      </div>
+      <div className="flex-1 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
-          <div className="mx-auto flex justify-center mb-4">
+          <div className="mx-auto flex justify-center mb-4 lg:hidden">
             <Logo size="large" showText={true} />
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-900" style={{ fontFamily: "'Inter', sans-serif" }}>
@@ -120,7 +129,7 @@ const Login = ({ isSuperAdminLogin = false }) => {
           </p>
         </div>
 
-        <div className="bg-white py-8 px-6 rounded-xl border border-neutral-200">
+        <div className={`bg-white py-8 px-6 rounded-xl border border-neutral-200 ${(errors.email || errors.password) ? 'animate-shake' : ''}`}>
           <form className="space-y-6" onSubmit={handleSubmit(onSubmit)}>
             <Input
               ref={emailInputRef}
@@ -213,6 +222,7 @@ const Login = ({ isSuperAdminLogin = false }) => {
         <div className="text-center text-sm text-neutral-400" style={{ fontFamily: "'Inter', sans-serif" }}>
           <p>© 2026 HexaBill</p>
         </div>
+      </div>
       </div>
     </div>
   )

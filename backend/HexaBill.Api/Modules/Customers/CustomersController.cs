@@ -33,7 +33,9 @@ namespace HexaBill.Api.Modules.Customers
         public async Task<ActionResult<ApiResponse<PagedResponse<CustomerDto>>>> GetCustomers(
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10,
-            [FromQuery] string? search = null)
+            [FromQuery] string? search = null,
+            [FromQuery] int? branchId = null,
+            [FromQuery] int? routeId = null)
         {
             try
             {
@@ -84,7 +86,7 @@ namespace HexaBill.Api.Modules.Customers
                     });
                 }
                 
-                var result = await _customerService.GetCustomersAsync(tenantId, page, pageSize, search);
+                var result = await _customerService.GetCustomersAsync(tenantId, page, pageSize, search, branchId, routeId);
                 return Ok(new ApiResponse<PagedResponse<CustomerDto>>
                 {
                     Success = true,

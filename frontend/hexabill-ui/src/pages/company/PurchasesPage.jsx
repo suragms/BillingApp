@@ -330,16 +330,16 @@ const PurchasesPage = () => {
       if (editingPurchase) {
         response = await purchasesAPI.updatePurchase(editingPurchase.id, purchaseData)
         if (response.success) {
-          toast.success('Purchase updated successfully!')
+          toast.success('Purchase updated successfully!', { id: 'purchase-update', duration: 4000 })
         } else {
           toast.error(response.message || 'Failed to update purchase')
         }
       } else {
         response = await purchasesAPI.createPurchase(purchaseData)
         if (response.success) {
-          toast.success('Purchase created successfully!')
+          toast.success('Purchase created successfully!', { id: 'purchase-create', duration: 4000 })
         } else {
-          toast.error(response.message || 'Failed to create purchase')
+          toast.error(response.message || 'Failed to create purchase', { id: 'purchase-create' })
         }
       }
 
@@ -419,11 +419,11 @@ const PurchasesPage = () => {
         try {
           const response = await purchasesAPI.deletePurchase(purchase.id)
           if (response.success) {
-            toast.success(`Purchase deleted! Stock reversed for ${response.data.itemsCount} items.`)
+            toast.success(`Purchase deleted! Stock reversed for ${response.data.itemsCount} items.`, { id: 'purchase-delete', duration: 4000 })
             loadPurchases()
             loadProducts()
           } else {
-            toast.error(response.message || 'Failed to delete purchase')
+            toast.error(response.message || 'Failed to delete purchase', { id: 'purchase-delete' })
           }
         } catch (error) {
           console.error('Delete purchase error:', error)

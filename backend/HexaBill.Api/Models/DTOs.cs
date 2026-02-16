@@ -328,6 +328,7 @@ namespace HexaBill.Api.Models
         public string? Trn { get; set; }
         public string? Address { get; set; }
         public decimal CreditLimit { get; set; }
+        public string? PaymentTerms { get; set; }
         public decimal Balance { get; set; }
         
         /// <summary>
@@ -353,6 +354,7 @@ namespace HexaBill.Api.Models
         public string? Trn { get; set; }
         public string? Address { get; set; }
         public decimal CreditLimit { get; set; }
+        public string? PaymentTerms { get; set; }
         
         /// <summary>
         /// Customer type: "Credit" or "Cash"
@@ -436,6 +438,18 @@ namespace HexaBill.Api.Models
         public List<ProductDto> LowMarginProducts { get; set; } = new();
         public List<CustomerDto> PendingCustomers { get; set; } = new();
         public List<ProductDto> PromotionCandidates { get; set; } = new();
+    }
+
+    public class StaffPerformanceDto
+    {
+        public int UserId { get; set; }
+        public string UserName { get; set; } = string.Empty;
+        public string AssignedRoutes { get; set; } = string.Empty;
+        public int InvoicesCreated { get; set; }
+        public decimal TotalBilled { get; set; }
+        public decimal CashCollected { get; set; }
+        public decimal CollectionRatePercent { get; set; }
+        public double AvgDaysToPay { get; set; }
     }
 
     public class PendingBillDto
@@ -539,6 +553,27 @@ namespace HexaBill.Api.Models
         public DateTime AssignedAt { get; set; }
     }
 
+    /// <summary>Collection sheet entry for daily route collection - printable for drivers.</summary>
+    public class RouteCollectionSheetEntryDto
+    {
+        public int CustomerId { get; set; }
+        public string CustomerName { get; set; } = string.Empty;
+        public string? Phone { get; set; }
+        public decimal OutstandingBalance { get; set; }
+        public decimal? TodayInvoiceAmount { get; set; }
+        public string? Remarks { get; set; }
+    }
+
+    public class RouteCollectionSheetDto
+    {
+        public string RouteName { get; set; } = string.Empty;
+        public string BranchName { get; set; } = string.Empty;
+        public string Date { get; set; } = string.Empty;
+        public string? StaffName { get; set; }
+        public List<RouteCollectionSheetEntryDto> Customers { get; set; } = new();
+        public decimal TotalOutstanding { get; set; }
+    }
+
     public class RouteExpenseDto
     {
         public int Id { get; set; }
@@ -586,6 +621,7 @@ namespace HexaBill.Api.Models
         public string BranchName { get; set; } = string.Empty;
         public decimal TotalSales { get; set; }
         public decimal TotalExpenses { get; set; }
+        public decimal CostOfGoodsSold { get; set; }
         public decimal Profit { get; set; }
     }
 
@@ -595,8 +631,14 @@ namespace HexaBill.Api.Models
         public string BranchName { get; set; } = string.Empty;
         public decimal TotalSales { get; set; }
         public decimal TotalExpenses { get; set; }
+        public decimal CostOfGoodsSold { get; set; }
         public decimal Profit { get; set; }
         public List<RouteSummaryDto> Routes { get; set; } = new();
+    }
+
+    public class BranchComparisonItemDto : BranchSummaryDto
+    {
+        public decimal? GrowthPercent { get; set; }
     }
 
     // Common DTOs

@@ -93,16 +93,19 @@ const AlertNotifications = () => {
       }
     } catch (error) {
       console.error('Failed to fetch alerts:', error)
-      toast.error('Failed to load notifications')
+      if (!error?._handledByInterceptor) toast.error('Failed to load notifications')
     } finally {
       setLoading(false)
     }
   }
 
-  // Poll for new alerts every 30 seconds
+  // Poll for new alerts every 30 seconds — only when tab is visible
   useEffect(() => {
     fetchUnreadCount()
-    const interval = setInterval(fetchUnreadCount, 30000)
+    const poll = () => {
+      if (document.visibilityState === 'visible') fetchUnreadCount()
+    }
+    const interval = setInterval(poll, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -126,20 +129,23 @@ const AlertNotifications = () => {
       }
     } catch (error) {
       console.error('Failed to mark all as read:', error)
-      toast.error('Failed to mark all as read')
+      if (!error?._handledByInterceptor) toast.error('Failed to mark all as read')
     }
   }
 
-  const handleClearResolved = async () => {
+  const handleDismissAll = async () => {
     try {
-      const response = await alertsAPI.clearResolved()
-      if (response?.success) {
-        setAlerts(alerts.filter(a => !a.isResolved))
-        toast.success(`Cleared ${response.data || 0} resolved alerts`)
-      }
+      await alertsAPI.markAllAsResolved()
+      const clearRes = await alertsAPI.clearResolved()
+      setAlerts([])
+      setUnreadCount(0)
+      await fetchAlerts()
+      await fetchUnreadCount()
+      const totalRemoved = (clearRes?.data || 0)
+      toast.success(totalRemoved > 0 ? `Dismissed ${totalRemoved} notifications` : 'All notifications dismissed')
     } catch (error) {
-      console.error('Failed to clear resolved:', error)
-      toast.error('Failed to clear resolved alerts')
+      console.error('Failed to dismiss all:', error)
+      toast.error('Failed to dismiss notifications')
     }
   }
 
@@ -160,7 +166,7 @@ const AlertNotifications = () => {
       toast.success('Alert resolved')
     } catch (error) {
       console.error('Failed to resolve alert:', error)
-      toast.error('Failed to resolve alert')
+      if (!error?._handledByInterceptor) toast.error('Failed to resolve alert')
     }
   }
 
@@ -207,7 +213,8 @@ const AlertNotifications = () => {
       <button
         onClick={() => setShowPanel(!showPanel)}
         className="relative p-2 hover:bg-blue-700 rounded-lg transition flex items-center justify-center"
-        title="Notifications"
+        title="Alerts & notifications — low stock, overdue invoices, balance issues"
+        aria-label="View alerts and notifications"
       >
         <Bell className="h-5 w-5" />
         {unreadCount > 0 && (
@@ -243,12 +250,12 @@ const AlertNotifications = () => {
                       <span>Read All</span>
                     </button>
                     <button
-                      onClick={handleClearResolved}
+                      onClick={handleDismissAll}
                       className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 flex items-center space-x-1"
-                      title="Clear resolved alerts"
+                      title="Dismiss all notifications"
                     >
                       <Trash2 className="h-3 w-3" />
-                      <span>Clear</span>
+                      <span>Dismiss All</span>
                     </button>
                   </>
                 )}

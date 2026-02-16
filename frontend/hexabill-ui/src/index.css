@@ -1,3 +1,5 @@
+@import './styles/design-tokens.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -82,24 +84,46 @@
     @apply px-4 py-2 rounded-lg font-medium transition-colors duration-150;
   }
 
+  /* Task 9: Global button styles - primary CTA, secondary, disabled */
   .btn-primary {
-    @apply bg-primary-600 text-white hover:bg-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2;
+    @apply bg-primary-600 text-white hover:bg-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 active:scale-[0.98] transition-transform duration-75;
   }
 
   .btn-secondary {
-    @apply bg-white border border-primary-200 text-primary-700 hover:bg-primary-50 focus:ring-2 focus:ring-primary-400 focus:ring-offset-2;
+    @apply bg-white border border-primary-200 text-primary-700 hover:bg-primary-50 focus:ring-2 focus:ring-primary-400 focus:ring-offset-2 active:scale-[0.98] transition-transform duration-75;
   }
 
   .btn-danger {
-    @apply bg-error text-white hover:opacity-90 focus:ring-2 focus:ring-error focus:ring-offset-2;
+    @apply bg-error text-white hover:opacity-90 focus:ring-2 focus:ring-error focus:ring-offset-2 active:scale-[0.98] transition-transform duration-75;
   }
 
   .btn-success {
-    @apply bg-success text-white hover:opacity-90 focus:ring-2 focus:ring-success focus:ring-offset-2;
+    @apply bg-success text-white hover:opacity-90 focus:ring-2 focus:ring-success focus:ring-offset-2 active:scale-[0.98] transition-transform duration-75;
   }
 
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  /* Task 10: Global input styles - focus ring, error state, disabled */
   .input {
     @apply w-full px-3 py-2 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500;
+  }
+
+  .input:focus {
+    outline: none;
+  }
+
+  .input.input-error {
+    @apply border-error focus:ring-error focus:border-error;
+  }
+
+  .input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    @apply bg-neutral-100;
   }
 
   .table {
@@ -135,5 +159,14 @@
 
   .safe-area-bottom {
     padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  /* Task 15: Section spacing 32-48px between major sections */
+  .section-gap {
+    gap: 32px;
+  }
+
+  .section-gap-lg {
+    gap: 48px;
   }
 }

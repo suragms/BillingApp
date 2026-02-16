@@ -3,12 +3,16 @@ Purpose: Super Admin Tenant Management Controller
 Author: AI Assistant
 Date: 2026-02-11
 */
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using HexaBill.Api.Modules.Subscription;
 using HexaBill.Api.Shared.Extensions;
+using HexaBill.Api.Shared.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.EntityFrameworkCore;
 
 namespace HexaBill.Api.Modules.SuperAdmin
 {
@@ -20,12 +24,70 @@ namespace HexaBill.Api.Modules.SuperAdmin
         private readonly ISuperAdminTenantService _tenantService;
         private readonly ILogger<TenantController> _logger;
         private readonly IConfiguration _configuration;
+        private readonly AppDbContext _context;
+        private readonly ITenantActivityService _activityService;
 
-        public TenantController(ISuperAdminTenantService tenantService, ILogger<TenantController> logger, IConfiguration configuration)
+        public TenantController(ISuperAdminTenantService tenantService, ILogger<TenantController> logger, IConfiguration configuration, AppDbContext context, ITenantActivityService activityService)
         {
             _tenantService = tenantService;
             _logger = logger;
             _configuration = configuration;
+            _context = context;
+            _activityService = activityService;
+        }
+
+        /// <summary>
+        /// Get top tenants by API requests in last 60 minutes (Live Activity). SystemAdmin only.
+        /// </summary>
+        [HttpGet("/api/superadmin/tenant-activity")]
+        public async Task<ActionResult<ApiResponse<object>>> GetTenantActivity()
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var top = _activityService.GetTopTenantsByRequestsLast60Min(10);
+                var tenantIds = top.Select(t => t.TenantId).Distinct().ToList();
+                var tenants = await _context.Tenants.AsNoTracking()
+                    .Where(t => tenantIds.Contains(t.Id))
+                    .ToDictionaryAsync(t => t.Id, t => t.Name);
+                var result = top.Select(t => new
+                {
+                    tenantId = t.TenantId,
+                    tenantName = tenants.TryGetValue(t.TenantId, out var n) ? n : $"Tenant {t.TenantId}",
+                    requestCount = t.RequestCount,
+                    lastActiveAt = t.LastActiveAt,
+                    isHighVolume = t.IsHighVolume
+                }).ToList();
+                return Ok(new ApiResponse<object> { Success = true, Data = result });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting tenant activity");
+                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+            }
+        }
+
+        private async Task WriteSuperAdminAuditAsync(string action, int? affectedTenantId, string details)
+        {
+            var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId)) return;
+            try
+            {
+                _context.AuditLogs.Add(new AuditLog
+                {
+                    OwnerId = 0,
+                    TenantId = affectedTenantId,
+                    UserId = userId,
+                    Action = $"SuperAdmin:{action}",
+                    Details = details,
+                    CreatedAt = DateTime.UtcNow
+                });
+                await _context.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to write SuperAdmin audit for {Action}", action);
+            }
         }
 
         /// <summary>
@@ -89,6 +151,51 @@ namespace HexaBill.Api.Modules.SuperAdmin
             catch (Exception ex)
             {
                 return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Log SuperAdmin impersonation start (audit trail). Call before redirecting to tenant workspace.
+        /// </summary>
+        [HttpPost("impersonate/enter")]
+        public async Task<ActionResult<ApiResponse<object>>> ImpersonateEnter([FromBody] ImpersonateRequest request)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            if (request?.TenantId == null || request.TenantId <= 0) return BadRequest(new ApiResponse<object> { Success = false, Message = "Invalid tenantId" });
+            try
+            {
+                var tenant = await _context.Tenants.AsNoTracking().FirstOrDefaultAsync(t => t.Id == request.TenantId);
+                var tenantName = tenant?.Name ?? $"Tenant {request.TenantId}";
+                await WriteSuperAdminAuditAsync("ImpersonateEnter", request.TenantId, $"Entered workspace of: {tenantName}");
+                return Ok(new ApiResponse<object> { Success = true, Message = "Logged" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to log impersonate enter");
+                return Ok(new ApiResponse<object> { Success = true, Message = "Logged" }); // Don't block impersonation on audit failure
+            }
+        }
+
+        /// <summary>
+        /// Log SuperAdmin impersonation end (audit trail). Call when exiting tenant workspace.
+        /// </summary>
+        [HttpPost("impersonate/exit")]
+        public async Task<ActionResult<ApiResponse<object>>> ImpersonateExit([FromBody] ImpersonateExitRequest request)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            var tenantId = request?.TenantId ?? 0;
+            var details = !string.IsNullOrEmpty(request?.TenantName)
+                ? $"Exited workspace of: {request.TenantName}"
+                : tenantId > 0 ? $"Exited workspace of tenant {tenantId}" : "Exited impersonation";
+            try
+            {
+                await WriteSuperAdminAuditAsync("ImpersonateExit", tenantId > 0 ? tenantId : null, details);
+                return Ok(new ApiResponse<object> { Success = true, Message = "Logged" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to log impersonate exit");
+                return Ok(new ApiResponse<object> { Success = true, Message = "Logged" });
             }
         }
 
@@ -202,6 +309,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 }
 
                 var tenant = await _tenantService.CreateTenantAsync(request);
+                await WriteSuperAdminAuditAsync("CreateTenant", tenant.Id, $"Tenant: {tenant.Name}, Email: {tenant.Email ?? request.Email ?? "N/A"}");
+
                 var clientAppLink = _configuration["ClientApp:BaseUrl"] ?? "http://localhost:5176";
                 var clientEmail = tenant.Email ?? request.Email ?? "";
 
@@ -307,6 +416,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         Message = "Tenant not found"
                     });
                 }
+                await WriteSuperAdminAuditAsync("SuspendTenant", id, $"Reason: {request.Reason ?? "Suspended by Super Admin"}");
 
                 return Ok(new ApiResponse<object>
                 {
@@ -348,6 +458,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         Message = "Tenant not found"
                     });
                 }
+                await WriteSuperAdminAuditAsync("ActivateTenant", id, "Tenant reactivated");
 
                 return Ok(new ApiResponse<object>
                 {
@@ -481,6 +592,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 {
                     return NotFound(new ApiResponse<object> { Success = false, Message = "Tenant not found" });
                 }
+                await WriteSuperAdminAuditAsync("ClearTenantData", id, "All transactional data cleared for tenant");
 
                 return Ok(new ApiResponse<object> { Success = true, Message = "Tenant data cleared successfully" });
             }
@@ -502,6 +614,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 {
                     return NotFound(new ApiResponse<SubscriptionDto> { Success = false, Message = "Tenant not found" });
                 }
+                await WriteSuperAdminAuditAsync("UpdateTenantSubscription", id, $"PlanId: {request.PlanId}, BillingCycle: {request.BillingCycle}");
 
                 return Ok(new ApiResponse<SubscriptionDto>
                 {
@@ -576,6 +689,23 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
+        [HttpPost("{id}/users/{userId}/force-logout")]
+        public async Task<ActionResult<ApiResponse<bool>>> ForceLogoutUser(int id, int userId)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var adminUserId = int.Parse(User.FindFirst("id")?.Value ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "0");
+                var success = await _tenantService.ForceLogoutUserAsync(id, userId, adminUserId);
+                if (!success) return NotFound(new ApiResponse<bool> { Success = false, Message = "User not found" });
+                return Ok(new ApiResponse<bool> { Success = true, Message = "User will be logged out on next request", Data = true });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<bool> { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpPut("{id}/users/{userId}/reset-password")]
         public async Task<ActionResult<ApiResponse<bool>>> ResetTenantUserPassword(int id, int userId, [FromBody] ResetPasswordRequest request)
         {
@@ -589,6 +719,38 @@ namespace HexaBill.Api.Modules.SuperAdmin
             catch (Exception ex)
             {
                 return StatusCode(500, new ApiResponse<bool> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>Get per-tenant rate limits and quotas. SystemAdmin only.</summary>
+        [HttpGet("{id}/limits")]
+        public async Task<ActionResult<ApiResponse<TenantLimitsDto>>> GetTenantLimits(int id)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var limits = await _tenantService.GetTenantLimitsAsync(id);
+                return Ok(new ApiResponse<TenantLimitsDto> { Success = true, Data = limits });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<TenantLimitsDto> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>Update per-tenant rate limits and quotas. SystemAdmin only.</summary>
+        [HttpPut("{id}/limits")]
+        public async Task<ActionResult<ApiResponse<object>>> UpdateTenantLimits(int id, [FromBody] TenantLimitsDto dto)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                await _tenantService.UpdateTenantLimitsAsync(id, dto);
+                return Ok(new ApiResponse<object> { Success = true, Message = "Limits updated" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
             }
         }
 
@@ -626,6 +788,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
     public class SuspendTenantRequest
     {
         public string? Reason { get; set; }
+    }
+
+    public class ImpersonateRequest
+    {
+        public int TenantId { get; set; }
+    }
+
+    public class ImpersonateExitRequest
+    {
+        public int? TenantId { get; set; }
+        public string? TenantName { get; set; }
     }
 
     /// <summary>Response when creating a tenant: tenant data + credentials to give to the client.</summary>

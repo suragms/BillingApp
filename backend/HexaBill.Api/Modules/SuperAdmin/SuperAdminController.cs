@@ -18,7 +18,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
 {
     [ApiController]
     [Route("api/[controller]")]
-    [Authorize(Roles = "Admin,Owner")] // CRITICAL: Allow Owner role to access all admin features
+    [Authorize(Policy = "AdminOrOwner")] // Production: case-insensitive Admin/Owner/SystemAdmin
     public class AdminController : TenantScopedController // MULTI-TENANT
     {
         private readonly IBackupService _backupService;
@@ -626,7 +626,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
         }
 
         [HttpGet("backups")]
-        [Authorize(Roles = "Admin,Owner,Staff")] // CRITICAL: Allow Owner role to access backups
+        [Authorize(Policy = "AdminOrOwnerOrStaff")]
         public async Task<ActionResult<ApiResponse<List<string>>>> GetBackups()
         {
             try

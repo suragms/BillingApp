@@ -32,6 +32,8 @@ namespace HexaBill.Api.Models
         public string? Phone { get; set; }
         public string? DashboardPermissions { get; set; } // Comma-separated list of allowed items
         public DateTime CreatedAt { get; set; }
+        /// <summary>Incremented when Force Logout is triggered. JWT session_version must match or 401.</summary>
+        public int SessionVersion { get; set; }
     }
 
     public enum UserRole

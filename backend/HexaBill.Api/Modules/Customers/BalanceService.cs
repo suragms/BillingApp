@@ -20,7 +20,7 @@ namespace HexaBill.Api.Modules.Customers
         Task UpdateCustomerBalanceOnPaymentCreatedAsync(int customerId, decimal paymentAmount);
         Task UpdateCustomerBalanceOnPaymentDeletedAsync(int customerId, decimal paymentAmount);
         Task<BalanceValidationResult> ValidateCustomerBalanceAsync(int customerId);
-        Task<List<BalanceMismatch>> DetectAllBalanceMismatchesAsync();
+        Task<List<BalanceMismatch>> DetectAllBalanceMismatchesAsync(int? tenantId = null);
         Task<bool> FixBalanceMismatchAsync(int customerId);
         Task<bool> CanCustomerReceiveCreditAsync(int customerId, decimal additionalAmount);
     }
@@ -278,12 +278,18 @@ namespace HexaBill.Api.Modules.Customers
         }
 
         /// <summary>
-        /// Detect all balance mismatches across all customers
+        /// Detect all balance mismatches across customers.
+        /// When tenantId is null (Super Admin), scans all. Otherwise filters by tenant for data isolation.
         /// </summary>
-        public async Task<List<BalanceMismatch>> DetectAllBalanceMismatchesAsync()
+        public async Task<List<BalanceMismatch>> DetectAllBalanceMismatchesAsync(int? tenantId = null)
         {
             var mismatches = new List<BalanceMismatch>();
-            var customers = await _context.Customers.ToListAsync();
+            var query = _context.Customers.AsQueryable();
+            if (tenantId.HasValue && tenantId.Value > 0)
+            {
+                query = query.Where(c => c.TenantId == tenantId.Value);
+            }
+            var customers = await query.ToListAsync();
 
             foreach (var customer in customers)
             {

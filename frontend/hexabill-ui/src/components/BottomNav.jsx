@@ -19,7 +19,7 @@ const BottomNav = () => {
       className="fixed bottom-0 left-0 right-0 bg-white border-t border-[#E5E7EB] z-50 lg:hidden safe-area-bottom"
       aria-label="Main navigation"
     >
-      <div className="flex items-stretch h-14 max-w-screen-sm mx-auto">
+      <div className="flex items-stretch h-14 max-w-screen-sm mx-auto min-h-[56px]">
         {navItems.map((item) => {
           const Icon = item.icon
           const active = isActive(item.href)

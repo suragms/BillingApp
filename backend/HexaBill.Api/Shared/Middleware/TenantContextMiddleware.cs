@@ -5,6 +5,7 @@ Date: 2026
 */
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 
 namespace HexaBill.Api.Shared.Middleware
@@ -17,11 +18,13 @@ namespace HexaBill.Api.Shared.Middleware
     {
         private readonly RequestDelegate _next;
         private readonly ILogger<TenantContextMiddleware> _logger;
+        private readonly IWebHostEnvironment _env;
 
-        public TenantContextMiddleware(RequestDelegate next, ILogger<TenantContextMiddleware> logger)
+        public TenantContextMiddleware(RequestDelegate next, ILogger<TenantContextMiddleware> logger, IWebHostEnvironment env)
         {
             _next = next;
             _logger = logger;
+            _env = env;
         }
 
         public async Task InvokeAsync(HttpContext context, AppDbContext dbContext)
@@ -46,9 +49,11 @@ namespace HexaBill.Api.Shared.Middleware
 
             try
             {
-                // Extract tenant_id from JWT claim (or owner_id during migration)
+                // Extract tenant_id from JWT claim - check multiple claim type formats (JWT serialization may vary)
                 var tenantIdClaim = context.User.FindFirst("tenant_id")?.Value
-                    ?? context.User.FindFirst("owner_id")?.Value; // Migration fallback
+                    ?? context.User.FindFirst("owner_id")?.Value
+                    ?? context.User.Claims.FirstOrDefault(c => c.Type.EndsWith("tenant_id", StringComparison.OrdinalIgnoreCase))?.Value
+                    ?? context.User.Claims.FirstOrDefault(c => c.Type.EndsWith("owner_id", StringComparison.OrdinalIgnoreCase))?.Value;
 
                 if (string.IsNullOrEmpty(tenantIdClaim))
                 {
@@ -84,40 +89,56 @@ namespace HexaBill.Api.Shared.Middleware
 
                 if (tenant == null)
                 {
-                    _logger.LogWarning("Tenant {TenantId} not found in database", tenantId);
-                    context.Response.StatusCode = 403;
-                    await context.Response.WriteAsync("Tenant not found");
-                    return;
-                }
-
-                // Check tenant status
-                if (tenant.Status == TenantStatus.Suspended)
-                {
-                    _logger.LogWarning("Tenant {TenantId} is suspended", tenantId);
-                    context.Response.StatusCode = 403;
-                    await context.Response.WriteAsync("Tenant account is suspended");
-                    return;
-                }
-
-                if (tenant.Status == TenantStatus.Expired)
-                {
-                    _logger.LogWarning("Tenant {TenantId} trial has expired", tenantId);
-                    context.Response.StatusCode = 403;
-                    await context.Response.WriteAsync("Tenant trial has expired");
-                    return;
-                }
-
-                // Check trial expiration
-                if (tenant.Status == TenantStatus.Trial && tenant.TrialEndDate.HasValue)
-                {
-                    if (tenant.TrialEndDate.Value < DateTime.UtcNow)
+                    // Development: use first active tenant as fallback so app keeps working
+                    if (_env.IsDevelopment())
                     {
-                        _logger.LogWarning("Tenant {TenantId} trial expired on {TrialEndDate}", 
-                            tenantId, tenant.TrialEndDate);
+                        var fallbackTenant = await dbContext.Tenants.AsNoTracking()
+                            .Where(t => t.Status == TenantStatus.Active)
+                            .OrderBy(t => t.Id)
+                            .FirstOrDefaultAsync();
+                        if (fallbackTenant != null)
+                        {
+                            _logger.LogWarning("Development: Tenant {TenantId} not found - using fallback tenant {FallbackId} ({Name})", tenantId, fallbackTenant.Id, fallbackTenant.Name);
+                            tenant = fallbackTenant;
+                            tenantId = fallbackTenant.Id;
+                        }
+                    }
+                    if (tenant == null)
+                    {
+                        _logger.LogWarning("Tenant {TenantId} not found in database", tenantId);
                         context.Response.StatusCode = 403;
-                        await context.Response.WriteAsync("Tenant trial has expired");
+                        await context.Response.WriteAsync("Tenant not found");
                         return;
                     }
+                }
+
+                // Check tenant status - in Development, auto-activate suspended/expired tenants
+                var wouldBlock = tenant.Status == TenantStatus.Suspended ||
+                    tenant.Status == TenantStatus.Expired ||
+                    (tenant.Status == TenantStatus.Trial && tenant.TrialEndDate.HasValue && tenant.TrialEndDate.Value < DateTime.UtcNow);
+
+                if (wouldBlock && _env.IsDevelopment())
+                {
+                    _logger.LogInformation("Development: Auto-activating tenant {TenantId} ({Name}) - was {Status}", tenant.Id, tenant.Name, tenant.Status);
+                    var dbTenant = await dbContext.Tenants.FindAsync(tenantId);
+                    if (dbTenant != null)
+                    {
+                        dbTenant.Status = TenantStatus.Active;
+                        dbTenant.TrialEndDate = null;
+                        await dbContext.SaveChangesAsync();
+                    }
+                    // CRITICAL: Must not fall through to 403 - continue to set tenant context
+                }
+                else if (wouldBlock)
+                {
+                    // Production: block suspended/expired tenants
+                    var reason = tenant.Status == TenantStatus.Suspended ? "Tenant account is suspended"
+                        : tenant.Status == TenantStatus.Expired ? "Tenant trial has expired"
+                        : "Tenant trial has expired";
+                    _logger.LogWarning("Tenant {TenantId} blocked: {Status}", tenantId, tenant.Status);
+                    context.Response.StatusCode = 403;
+                    await context.Response.WriteAsync(reason);
+                    return;
                 }
 
                 // Set tenant context

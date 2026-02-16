@@ -8,7 +8,9 @@ export const CURRENCIES = {
 
 export const formatCurrency = (amount, currency = 'AED') => {
   const config = CURRENCIES[currency] || CURRENCIES.AED
-  const formattedAmount = amount.toFixed(config.decimals)
+  const safeAmount = Number(amount)
+  const val = (Number.isFinite(safeAmount) ? safeAmount : 0)
+  const formattedAmount = val.toFixed(config.decimals)
   
   if (config.position === 'before') {
     return `${config.symbol} ${formattedAmount}`
@@ -39,9 +41,12 @@ export const getCurrencyName = (currency = 'AED') => {
 }
 
 // Format balance like Tally (Dr: for Debit/Positive, Cr: for Credit/Negative)
+// Guards against null/undefined/NaN - returns "0.00 AED" for invalid values
 export const formatBalance = (balance, currency = 'AED') => {
   const config = CURRENCIES[currency] || CURRENCIES.AED
-  const absBalance = Math.abs(balance)
+  const safeBalance = Number(balance)
+  const val = Number.isFinite(safeBalance) ? safeBalance : 0
+  const absBalance = Math.abs(val)
   const formattedAmount = absBalance.toFixed(config.decimals)
   
   if (balance < 0) {

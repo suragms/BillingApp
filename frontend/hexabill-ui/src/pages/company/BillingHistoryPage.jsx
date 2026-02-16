@@ -33,7 +33,7 @@ const BillingHistoryPage = () => {
   const [filteredSales, setFilteredSales] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
-  const [pageSize] = useState(20)
+  const [pageSize, setPageSize] = useState(20)
   const [totalPages, setTotalPages] = useState(1)
   const [totalCount, setTotalCount] = useState(0)
   const [dateFilter, setDateFilter] = useState({
@@ -49,7 +49,7 @@ const BillingHistoryPage = () => {
   useEffect(() => {
     fetchSales()
     // Filters don't trigger auto-fetch - use Apply Filter button
-  }, [currentPage])
+  }, [currentPage, pageSize])
 
   useEffect(() => {
     filterSales()
@@ -158,12 +158,12 @@ const BillingHistoryPage = () => {
     try {
       const response = await salesAPI.deleteSale(saleId)
       if (response.success) {
-        toast.success('Invoice deleted successfully!')
+        toast.success('Invoice deleted successfully!', { id: 'invoice-delete', duration: 4000 })
         setSales(prev => prev.filter(s => s.id !== saleId))
         setFilteredSales(prev => prev.filter(s => s.id !== saleId))
         setTotalCount(prev => Math.max(0, prev - 1))
       } else {
-        toast.error(response.message || 'Failed to delete invoice')
+        toast.error(response.message || 'Failed to delete invoice', { id: 'invoice-delete' })
       }
     } catch (error) {
       console.error('Failed to delete sale:', error)
@@ -214,12 +214,12 @@ const BillingHistoryPage = () => {
       window.URL.revokeObjectURL(url)
       
       toast.dismiss()
-      toast.success(`Combined PDF generated for ${selectedInvoices.length} invoice(s)`)
+        toast.success(`Combined PDF generated for ${selectedInvoices.length} invoice(s)`, { id: 'combined-pdf', duration: 4000 })
       setSelectedInvoices([])
     } catch (error) {
       toast.dismiss()
       console.error('Failed to generate combined PDF:', error)
-      toast.error(error.message || 'Failed to generate combined PDF')
+        toast.error(error.message || 'Failed to generate combined PDF', { id: 'combined-pdf' })
     }
   }
 
@@ -561,8 +561,23 @@ const BillingHistoryPage = () => {
             </div>
 
             {/* Pagination */}
-            {totalPages > 1 && (
-              <div className="bg-gray-50 px-6 py-4 flex items-center justify-between border-t border-gray-200">
+            {(totalPages > 1 || totalCount > 10) && (
+              <div className="bg-gray-50 px-6 py-4 flex items-center justify-between border-t border-gray-200 flex-wrap gap-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-600">Rows per page:</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value))
+                      setCurrentPage(1)
+                    }}
+                    className="border border-gray-300 rounded px-2 py-1 text-sm"
+                  >
+                    {[10, 20, 50, 100].map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="text-sm text-gray-700">
                   Page <span className="font-medium">{currentPage}</span> of{' '}
                   <span className="font-medium">{totalPages}</span>

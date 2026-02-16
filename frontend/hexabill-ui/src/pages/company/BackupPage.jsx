@@ -53,7 +53,7 @@ const BackupPage = () => {
         toast.error(response.message || 'Failed to create backup')
       }
     } catch (error) {
-      toast.error('Failed to create backup')
+      if (!error?._handledByInterceptor) toast.error('Failed to create backup')
     } finally {
       setLoading(false)
     }
@@ -72,7 +72,7 @@ const BackupPage = () => {
         toast.error(response.message || 'Failed to create full backup')
       }
     } catch (error) {
-      toast.error('Failed to create full backup')
+      if (!error?._handledByInterceptor) toast.error('Failed to create full backup')
     } finally {
       setLoading(false)
     }
@@ -91,7 +91,7 @@ const BackupPage = () => {
       document.body.removeChild(a)
       toast.success('Backup downloaded')
     } catch (error) {
-      toast.error('Failed to download backup')
+      if (!error?._handledByInterceptor) toast.error('Failed to download backup')
     }
   }
 
@@ -163,7 +163,7 @@ const BackupPage = () => {
       }
     } catch (error) {
       console.error('Restore error:', error)
-      toast.error(error?.response?.data?.message || 'Failed to restore backup. Please check server logs.')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to restore backup. Please check server logs.')
     } finally {
       setRestoring(false)
       setSelectedFile(null)
@@ -176,7 +176,7 @@ const BackupPage = () => {
       toast.success('Cloud settings saved! (Note: Restart server for changes to take effect)')
       setShowCloudSettings(false)
     } catch (error) {
-      toast.error('Failed to save cloud settings')
+      if (!error?._handledByInterceptor) toast.error('Failed to save cloud settings')
     }
   }
 
@@ -195,6 +195,24 @@ const BackupPage = () => {
           <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-900">Backup & Restore</h1>
           <p className="mt-1 sm:mt-2 text-sm sm:text-base text-gray-600">Manage database backups and restore from previous backups</p>
         </div>
+
+        {/* Last Successful Backup Indicator */}
+        {backups.length > 0 && (() => {
+          const sorted = [...backups].sort((a, b) => new Date(b.createdDate || b.createdAt || 0) - new Date(a.createdDate || a.createdAt || 0))
+          const lastBackup = sorted[0]
+          const lastDate = lastBackup ? new Date(lastBackup.createdDate || lastBackup.createdAt) : null
+          const hoursAgo = lastDate ? (Date.now() - lastDate.getTime()) / (1000 * 60 * 60) : Infinity
+          const statusColor = hoursAgo < 24 ? 'text-green-700 bg-green-50 border-green-200' : hoursAgo < 72 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-red-700 bg-red-50 border-red-200'
+          const statusText = hoursAgo < 24 ? 'Recent' : hoursAgo < 72 ? 'Consider creating a new backup' : 'Backup is outdated'
+          return (
+            <div className={`mb-4 p-3 rounded-lg border ${statusColor}`}>
+              <p className="text-sm font-medium">
+                Last successful backup: <strong>{lastDate ? lastDate.toLocaleString() : '—'}</strong>
+                <span className="ml-2 text-xs">({statusText})</span>
+              </p>
+            </div>
+          )
+        })()}
 
         {/* Create Backup Section */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3 sm:p-4 lg:p-6 mb-4 sm:mb-6">

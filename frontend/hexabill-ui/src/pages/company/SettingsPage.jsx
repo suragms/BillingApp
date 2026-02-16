@@ -148,7 +148,7 @@ const SettingsPage = () => {
         toast.error(response.message || 'Failed to create backup')
       }
     } catch (error) {
-      toast.error('Failed to create backup')
+      if (!error?._handledByInterceptor) toast.error('Failed to create backup')
     } finally {
       setLoadingBackups(false)
     }
@@ -186,7 +186,7 @@ const SettingsPage = () => {
       document.body.removeChild(a)
       toast.success('Backup downloaded')
     } catch (error) {
-      toast.error('Failed to download backup')
+      if (!error?._handledByInterceptor) toast.error('Failed to download backup')
     }
   }
 
@@ -206,7 +206,7 @@ const SettingsPage = () => {
             toast.error(response.message || 'Failed to delete backup')
           }
         } catch (error) {
-          toast.error('Failed to delete backup')
+          if (!error?._handledByInterceptor) toast.error('Failed to delete backup')
         }
       }
     })
@@ -232,7 +232,7 @@ const SettingsPage = () => {
             toast.error(response.message || 'Failed to restore backup')
           }
         } catch (error) {
-          toast.error('Failed to restore backup')
+          if (!error?._handledByInterceptor) toast.error('Failed to restore backup')
         }
       }
     })
@@ -256,7 +256,7 @@ const SettingsPage = () => {
         toast.error(response?.message || 'Failed to clear data')
       }
     } catch (error) {
-      toast.error(error?.response?.data?.message || 'Failed to clear data')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to clear data')
     } finally {
       setLoadingClearData(false)
     }
@@ -300,7 +300,7 @@ const SettingsPage = () => {
       }
     } catch (error) {
       console.error('Failed to load settings:', error)
-      toast.error('Failed to load settings')
+      if (!error?._handledByInterceptor) toast.error('Failed to load settings')
     } finally {
       setLoading(false)
     }
@@ -342,8 +342,10 @@ const SettingsPage = () => {
       }
     } catch (error) {
       console.error('Failed to save settings:', error)
-      const msg = error?.response?.data?.message || error?.response?.data?.errors?.[0] || error?.message || 'Failed to save settings'
-      toast.error(msg)
+      if (!error?._handledByInterceptor) {
+        const msg = error?.response?.data?.message || error?.response?.data?.errors?.[0] || error?.message || 'Failed to save settings'
+        toast.error(msg)
+      }
     } finally {
       setSaving(false)
     }
@@ -388,7 +390,7 @@ const SettingsPage = () => {
       }
     } catch (error) {
       console.error('Logo upload error:', error)
-      toast.error(error?.response?.data?.message || 'Failed to upload logo')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to upload logo')
     } finally {
       setUploadingLogo(false)
       setSaving(false)
@@ -412,7 +414,7 @@ const SettingsPage = () => {
       }
     } catch (error) {
       console.error('Logo delete error:', error)
-      toast.error(error?.response?.data?.message || 'Failed to delete logo')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to delete logo')
     } finally {
       setSaving(false)
     }
@@ -886,9 +888,9 @@ const SettingsPage = () => {
             <div className="mt-8 bg-white rounded-lg border-2 border-red-200 shadow-sm p-6">
               <div className="flex items-start gap-4">
                 <div className="flex-1">
-                  <h3 className="text-sm font-bold text-red-900 uppercase tracking-wider">Reset company data</h3>
+                  <h3 className="text-sm font-bold text-red-900 uppercase tracking-wider">Clear transactional data</h3>
                   <p className="text-sm text-red-700 mt-1">
-                    Wipe all sales, purchases, expenses, and returns. Keeps users, products, and customers; resets stock and balances to zero.
+                    Same as &quot;reset company data&quot;. Wipes sales, purchases, expenses, and returns. Keeps users, products, and customers; resets stock and balances to zero.
                   </p>
                 </div>
                 <button

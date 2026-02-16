@@ -36,6 +36,7 @@ import {
 import BottomNav from './BottomNav'
 import Logo from './Logo'
 import AlertNotifications from './AlertNotifications'
+import { SubscriptionGraceBanner } from './SubscriptionGraceBanner'
 import { isAdminOrOwner, isStaff } from '../utils/roles'  // CRITICAL: Multi-tenant role checking
 import { isSystemAdmin } from '../utils/superAdmin'  // Super Admin checking
 import { useBranding } from '../contexts/TenantBrandingContext'
@@ -70,11 +71,16 @@ const Layout = () => {
     return null // SystemAdmin should use SuperAdminLayout, not this Layout
   }
 
-  const handleExitImpersonation = () => {
+  const handleExitImpersonation = async () => {
+    const tenantId = selectedTenantId
+    const tenantName = selectedTenantName
+    try {
+      const { superAdminAPI } = await import('../services')
+      await superAdminAPI.impersonateExit(tenantId || undefined, tenantName || undefined)
+    } catch (_) { /* Audit logging failure should not block */ }
     stopImpersonation()
     localStorage.removeItem('selected_tenant_name')
     navigate('/superadmin/dashboard')
-    // Navigation already handles state reset, no reload needed
   }
 
   // Tenant navigation - Subscription hidden from tenants (only Super Admin needs it)
@@ -231,44 +237,45 @@ const Layout = () => {
         </div>
       )}
 
-      {/* Desktop sidebar - wider for better readability, scrollable - Visible for all users */}
-      <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-24 lg:flex-col lg:min-h-0">
+      {/* Desktop sidebar - 240px per design system (Task 11) */}
+      <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-60 lg:flex-col lg:min-h-0">
         <div className="flex flex-col flex-grow bg-primary-900 text-white border-r border-primary-800 min-h-screen overflow-hidden w-full">
-          <nav className="flex-1 px-2 py-4 space-y-2 overflow-y-auto min-h-0 scrollbar-hide">
+          <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto min-h-0 scrollbar-hide">
             {navigation.map((item) => {
               const Icon = item.icon
               return (
                 <Link
                   key={item.name}
                   to={item.href}
-                  className={`flex flex-col items-center justify-center px-3 py-2 text-sm font-medium rounded-lg transition-colors ${isActive(item.href)
+                  className={`flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-colors min-h-[44px] ${isActive(item.href)
                     ? 'bg-primary-600 text-white'
                     : 'text-primary-200 hover:bg-primary-800 hover:text-white'
                     }`}
                   title={item.name}
                 >
-                  <Icon className="h-5 w-5 mb-1" />
-                  <span className="text-xs text-center">{item.name}</span>
+                  <Icon className="h-5 w-5 mr-3 flex-shrink-0" />
+                  <span className="truncate">{item.name}</span>
                 </Link>
               )
             })}
           </nav>
-          <div className="border-t border-primary-800 p-2">
+          <div className="border-t border-primary-800 p-3">
             <button
               onClick={logout}
-              className="flex flex-col items-center justify-center w-full px-3 py-2 text-sm text-primary-200 hover:text-white hover:bg-primary-800 rounded-lg transition-colors"
+              className="flex items-center w-full px-4 py-3 text-sm text-primary-200 hover:text-white hover:bg-primary-800 rounded-lg transition-colors min-h-[44px]"
             >
-              <LogOut className="h-5 w-5 mb-1" />
-              <span className="text-xs">Logout</span>
+              <LogOut className="h-5 w-5 mr-3 flex-shrink-0" />
+              <span>Logout</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* Main content - Full viewport after sidebar; flex so main fills space */}
-      <div className="flex flex-col min-h-screen w-full lg:pl-24">
+      {/* Main content - Full viewport after sidebar (Task 11: 240px sidebar) */}
+      <div className="flex flex-col min-h-screen w-full lg:pl-60">
+        <SubscriptionGraceBanner />
         {/* Top Header Bar for Other Pages - Similar to Dashboard */}
-        <div className="hidden lg:block fixed top-0 left-24 right-0 bg-primary-900 text-white border-b border-primary-800 z-30">
+        <div className="hidden lg:block fixed top-0 left-60 right-0 h-16 bg-primary-900 text-white border-b border-primary-800 z-30">
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center space-x-3 flex-1 min-w-0">
               <Logo size="default" showText={false} className="flex-shrink-0" />
@@ -283,32 +290,32 @@ const Layout = () => {
                   <button
                     onClick={() => navigate('/backup')}
                     className="p-2 hover:bg-primary-800 rounded-lg transition flex items-center justify-center min-h-[44px] min-w-[44px]"
-                    title="Backup & Restore"
-                    aria-label="Backup & Restore"
+                    title="Backup & Restore — Download or restore your data"
+                    aria-label="Backup and restore data"
                   >
                     <FileText className="h-5 w-5" />
                   </button>
                   <button
                     onClick={() => navigate('/settings')}
                     className="p-2 hover:bg-primary-800 rounded-lg transition flex items-center justify-center min-h-[44px] min-w-[44px]"
-                    title="Settings"
-                    aria-label="Settings"
+                    title="Company settings — Manage preferences, logo, currency"
+                    aria-label="Company settings"
                   >
                     <Settings className="h-5 w-5" />
                   </button>
                   <button
                     onClick={() => navigate('/reports?tab=profit-loss')}
                     className="p-2 hover:bg-primary-800 rounded-lg transition flex items-center justify-center min-h-[44px] min-w-[44px]"
-                    title="Profit & Loss"
-                    aria-label="Profit & Loss"
+                    title="Profit & Loss report — View revenue, expenses, profit"
+                    aria-label="Profit and loss report"
                   >
                     <TrendingUp className="h-5 w-5" />
                   </button>
                   <button
                     onClick={() => navigate('/users')}
                     className="p-2 hover:bg-primary-800 rounded-lg transition flex items-center justify-center min-h-[44px] min-w-[44px]"
-                    title="Users"
-                    aria-label="Users"
+                    title="Users — Manage staff and permissions"
+                    aria-label="Manage users"
                   >
                     <Users className="h-5 w-5" />
                   </button>
@@ -316,7 +323,7 @@ const Layout = () => {
                     onClick={() => window.print()}
                     className="p-2 hover:bg-primary-800 rounded-lg transition flex items-center justify-center min-h-[44px] min-w-[44px]"
                     title="Print this page"
-                    aria-label="Print"
+                    aria-label="Print current page"
                   >
                     <Printer className="h-5 w-5" />
                   </button>
@@ -394,7 +401,7 @@ const Layout = () => {
         {/* Page content — full width max 1400px, 8px grid padding */}
         <main id="main-content" className="flex-1 w-full min-w-0 flex flex-col overflow-hidden pb-20 lg:pb-6 pt-14 lg:pt-20 bg-[#F8FAFC]">
           <div className="flex-1 overflow-auto">
-            <div className="w-full max-w-content min-h-full mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
+            <div className="w-full max-w-[1280px] min-h-full mx-auto px-4 sm:px-6 lg:px-6 py-4 lg:py-6">
               <Outlet />
             </div>
           </div>

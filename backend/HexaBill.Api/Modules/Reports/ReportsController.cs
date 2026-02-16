@@ -9,6 +9,7 @@ using HexaBill.Api.Shared.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using HexaBill.Api.Modules.Payments;
 using HexaBill.Api.Modules.Billing;
+using HexaBill.Api.Modules.Branches;
 using HexaBill.Api.Shared.Validation;
 
 namespace HexaBill.Api.Modules.Reports
@@ -21,18 +22,130 @@ namespace HexaBill.Api.Modules.Reports
         private readonly IReportService _reportService;
         private readonly AppDbContext _context;
         private readonly ITimeZoneService _timeZoneService;
+        private readonly IBranchService _branchService;
 
-        public ReportsController(IReportService reportService, AppDbContext context, ITimeZoneService timeZoneService)
+        public ReportsController(IReportService reportService, AppDbContext context, ITimeZoneService timeZoneService, IBranchService branchService)
         {
             _reportService = reportService;
             _context = context;
             _timeZoneService = timeZoneService;
+            _branchService = branchService;
         }
 
         // Staff can view reports but cannot export sensitive data
         private bool IsStaffOnly()
         {
             return User.IsInRole("Staff") && !User.IsInRole("Admin");
+        }
+
+        [HttpGet("staff-performance")]
+        [Authorize(Roles = "Admin,Owner")]
+        public async Task<ActionResult<ApiResponse<List<StaffPerformanceDto>>>> GetStaffPerformance(
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null)
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                var from = fromDate ?? DateTime.UtcNow.Date.AddDays(-30);
+                var to = toDate ?? DateTime.UtcNow.Date;
+                var result = await _reportService.GetStaffPerformanceAsync(tenantId, from, to);
+                return Ok(new ApiResponse<List<StaffPerformanceDto>>
+                {
+                    Success = true,
+                    Message = "Staff performance report retrieved successfully",
+                    Data = result
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<List<StaffPerformanceDto>>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpGet("branch-comparison")]
+        public async Task<ActionResult<ApiResponse<List<BranchComparisonItemDto>>>> GetBranchComparison(
+            [FromQuery] DateTime? fromDate = null,
+            [FromQuery] DateTime? toDate = null)
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+
+                var gstNow = _timeZoneService.GetCurrentDate();
+                var to = (toDate ?? gstNow).Date;
+                var from = (fromDate ?? gstNow.AddDays(-30)).Date;
+                var periodDays = (int)(to - from).TotalDays;
+                if (periodDays <= 0) periodDays = 30;
+
+                var branches = await _branchService.GetBranchesAsync(tenantId);
+                if (branches == null || branches.Count == 0)
+                {
+                    return Ok(new ApiResponse<List<BranchComparisonItemDto>>
+                    {
+                        Success = true,
+                        Message = "No branches found",
+                        Data = new List<BranchComparisonItemDto>()
+                    });
+                }
+
+                var result = new List<BranchComparisonItemDto>();
+                foreach (var branch in branches)
+                {
+                    var current = await _branchService.GetBranchSummaryAsync(branch.Id, tenantId, from, to.AddDays(1));
+                    if (current == null) continue;
+
+                    var prevTo = from.AddDays(-1);
+                    var prevFrom = prevTo.AddDays(-periodDays);
+                    var prev = await _branchService.GetBranchSummaryAsync(branch.Id, tenantId, prevFrom, prevTo.AddDays(1));
+
+                    decimal? growth = null;
+                    if (prev != null && prev.TotalSales > 0)
+                    {
+                        growth = (decimal)((current.TotalSales - prev.TotalSales) / prev.TotalSales * 100);
+                    }
+                    else if (prev != null && current.TotalSales > 0)
+                    {
+                        growth = 100;
+                    }
+
+                    result.Add(new BranchComparisonItemDto
+                    {
+                        BranchId = current.BranchId,
+                        BranchName = current.BranchName,
+                        TotalSales = current.TotalSales,
+                        TotalExpenses = current.TotalExpenses,
+                        Profit = current.Profit,
+                        Routes = current.Routes,
+                        GrowthPercent = growth
+                    });
+                }
+
+                result = result.OrderByDescending(x => x.TotalSales).ToList();
+
+                return Ok(new ApiResponse<List<BranchComparisonItemDto>>
+                {
+                    Success = true,
+                    Message = "Branch comparison retrieved successfully",
+                    Data = result
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in GetBranchComparison: {ex.Message}");
+                return StatusCode(500, new ApiResponse<List<BranchComparisonItemDto>>
+                {
+                    Success = false,
+                    Message = "An error occurred while generating branch comparison",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
         }
 
         [HttpGet("summary")]
@@ -607,14 +720,15 @@ namespace HexaBill.Api.Modules.Reports
             [FromQuery] DateTime? fromDate = null,
             [FromQuery] DateTime? toDate = null,
             [FromQuery] int? branchId = null,
-            [FromQuery] int? routeId = null)
+            [FromQuery] int? routeId = null,
+            [FromQuery] int? staffId = null)
         {
             try
             {
                 var tenantId = CurrentTenantId;
                 var userId = int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var uid) ? uid : (int?)null;
                 var role = User.FindFirst(ClaimTypes.Role)?.Value;
-                var result = await _reportService.GetComprehensiveSalesLedgerAsync(tenantId, fromDate, toDate, branchId, routeId, userId, role);
+                var result = await _reportService.GetComprehensiveSalesLedgerAsync(tenantId, fromDate, toDate, branchId, routeId, staffId, userId, role);
                 return Ok(new ApiResponse<SalesLedgerReportDto>
                 {
                     Success = true,

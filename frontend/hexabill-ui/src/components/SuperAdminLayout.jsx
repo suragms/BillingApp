@@ -12,7 +12,8 @@ import {
   X,
   Shield,
   Activity,
-  ClipboardList
+  ClipboardList,
+  AlertCircle
 } from 'lucide-react'
 import Logo from './Logo'
 
@@ -41,6 +42,7 @@ const SuperAdminLayout = () => {
     { name: 'Companies', href: '/superadmin/tenants', icon: Building2 },
     { name: 'Subscriptions', href: '/superadmin/subscriptions', icon: DollarSign },
     { name: 'Audit Logs', href: '/superadmin/audit-logs', icon: ClipboardList },
+    { name: 'Error Logs', href: '/superadmin/error-logs', icon: AlertCircle },
     { name: 'Infrastructure', href: '/superadmin/health', icon: Activity },
     { name: 'Settings', href: '/superadmin/settings', icon: Shield },
   ]

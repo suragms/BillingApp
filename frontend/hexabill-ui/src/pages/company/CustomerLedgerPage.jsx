@@ -51,8 +51,16 @@ const CustomerLedgerPage = () => {
   const paymentLoadingRef = useRef(false)
   const customerLoadingRef = useRef(false)
   const recalculateInProgress = useRef(new Set()) // Track recalculate calls to prevent flooding
+  const ledgerLoadInProgressRef = useRef(null) // RISK-2: Only one ledger load at a time per customer (prevents race)
+  const [balanceRefreshSkeleton, setBalanceRefreshSkeleton] = useState(false) // "Refreshing balance…" after payment
   const [customers, setCustomers] = useState([])
-  const [filteredCustomers, setFilteredCustomers] = useState([])
+  const [filteredCustomers, setFilteredCustomers] = useState([]) // Kept for backwards compat; search uses searchDropdownResults
+  const [searchDropdownResults, setSearchDropdownResults] = useState([])
+  const [searchDropdownLoading, setSearchDropdownLoading] = useState(false)
+  const [searchDropdownPage, setSearchDropdownPage] = useState(1)
+  const [searchDropdownTotal, setSearchDropdownTotal] = useState(0)
+  const searchDebounceRef = useRef(null)
+  const CUSTOMER_SEARCH_PAGE_SIZE = 20
   const [selectedCustomer, setSelectedCustomer] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
 
@@ -84,6 +92,8 @@ const CustomerLedgerPage = () => {
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false)
   const [showEditCustomerModal, setShowEditCustomerModal] = useState(false)
   const [editingCustomer, setEditingCustomer] = useState(null)
+  const [showSendStatementModal, setShowSendStatementModal] = useState(false)
+  const [payAllOutstandingMode, setPayAllOutstandingMode] = useState(false)
   const [dateRange, setDateRange] = useState({
     from: new Date(new Date().setDate(1)).toISOString().split('T')[0], // First day of month
     to: new Date().toISOString().split('T')[0] // Today
@@ -95,9 +105,20 @@ const CustomerLedgerPage = () => {
   const [ledgerBranchId, setLedgerBranchId] = useState('')
   const [ledgerRouteId, setLedgerRouteId] = useState('')
   const [ledgerStaffId, setLedgerStaffId] = useState('')
+  // Staged filter values (used by Apply button); applied values above drive API calls
+  const [filterDraft, setFilterDraft] = useState(() => ({
+    from: new Date(new Date().setDate(1)).toISOString().split('T')[0],
+    to: new Date().toISOString().split('T')[0],
+    branchId: '',
+    routeId: '',
+    staffId: ''
+  }))
   const [branches, setBranches] = useState([])
   const [routes, setRoutes] = useState([])
   const [staffUsers, setStaffUsers] = useState([])
+  const [duplicateCheckModal, setDuplicateCheckModal] = useState({ isOpen: false, message: '', customerData: null })
+  const [duplicatePaymentModal, setDuplicatePaymentModal] = useState({ isOpen: false, amount: 0 })
+  const pendingPaymentRef = useRef(null) // Store pending payment for duplicate confirm
 
   // Keyboard shortcuts refs
   const searchInputRef = useRef(null)
@@ -110,8 +131,11 @@ const CustomerLedgerPage = () => {
     register: customerRegister,
     handleSubmit: handleCustomerSubmit,
     reset: resetCustomerForm,
+    setValue: setCustomerValue,
+    watch: watchCustomer,
     formState: { errors: customerErrors }
   } = customerForm
+  const addModalBranchId = watchCustomer('branchId')
 
   const {
     register: paymentRegister,
@@ -151,20 +175,24 @@ const CustomerLedgerPage = () => {
           ? new Date(entry.date).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
           : new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
 
+        const debit = Number(entry.debit) || 0
+        const credit = Number(entry.credit) || 0
+        const balance = Number(entry.balance) || 0
         return [
           dateStr,
           entry.type || '',
           entry.reference || '-',
           entry.paymentMode || entry.PaymentMode || '-',
-          entry.debit > 0 ? entry.debit.toFixed(2) : '',
-          entry.credit > 0 ? entry.credit.toFixed(2) : '',
+          debit > 0 ? debit.toFixed(2) : '',
+          credit > 0 ? credit.toFixed(2) : '',
           entry.status || '-',
-          entry.balance.toFixed(2)
+          balance.toFixed(2)
         ]
       })
 
       // Add closing balance row
-      const closingBalance = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+      const lastBalance = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+      const closingBalance = Number(lastBalance) || 0
       rows.push(['', '', '', '', '', '', 'Closing Balance', closingBalance.toFixed(2)])
 
       // Convert to CSV
@@ -184,11 +212,19 @@ const CustomerLedgerPage = () => {
       link.click()
       document.body.removeChild(link)
 
-      toast.success('Ledger exported to Excel successfully')
+      toast.success('Ledger exported to Excel successfully', { id: 'ledger-export', duration: 4000 })
     } catch (error) {
       console.error('Export error:', error)
-      toast.error('Failed to export ledger')
+      if (!error?._handledByInterceptor) toast.error('Failed to export ledger')
     }
+  }
+
+  // Apply staged ledger filters (reduces API calls while user is selecting)
+  const applyLedgerFilters = () => {
+    setDateRange({ from: filterDraft.from, to: filterDraft.to })
+    setLedgerBranchId(filterDraft.branchId)
+    setLedgerRouteId(filterDraft.routeId)
+    setLedgerStaffId(filterDraft.staffId)
   }
 
   // Load all customers
@@ -285,17 +321,18 @@ const CustomerLedgerPage = () => {
     return staffUsers.filter(u => u.id === user.id)
   }, [staffUsers, user])
 
-  // Auto-select filters for Staff
+  // Auto-select filters for Staff (sync both applied and draft)
   useEffect(() => {
     if (user && !isAdminOrOwner(user) && !loading) {
-      // Auto-select branch if not selected and only one available or just pick first
       if (!ledgerBranchId && availableBranches.length > 0) {
-        setLedgerBranchId(availableBranches[0].id.toString())
+        const branchIdStr = availableBranches[0].id.toString()
+        setLedgerBranchId(branchIdStr)
+        setFilterDraft(prev => ({ ...prev, branchId: branchIdStr, routeId: '' }))
       }
-
-      // Auto-select staff (myself)
       if (!ledgerStaffId && user.id) {
-        setLedgerStaffId(user.id.toString())
+        const staffIdStr = user.id.toString()
+        setLedgerStaffId(staffIdStr)
+        setFilterDraft(prev => ({ ...prev, staffId: staffIdStr }))
       }
     }
   }, [user, availableBranches, ledgerBranchId, ledgerStaffId, loading])
@@ -312,7 +349,44 @@ const CustomerLedgerPage = () => {
     return () => window.removeEventListener('focus', handleFocus)
   }, [selectedCustomer])
 
-  // Filter customers
+  // Server-side search for customer dropdown (debounced)
+  const fetchCustomerSearch = useCallback(async (query, page = 1, append = false) => {
+    setSearchDropdownLoading(true)
+    try {
+      const params = {
+        page,
+        pageSize: CUSTOMER_SEARCH_PAGE_SIZE,
+        branchId: filterDraft.branchId ? parseInt(filterDraft.branchId, 10) : undefined,
+        routeId: filterDraft.routeId ? parseInt(filterDraft.routeId, 10) : undefined
+      }
+      if (query && query.trim()) params.search = query.trim()
+      const res = await customersAPI.getCustomers(params)
+      const items = res?.data?.items ?? res?.items ?? []
+      const total = res?.data?.totalCount ?? res?.totalCount ?? items.length
+      setSearchDropdownTotal(total)
+      setSearchDropdownPage(page)
+      setSearchDropdownResults(append ? prev => [...prev, ...items] : items)
+    } catch (err) {
+      if (!err?._handledByInterceptor) toast.error('Failed to search customers')
+      setSearchDropdownResults(append ? prev => prev : [])
+    } finally {
+      setSearchDropdownLoading(false)
+    }
+  }, [filterDraft.branchId, filterDraft.routeId])
+
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
+    if (!searchTerm?.trim()) {
+      fetchCustomerSearch('', 1, false)
+      return
+    }
+    searchDebounceRef.current = setTimeout(() => {
+      fetchCustomerSearch(searchTerm, 1, false)
+    }, 300)
+    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current) }
+  }, [searchTerm, filterDraft.branchId, filterDraft.routeId, fetchCustomerSearch])
+
+  // Keep filterCustomers for any legacy usage; sync filteredCustomers from searchDropdownResults when dropdown visible
   useEffect(() => {
     filterCustomers()
   }, [customers, searchTerm])
@@ -361,7 +435,7 @@ const CustomerLedgerPage = () => {
       }
     } catch (error) {
       console.error('Failed to load customers:', error)
-      toast.error('Failed to load customers')
+      if (!error?._handledByInterceptor) toast.error('Failed to load customers')
     } finally {
       setLoading(false)
     }
@@ -606,6 +680,18 @@ const CustomerLedgerPage = () => {
     // Handle cash customer (customerId is null or special flag)
     const isCashCustomer = !customerId || customerId === 'cash' || customerId === 0
 
+    // RISK-2 FIX: Block load when payment is in progress — prevents race where older load overwrites newer balance
+    if (!isCashCustomer && paymentLoadingRef.current) {
+      return
+    }
+
+    // RISK-2: Serialize ledger loads — prevent concurrent loads for same customer (older response overwriting newer)
+    const loadKey = isCashCustomer ? 'cash' : String(customerId)
+    if (ledgerLoadInProgressRef.current === loadKey) {
+      return
+    }
+    ledgerLoadInProgressRef.current = loadKey
+
     if (isCashCustomer) {
       // Load cash customer ledger, invoices, and payments
       try {
@@ -632,7 +718,12 @@ const CustomerLedgerPage = () => {
         ])
 
         if (ledgerRes.success && ledgerRes.data) {
-          const ledgerData = Array.isArray(ledgerRes.data) ? ledgerRes.data : []
+          const ledgerData = (Array.isArray(ledgerRes.data) ? ledgerRes.data : []).map(entry => ({
+            ...entry,
+            debit: Number(entry.debit) || 0,
+            credit: Number(entry.credit) || 0,
+            balance: Number(entry.balance) || 0
+          }))
           setCustomerLedger(ledgerData)
         }
 
@@ -677,8 +768,9 @@ const CustomerLedgerPage = () => {
         })
       } catch (error) {
         console.error('Failed to load cash customer data:', error)
-        toast.error('Failed to load cash customer ledger')
+        if (!error?._handledByInterceptor) toast.error('Failed to load cash customer ledger')
       } finally {
+        ledgerLoadInProgressRef.current = null
         setLoading(false)
       }
       return
@@ -687,12 +779,14 @@ const CustomerLedgerPage = () => {
     // CRITICAL: Validate customerId matches selected customer to prevent data mismatches
     if (!customerId || customerId <= 0) {
       console.error('Invalid customer ID:', customerId)
+      ledgerLoadInProgressRef.current = null
       return
     }
 
     // Double-check that we're still loading for the same customer
     if (selectedCustomer && selectedCustomer.id !== customerId) {
       console.warn('Customer changed during load, aborting data load for customer:', customerId)
+      ledgerLoadInProgressRef.current = null
       return
     }
 
@@ -731,6 +825,7 @@ const CustomerLedgerPage = () => {
       // CRITICAL: Verify we're still loading for the same customer after API calls
       if (selectedCustomer && selectedCustomer.id !== customerId) {
         console.warn('Customer changed after API calls, discarding data for customer:', customerId)
+        ledgerLoadInProgressRef.current = null
         return
       }
 
@@ -740,11 +835,13 @@ const CustomerLedgerPage = () => {
 
       if (ledgerRes.success && ledgerRes.data) {
         ledgerData = Array.isArray(ledgerRes.data) ? ledgerRes.data : []
-        // Validate all ledger entries belong to this customer (extra safety check)
-        const validLedgerData = ledgerData.filter(entry => {
-          // Ledger entries should all be for this customer (backend should filter, but double-check)
-          return true // Backend already filters, but we can add more validation if needed
-        })
+        // Normalize numeric fields to prevent NaN - backend may return null/undefined
+        const validLedgerData = ledgerData.map(entry => ({
+          ...entry,
+          debit: Number(entry.debit) || 0,
+          credit: Number(entry.credit) || 0,
+          balance: Number(entry.balance) || 0
+        }))
         setCustomerLedger(validLedgerData)
       }
 
@@ -802,6 +899,10 @@ const CustomerLedgerPage = () => {
           customerBalance, // Store overall balance separately
           customer
         })
+        // RISK-2: Update selectedCustomer with fresh balance so UI shows correct value
+        if (selectedCustomer && selectedCustomer.id === customerId) {
+          setSelectedCustomer(prev => prev ? { ...prev, balance: customerBalance } : prev)
+        }
       }
 
       // Load payments separately
@@ -810,6 +911,7 @@ const CustomerLedgerPage = () => {
       // CRITICAL: Verify we're still loading for the same customer after payment API call
       if (selectedCustomer && selectedCustomer.id !== customerId) {
         console.warn('Customer changed after payment API call, discarding data for customer:', customerId)
+        ledgerLoadInProgressRef.current = null
         return
       }
 
@@ -867,8 +969,8 @@ const CustomerLedgerPage = () => {
         console.error('Failed to load customer data:', error)
         error._logged = true
 
-        // Only show error if it's not a 429 (rate limit) or throttled request
-        if (error?.response?.status !== 429 && !error?.isThrottled && !error?.isRateLimited) {
+        // Only show error if it's not a 429 (rate limit) or throttled request, and not already shown by interceptor
+        if (error?.response?.status !== 429 && !error?.isThrottled && !error?.isRateLimited && !error?._handledByInterceptor) {
           toast.error('Failed to load customer data')
         }
       }
@@ -901,6 +1003,7 @@ const CustomerLedgerPage = () => {
         }
       }
     } finally {
+      ledgerLoadInProgressRef.current = null
       setLoading(false)
     }
   }
@@ -916,9 +1019,42 @@ const CustomerLedgerPage = () => {
     setSearchTerm('')
   }
 
-  const handleAddCustomer = async (data) => {
-    // Debug logs removed to prevent console flooding
+  const doCreateCustomer = async (customerData) => {
+    customerLoadingRef.current = true
+    setCustomerLoading(true)
+    try {
+      const response = await customersAPI.createCustomer(customerData)
+      if (response?.success) {
+        toast.success('Customer added successfully!', { id: 'customer-add', duration: 4000 })
+        setShowAddCustomerModal(false)
+        setDuplicateCheckModal({ isOpen: false, message: '', customerData: null })
+        resetCustomerForm()
+        await Promise.all([
+          fetchCustomers(),
+          response?.data ? loadCustomerData(response.data.id) : Promise.resolve()
+        ])
+        if (response?.data) {
+          setSelectedCustomer(response.data)
+          setSearchTerm('')
+        }
+        window.dispatchEvent(new CustomEvent('customerCreated', { detail: response.data }))
+        window.dispatchEvent(new CustomEvent('dataUpdated'))
+        if (response?.data?.id) setSearchParams({ customerId: response.data.id })
+      } else {
+        toast.error(response?.message || 'Failed to create customer', { id: 'customer-add-error' })
+      }
+    } catch (error) {
+      const errorMessage = error?.response?.data?.message ||
+        (Array.isArray(error?.response?.data?.errors) ? error.response.data.errors.join(', ') : '') ||
+        error?.message || 'Failed to create customer'
+      if (!error?._handledByInterceptor) toast.error(errorMessage)
+    } finally {
+      customerLoadingRef.current = false
+      setCustomerLoading(false)
+    }
+  }
 
+  const handleAddCustomer = async (data) => {
     // Prevent multiple submissions using ref (synchronous check)
     if (customerLoadingRef.current || customerLoading) {
       console.log('Customer creation already in progress, ignoring duplicate submission')
@@ -944,7 +1080,10 @@ const CustomerLedgerPage = () => {
         email: data.email?.trim() || null,
         trn: data.trn?.trim() || null,
         address: data.address?.trim() || null,
-        creditLimit: data.creditLimit ? parseFloat(data.creditLimit) : 0
+        creditLimit: data.creditLimit ? parseFloat(data.creditLimit) : 0,
+        paymentTerms: data.paymentTerms?.trim() || null,
+        branchId: data.branchId ? parseInt(data.branchId, 10) : null,
+        routeId: data.routeId ? parseInt(data.routeId, 10) : null
       }
 
       // Validate required field
@@ -955,42 +1094,28 @@ const CustomerLedgerPage = () => {
         return
       }
 
-      console.log('Creating customer with data:', customerData)
-      const response = await customersAPI.createCustomer(customerData)
-      // Response logged only if needed for debugging
-
-      if (response?.success) {
-        toast.success('Customer added successfully!')
-        setShowAddCustomerModal(false)
-        resetCustomerForm()
-
-        // INSTANT UPDATE: No delay - refresh immediately
-        // Refreshing customer list and data
-        await Promise.all([
-          fetchCustomers(), // Refresh customer list
-          response?.data ? loadCustomerData(response.data.id) : Promise.resolve()
-        ])
-
-        if (response?.data) {
-          // New customer created successfully
-          setSelectedCustomer(response.data) // Auto-select new customer
-
-          // Force UI refresh for all related components
-          setSearchTerm('') // Clear search to show new customer
-        }
-
-        // Trigger global refresh events for other pages/components
-        window.dispatchEvent(new CustomEvent('customerCreated', { detail: response.data }))
-        window.dispatchEvent(new CustomEvent('dataUpdated'))
-
-        // Update URL if customer was created
-        if (response?.data?.id) {
-          setSearchParams({ customerId: response.data.id })
-        }
-      } else {
-        console.error('Customer creation failed:', response)
-        toast.error(response?.message || 'Failed to create customer')
+      // Duplicate check: warn if another customer has same phone or email
+      if (customerData.phone || customerData.email) {
+        try {
+          const res = await customersAPI.getCustomers({ pageSize: 200 })
+          const list = res?.data?.items ?? res?.items ?? []
+          const phoneMatch = customerData.phone && list.find(c => (c.phone || '').replace(/\s/g, '') === (customerData.phone || '').replace(/\s/g, ''))
+          const emailMatch = customerData.email && list.find(c => (c.email || '').toLowerCase().trim() === (customerData.email || '').toLowerCase().trim())
+          if (phoneMatch || emailMatch) {
+            const msg = phoneMatch && emailMatch
+              ? `Another customer (${phoneMatch.name}) has this phone and email. Add anyway?`
+              : phoneMatch
+                ? `Another customer (${phoneMatch.name}) has this phone number. Add anyway?`
+                : `Another customer (${emailMatch.name}) has this email. Add anyway?`
+            customerLoadingRef.current = false
+            setCustomerLoading(false)
+            setDuplicateCheckModal({ isOpen: true, message: msg, customerData })
+            return
+          }
+        } catch (_) { /* Ignore duplicate check errors */ }
       }
+
+      await doCreateCustomer(customerData)
     } catch (error) {
       console.error('Failed to create customer - Full error:', error)
       console.error('Error response:', error?.response)
@@ -998,7 +1123,7 @@ const CustomerLedgerPage = () => {
         (Array.isArray(error?.response?.data?.errors) ? error.response.data.errors.join(', ') : '') ||
         error?.message ||
         'Failed to create customer'
-      toast.error(errorMessage)
+      if (!error?._handledByInterceptor) toast.error(errorMessage)
     } finally {
       // Reset loading state (both ref and state)
       customerLoadingRef.current = false
@@ -1022,7 +1147,10 @@ const CustomerLedgerPage = () => {
         email: data.email?.trim() || null,
         trn: data.trn?.trim() || null,
         address: data.address?.trim() || null,
-        creditLimit: data.creditLimit ? parseFloat(data.creditLimit) : 0
+        creditLimit: data.creditLimit ? parseFloat(data.creditLimit) : 0,
+        paymentTerms: data.paymentTerms?.trim() || null,
+        branchId: data.branchId ? parseInt(data.branchId, 10) : null,
+        routeId: data.routeId ? parseInt(data.routeId, 10) : null
       }
 
       if (!customerData.name) {
@@ -1035,7 +1163,7 @@ const CustomerLedgerPage = () => {
       const response = await customersAPI.updateCustomer(editingCustomer.id, customerData)
 
       if (response?.success) {
-        toast.success('Customer updated successfully!')
+        toast.success('Customer updated successfully!', { id: 'customer-update', duration: 4000 })
         setShowEditCustomerModal(false)
         setEditingCustomer(null)
         resetCustomerForm()
@@ -1054,12 +1182,12 @@ const CustomerLedgerPage = () => {
         window.dispatchEvent(new CustomEvent('customerUpdated', { detail: response.data }))
         window.dispatchEvent(new CustomEvent('dataUpdated'))
       } else {
-        toast.error(response?.message || 'Failed to update customer')
+        toast.error(response?.message || 'Failed to update customer', { id: 'customer-update-error' })
       }
     } catch (error) {
       console.error('Failed to update customer:', error)
       const errorMessage = error?.response?.data?.message || error?.message || 'Failed to update customer'
-      toast.error(errorMessage)
+      if (!error?._handledByInterceptor) toast.error(errorMessage)
     } finally {
       customerLoadingRef.current = false
       setCustomerLoading(false)
@@ -1091,53 +1219,137 @@ const CustomerLedgerPage = () => {
       }
     } catch (error) {
       console.error('Reconciliation error:', error)
-      toast.error('Failed to reconcile data', { id: 'reconciliation' })
+      if (!error?._handledByInterceptor) toast.error('Failed to reconcile data', { id: 'reconciliation' })
     }
   }
 
   const handlePaymentSubmit = async (data) => {
-    // Debug logs removed to prevent console flooding
-
-    // Prevent multiple submissions using ref (synchronous check)
-    if (paymentLoadingRef.current || paymentLoading) {
-      console.log('Payment already in progress, ignoring duplicate submission')
-      return
-    }
-
+    if (paymentLoadingRef.current || paymentLoading) return
     if (!selectedCustomer) {
       toast.error('Please select a customer first')
       return
     }
 
-    // Set loading state IMMEDIATELY (both ref and state)
     paymentLoadingRef.current = true
     setPaymentLoading(true)
 
+    const idempotencyKey = crypto.randomUUID()
+    const amount = parseFloat(data.amount)
+    if (!amount || amount <= 0 || isNaN(amount) || !isFinite(amount)) {
+      toast.error('Please enter a valid payment amount greater than 0')
+      paymentLoadingRef.current = false
+      setPaymentLoading(false)
+      return
+    }
+    if (amount > 10000000) {
+      toast.error('Payment amount exceeds maximum limit (10,000,000)')
+      paymentLoadingRef.current = false
+      setPaymentLoading(false)
+      return
+    }
+
+    const isCashCustomer = !selectedCustomer.id || selectedCustomer.id === 'cash' || selectedCustomer.id === 0
+    const isAllocate = payAllOutstandingMode && outstandingInvoices.length > 0
+
+    // DUPLICATE PAYMENT CHECK: same customer + same amount + same day
+    if (!isCashCustomer) {
+      const paymentDateStr = data.paymentDate ? (data.paymentDate.includes('T') ? data.paymentDate.split('T')[0] : data.paymentDate) : new Date().toISOString().split('T')[0]
+      let checkAmount = amount
+      if (isAllocate) {
+        checkAmount = outstandingInvoices
+          .filter(inv => (Number(inv.balanceAmount) || 0) > 0)
+          .reduce((s, inv) => s + (Number(inv.balanceAmount) || 0), 0)
+      }
+      try {
+        const checkRes = await paymentsAPI.checkDuplicatePayment(parseInt(selectedCustomer.id), checkAmount, paymentDateStr)
+        const hasDuplicate = checkRes?.data?.hasDuplicate || checkRes?.hasDuplicate
+        if (hasDuplicate) {
+          pendingPaymentRef.current = { data, idempotencyKey, isAllocate }
+          setDuplicatePaymentModal({ isOpen: true, amount: checkAmount })
+          paymentLoadingRef.current = false
+          setPaymentLoading(false)
+          return
+        }
+      } catch (err) {
+        console.warn('Duplicate check failed, proceeding:', err)
+      }
+    }
+
+    await executePaymentApi({ data, idempotencyKey, isAllocate })
+  }
+
+  const executePaymentApi = async ({ data, idempotencyKey, isAllocate }) => {
+    paymentLoadingRef.current = true
+    setPaymentLoading(true)
+    const amount = parseFloat(data.amount)
+    const isCashCustomer = !selectedCustomer.id || selectedCustomer.id === 'cash' || selectedCustomer.id === 0
+
     try {
-
-      // Generate idempotency key for duplicate prevention
-      const idempotencyKey = crypto.randomUUID()
-
-      // CRITICAL: Validate amount first with strict checks
-      const amount = parseFloat(data.amount)
-      if (!amount || amount <= 0 || isNaN(amount) || !isFinite(amount)) {
-        toast.error('Please enter a valid payment amount greater than 0')
+    if (isAllocate) {
+        const allocations = outstandingInvoices
+          .filter(inv => (Number(inv.balanceAmount) || 0) > 0)
+          .map(inv => ({ invoiceId: inv.id, amount: Number(inv.balanceAmount) || 0 }))
+        const totalAlloc = allocations.reduce((s, a) => s + a.amount, 0)
+        if (allocations.length === 0 || Math.abs(totalAlloc - amount) > 0.01) {
+          toast.error('Outstanding amounts may have changed. Please refresh and try again.')
+          paymentLoadingRef.current = false
+          setPaymentLoading(false)
+          return
+        }
+        const allocateData = {
+          customerId: parseInt(selectedCustomer.id),
+          amount: totalAlloc,
+          mode: (data.method || data.mode || 'CASH').toUpperCase(),
+          reference: data.ref || data.reference || null,
+          paymentDate: data.paymentDate || new Date().toISOString(),
+          allocations
+        }
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Payment request timed out after 30 seconds')), 30000)
+        )
+        const response = await Promise.race([
+          paymentsAPI.allocatePayment(allocateData),
+          timeoutPromise
+        ])
+        if (response?.success) {
+          toast.success(`Payment recorded: ${formatCurrency(amount)} across ${allocations.length} invoice(s)`, { id: 'payment-success', duration: 5000 })
+          setShowPaymentModal(false)
+          setPayAllOutstandingMode(false)
+          setPaymentModalInvoiceId(null)
+          resetPaymentForm()
+          const isCash = false
+          setBalanceRefreshSkeleton(true)
+          await recalculateCustomerBalance(selectedCustomer.id)
+          await loadCustomerData(selectedCustomer.id)
+          const fetchResp = await customersAPI.getCustomers({ page: 1, pageSize: 1000 })
+          if (fetchResp?.success && fetchResp?.data?.items) {
+            setCustomers(fetchResp.data.items)
+            const updated = fetchResp.data.items.find(c => c.id === selectedCustomer.id)
+            if (updated) setSelectedCustomer(updated)
+          }
+          setTimeout(() => setBalanceRefreshSkeleton(false), 500)
+          setTimeout(async () => {
+            await loadCustomerData(selectedCustomer.id)
+            const resp = await customersAPI.getCustomers({ page: 1, pageSize: 1000 })
+            if (resp?.success && resp?.data?.items) {
+              setCustomers(resp.data.items)
+              const upd = resp.data.items.find(c => c.id === selectedCustomer.id)
+              if (upd) setSelectedCustomer(upd)
+            }
+            window.dispatchEvent(new CustomEvent('paymentCreated', { detail: { customerId: selectedCustomer.id } }))
+            window.dispatchEvent(new CustomEvent('dataUpdated'))
+          }, 2000)
+          window.dispatchEvent(new CustomEvent('paymentCreated', { detail: { customerId: selectedCustomer.id } }))
+          window.dispatchEvent(new CustomEvent('dataUpdated'))
+        } else {
+          toast.error(response?.message || 'Failed to allocate payment', { id: 'payment-error' })
+        }
         paymentLoadingRef.current = false
         setPaymentLoading(false)
         return
       }
 
-      // CRITICAL: Validate amount doesn't exceed reasonable limit
-      if (amount > 10000000) {
-        toast.error('Payment amount exceeds maximum limit (10,000,000)')
-        paymentLoadingRef.current = false
-        setPaymentLoading(false)
-        return
-      }
-
-      // CRITICAL: Handle Cash Customer - send null instead of 'cash' string
-      const isCashCustomer = !selectedCustomer.id || selectedCustomer.id === 'cash' || selectedCustomer.id === 0
-
+      // createPayment flow
       const paymentData = {
         customerId: isCashCustomer ? null : parseInt(selectedCustomer.id),
         saleId: data.saleId ? parseInt(data.saleId) : null,
@@ -1169,45 +1381,52 @@ const CustomerLedgerPage = () => {
         const mode = paymentResult?.mode || paymentResult?.method || data.method || 'CASH'
         const amount = paymentResult?.amount || data.amount
 
-        toast.success(`Payment saved: ${formatCurrency(amount)} (${mode})`)
-
-        if (invoiceResult) {
-          const status = invoiceResult.status || invoiceResult.paymentStatus || 'PENDING'
-          toast.success(`Invoice ${invoiceResult.invoiceNo || ''} status: ${status}`)
-        }
+        const statusMsg = invoiceResult?.invoiceNo
+          ? ` Invoice ${invoiceResult.invoiceNo} status: ${invoiceResult.status || invoiceResult.paymentStatus || 'PENDING'}`
+          : ''
+        toast.success(`Payment recorded: ${formatCurrency(amount)} (${mode})${statusMsg}`, { id: 'payment-success', duration: 5000 })
 
         setShowPaymentModal(false)
         setPaymentModalInvoiceId(null)
         resetPaymentForm() // Reset payment form after successful submission
 
-        // INSTANT UPDATE: Reload ALL customer data immediately to refresh balances, invoices, and outstanding bills
-        await Promise.all([
-          loadCustomerData(selectedCustomer.id), // This will refresh ledger, invoices, outstanding invoices, and summary
-          fetchCustomers() // Refresh customer list
-        ])
+        // RISK-2: Show "Refreshing balance…" so user knows to wait (skip for cash customer)
+        const isCash = !selectedCustomer.id || selectedCustomer.id === 'cash' || selectedCustomer.id === 0
+        if (!isCash) setBalanceRefreshSkeleton(true)
 
-        // CRITICAL: Validate data integrity after payment
-        setTimeout(async () => {
-          // Refresh customer data again to get latest balance and status
-          await loadCustomerData(selectedCustomer.id)
-          await fetchCustomers()
-
-          // Trigger validation to ensure payment was processed correctly
-          const validationResult = await recalculateCustomerBalance(selectedCustomer.id)
-          if (validationResult.success) {
-            console.log('Payment validated and balance verified')
+        // SEQUENTIAL: Recalculate balance first, then load data (prevents race condition)
+        await recalculateCustomerBalance(isCash ? 'cash' : selectedCustomer.id)
+        await loadCustomerData(isCash ? 'cash' : selectedCustomer.id)
+        const fetchResp = await customersAPI.getCustomers({ page: 1, pageSize: 1000 })
+        if (fetchResp?.success && fetchResp?.data?.items) {
+          setCustomers(fetchResp.data.items)
+          if (!isCash) {
+            const updated = fetchResp.data.items.find(c => c.id === selectedCustomer.id)
+            if (updated) setSelectedCustomer(updated)
           }
+        }
 
-          // Trigger global update events
+        if (!isCash) setTimeout(() => setBalanceRefreshSkeleton(false), 500)
+
+        // Delayed refresh to catch backend eventual consistency (2s)
+        setTimeout(async () => {
+          await loadCustomerData(isCash ? 'cash' : selectedCustomer.id)
+          const resp = await customersAPI.getCustomers({ page: 1, pageSize: 1000 })
+          if (resp?.success && resp?.data?.items) {
+            setCustomers(resp.data.items)
+            if (!isCash) {
+              const updated = resp.data.items.find(c => c.id === selectedCustomer.id)
+              if (updated) setSelectedCustomer(updated)
+            }
+          }
           window.dispatchEvent(new CustomEvent('paymentCreated', { detail: { customerId: selectedCustomer.id, payment: paymentResult } }))
           window.dispatchEvent(new CustomEvent('dataUpdated'))
-        }, 2000) // 2 second delay to ensure backend processing is complete
+        }, 2000)
 
-        // Trigger global data refresh events for other pages (reports, dashboard, etc.)
         window.dispatchEvent(new CustomEvent('paymentCreated', { detail: { customerId: selectedCustomer.id, payment: paymentResult } }))
         window.dispatchEvent(new CustomEvent('dataUpdated'))
       } else {
-        toast.error(response?.message || 'Failed to save payment')
+        toast.error(response?.message || 'Failed to save payment', { id: 'payment-error' })
       }
     } catch (error) {
       // Log error once (prevent flooding)
@@ -1216,28 +1435,28 @@ const CustomerLedgerPage = () => {
         error._logged = true
       }
 
-      // Handle HTTP 409 Conflict (concurrent modification)
-      if (error.message?.includes('CONFLICT') || error.response?.status === 409) {
-        toast.error('Another user updated this invoice. Refreshing data...', {
-          duration: 5000
-        })
-        // Refresh customer data to get latest invoice status
-        await loadCustomerData(selectedCustomer.id)
-        await fetchCustomers()
-      } else {
-        // Safely extract error message
-        let errorMsg = 'Failed to save payment'
-        if (error?.response?.data?.message) {
-          errorMsg = error.response.data.message
-        } else if (error?.response?.data?.errors && Array.isArray(error.response.data.errors)) {
-          errorMsg = error.response.data.errors.join(', ')
-        } else if (error?.message) {
-          errorMsg = error.message
+      // Skip if interceptor already showed the error
+      if (!error?._handledByInterceptor) {
+        // Handle HTTP 409 Conflict (concurrent modification)
+        if (error.message?.includes('CONFLICT') || error.response?.status === 409) {
+          toast.error('Another user updated this invoice. Refreshing data...', {
+            id: 'payment-error',
+            duration: 5000
+          })
+          await loadCustomerData(selectedCustomer.id)
+          const resp = await customersAPI.getCustomers({ page: 1, pageSize: 1000 })
+          if (resp?.success && resp?.data?.items) setCustomers(resp.data.items)
+        } else {
+          let errorMsg = 'Failed to save payment'
+          if (error?.response?.data?.message) {
+            errorMsg = error.response.data.message
+          } else if (error?.response?.data?.errors && Array.isArray(error.response.data.errors)) {
+            errorMsg = error.response.data.errors.join(', ')
+          } else if (error?.message) {
+            errorMsg = error.message
+          }
+          toast.error(errorMsg, { id: 'payment-error', duration: 5000 })
         }
-
-        toast.error(errorMsg, {
-          duration: 5000
-        })
       }
     } finally {
       // Reset loading state (both ref and state)
@@ -1279,10 +1498,10 @@ const CustomerLedgerPage = () => {
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
-      toast.success('PDF downloaded successfully')
+      toast.success('PDF downloaded successfully', { id: 'ledger-pdf', duration: 4000 })
     } catch (error) {
       console.error('Failed to export PDF:', error)
-      toast.error('Failed to export PDF')
+      if (!error?._handledByInterceptor) toast.error('Failed to export PDF')
     }
   }
 
@@ -1306,9 +1525,10 @@ const CustomerLedgerPage = () => {
         return entryDate >= fromDate && entryDate <= toDate
       })
 
-      const totalDebit = filteredEntries.reduce((sum, e) => sum + (e.debit || 0), 0)
-      const totalCredit = filteredEntries.reduce((sum, e) => sum + (e.credit || 0), 0)
-      const closingBalance = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+      const totalDebit = filteredEntries.reduce((sum, e) => sum + (Number(e.debit) || 0), 0)
+      const totalCredit = filteredEntries.reduce((sum, e) => sum + (Number(e.credit) || 0), 0)
+      const lastBal = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+      const closingBalance = Number(lastBal) || 0
 
       const message = `*Customer Ledger Statement*\n\n` +
         `*Customer:* ${selectedCustomer.name}\n` +
@@ -1326,15 +1546,15 @@ const CustomerLedgerPage = () => {
       if (phoneNumber) {
         const url = `https://wa.me/${phoneNumber}?text=${encodeURIComponent(message)}`
         window.open(url, '_blank')
-        toast.success('Opening WhatsApp...')
+        toast.success('Opening WhatsApp...', { id: 'statement-share', duration: 3000 })
       } else {
         // Copy to clipboard if no phone
         navigator.clipboard.writeText(message)
-        toast.success('Statement copied to clipboard!')
+        toast.success('Statement copied to clipboard!', { id: 'statement-copy', duration: 3000 })
       }
     } catch (error) {
       console.error('Share error:', error)
-      toast.error('Failed to share statement')
+      if (!error?._handledByInterceptor) toast.error('Failed to share statement')
     }
   }
 
@@ -1355,9 +1575,10 @@ const CustomerLedgerPage = () => {
       return entryDate >= fromDate && entryDate <= toDate
     })
 
-    const totalDebit = filteredEntries.reduce((sum, e) => sum + (e.debit || 0), 0)
-    const totalCredit = filteredEntries.reduce((sum, e) => sum + (e.credit || 0), 0)
-    const closingBalance = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+    const totalDebit = filteredEntries.reduce((sum, e) => sum + (Number(e.debit) || 0), 0)
+    const totalCredit = filteredEntries.reduce((sum, e) => sum + (Number(e.credit) || 0), 0)
+    const lastBal = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+    const closingBalance = Number(lastBal) || 0
 
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -1407,10 +1628,10 @@ const CustomerLedgerPage = () => {
                   <td>${entry.type || ''}</td>
                   <td>${entry.reference || '-'}</td>
                   <td>${entry.paymentMode || entry.PaymentMode || '-'}</td>
-                  <td>${entry.debit > 0 ? formatCurrency(entry.debit) : '-'}</td>
-                  <td>${entry.credit > 0 ? formatCurrency(entry.credit) : '-'}</td>
+                  <td>${(Number(entry.debit) || 0) > 0 ? formatCurrency(Number(entry.debit) || 0) : '-'}</td>
+                  <td>${(Number(entry.credit) || 0) > 0 ? formatCurrency(Number(entry.credit) || 0) : '-'}</td>
                   <td>${entry.status || '-'}</td>
-                  <td>${formatBalance(entry.balance)}</td>
+                  <td>${formatBalance(Number(entry.balance) || 0)}</td>
                 </tr>`
     }).join('')}
             </tbody>
@@ -1561,7 +1782,7 @@ const CustomerLedgerPage = () => {
             </div>
           )}
           <div className="text-xs text-neutral-600 whitespace-nowrap ml-auto">
-            Total: {customers.length}
+            {searchDropdownLoading ? 'Searching…' : (searchTerm || !selectedCustomer ? `${searchDropdownTotal} customer(s)` : `Total: ${customers.length}`)}
           </div>
         </div>
 
@@ -1585,8 +1806,14 @@ const CustomerLedgerPage = () => {
                   All cash sales and payments • Balance: AED 0.00
                 </div>
               </button>
-              {/* Regular Customers - name visible, balance with color */}
-              {filteredCustomers.length > 0 && filteredCustomers.slice(0, 15).map((customer) => (
+              {/* Regular Customers - server-side search results */}
+              {searchDropdownLoading && searchDropdownResults.length === 0 && (
+                <div className="p-3 text-sm text-neutral-500">Searching…</div>
+              )}
+              {!searchDropdownLoading && searchDropdownResults.length === 0 && searchTerm && (
+                <div className="p-3 text-sm text-neutral-500">No customers found. Try a different search.</div>
+              )}
+              {searchDropdownResults.map((customer) => (
                 <button
                   key={customer.id}
                   onClick={() => handleSelectCustomer(customer)}
@@ -1609,6 +1836,15 @@ const CustomerLedgerPage = () => {
                   </div>
                 </button>
               ))}
+              {!searchDropdownLoading && searchDropdownResults.length > 0 && searchDropdownResults.length < searchDropdownTotal && (
+                <button
+                  type="button"
+                  onClick={() => fetchCustomerSearch(searchTerm, searchDropdownPage + 1, true)}
+                  className="w-full p-3 text-sm text-primary-600 hover:bg-primary-50 font-medium"
+                >
+                  Load more ({searchDropdownResults.length} of {searchDropdownTotal})
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -1643,10 +1879,16 @@ const CustomerLedgerPage = () => {
                   {/* Current Balance - prominent */}
                   <div className="text-right flex-shrink-0">
                     <p className="text-xs text-neutral-600 mb-0.5">Current balance</p>
-                    <p className={`text-xl sm:text-2xl font-bold ${(selectedCustomer.balance ?? 0) < 0 ? 'text-green-600' : (selectedCustomer.balance ?? 0) > 0 ? 'text-red-600' : 'text-neutral-900'}`}>
-                      {formatCurrency(Math.abs(selectedCustomer.balance ?? 0))}
-                    </p>
-                    <p className="text-xs text-neutral-500">{(selectedCustomer.balance ?? 0) < 0 ? 'In credit' : (selectedCustomer.balance ?? 0) > 0 ? 'Outstanding' : 'Settled'}</p>
+                    {balanceRefreshSkeleton ? (
+                      <p className="text-lg text-neutral-500 animate-pulse">Refreshing balance…</p>
+                    ) : (
+                      <>
+                        <p className={`text-xl sm:text-2xl font-bold ${(selectedCustomer.balance ?? 0) < 0 ? 'text-green-600' : (selectedCustomer.balance ?? 0) > 0 ? 'text-red-600' : 'text-neutral-900'}`}>
+                          {formatCurrency(Math.abs(selectedCustomer.balance ?? 0))}
+                        </p>
+                        <p className="text-xs text-neutral-500">{(selectedCustomer.balance ?? 0) < 0 ? 'In credit' : (selectedCustomer.balance ?? 0) > 0 ? 'Outstanding' : 'Settled'}</p>
+                      </>
+                    )}
                   </div>
 
                   {/* Action Buttons - Compact */}
@@ -1664,6 +1906,9 @@ const CustomerLedgerPage = () => {
                             customerForm.setValue('trn', selectedCustomer.trn || '')
                             customerForm.setValue('address', selectedCustomer.address || '')
                             customerForm.setValue('creditLimit', selectedCustomer.creditLimit || 0)
+                            customerForm.setValue('paymentTerms', selectedCustomer.paymentTerms || '')
+                            customerForm.setValue('branchId', selectedCustomer.branchId || '')
+                            customerForm.setValue('routeId', selectedCustomer.routeId || '')
                             setShowEditCustomerModal(true)
                           }}
                           className="px-2 py-1 bg-primary-600 text-white text-xs rounded hover:bg-primary-700 flex items-center gap-1 transition-colors"
@@ -1673,13 +1918,36 @@ const CustomerLedgerPage = () => {
                           <span className="hidden sm:inline">Edit</span>
                         </button>
                         <button
-                          onClick={() => setShowPaymentModal(true)}
+                          onClick={() => {
+                            setPayAllOutstandingMode(false)
+                            setPaymentModalInvoiceId(null)
+                            setShowPaymentModal(true)
+                          }}
                           className="px-2 py-1 bg-primary-600 text-white text-xs rounded hover:bg-primary-700 flex items-center gap-1 transition-colors"
                           title="Add Payment (F4)"
                         >
                           <Plus className="h-3 w-3" />
                           <span className="hidden sm:inline">Payment</span>
                         </button>
+                        {outstandingInvoices.length > 0 && (selectedCustomer.balance ?? 0) > 0 && (
+                          <button
+                            onClick={() => {
+                              setPayAllOutstandingMode(true)
+                              setPaymentModalInvoiceId(null)
+                              const total = outstandingInvoices.reduce((s, inv) => s + (Number(inv.balanceAmount) || 0), 0)
+                              setPaymentValue('amount', total)
+                              setPaymentValue('saleId', '')
+                              setPaymentValue('paymentDate', new Date().toISOString().split('T')[0])
+                              setPaymentValue('method', 'CASH')
+                              setShowPaymentModal(true)
+                            }}
+                            className="px-2 py-1 bg-emerald-600 text-white text-xs rounded hover:bg-emerald-700 flex items-center gap-1 transition-colors"
+                            title="Pay all outstanding invoices in one payment"
+                          >
+                            <Wallet className="h-3 w-3" />
+                            <span className="hidden sm:inline">Pay All</span>
+                          </button>
+                        )}
                       </>
                     )}
                     <button
@@ -1717,11 +1985,11 @@ const CustomerLedgerPage = () => {
                           window.URL.revokeObjectURL(url)
                           document.body.removeChild(a)
                           toast.dismiss(loadingToast)
-                          toast.success('PDF downloaded!')
+                            toast.success('PDF downloaded!', { id: 'invoice-pdf-download', duration: 3000 })
                         } catch (error) {
                           console.error('Failed to export pending bills PDF:', error)
                           toast.dismiss()
-                          toast.error(error.response?.data?.message || 'Failed to export PDF')
+                          if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to export PDF')
                         }
                       }}
                       className="px-2 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700 flex items-center gap-1 transition-colors"
@@ -1745,30 +2013,103 @@ const CustomerLedgerPage = () => {
                     >
                       <Send className="h-3 w-3" />
                     </button>
+                    <button
+                      onClick={() => selectedCustomer && customerLedger.length > 0 && setShowSendStatementModal(true)}
+                      disabled={!selectedCustomer || customerLedger.length === 0}
+                      className="px-2 py-1 bg-primary-600 text-white text-xs rounded hover:bg-primary-700 flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Send statement via WhatsApp, email, or download PDF"
+                    >
+                      <Send className="h-3 w-3" />
+                      <span className="hidden lg:inline">Send Statement</span>
+                    </button>
                   </div>
                 </div>
               </div>
 
-              {/* Date Range & Branch/Route/Staff Filters */}
+              {/* Send Statement Modal */}
+              {showSendStatementModal && selectedCustomer && (
+                <Modal
+                  isOpen={showSendStatementModal}
+                  onClose={() => setShowSendStatementModal(false)}
+                  title="Send Statement"
+                >
+                  <div className="space-y-4">
+                    <p className="text-sm text-neutral-600">
+                      Send account statement for <strong>{selectedCustomer.name}</strong> ({dateRange.from} to {dateRange.to})
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <button
+                        onClick={() => {
+                          handleShareWhatsApp()
+                          setShowSendStatementModal(false)
+                        }}
+                        className="flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                      >
+                        <Send className="h-4 w-4" />
+                        Share via WhatsApp
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleGeneratePDF()
+                          setShowSendStatementModal(false)
+                        }}
+                        className="flex items-center justify-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+                      >
+                        <Download className="h-4 w-4" />
+                        Download PDF
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const filteredEntries = customerLedger.filter(entry => {
+                              const entryDate = new Date(entry.date)
+                              const fromDate = new Date(dateRange.from)
+                              const toDate = new Date(dateRange.to)
+                              toDate.setHours(23, 59, 59, 999)
+                              return entryDate >= fromDate && entryDate <= toDate
+                            })
+                            const totalDebit = filteredEntries.reduce((sum, e) => sum + (Number(e.debit) || 0), 0)
+                            const totalCredit = filteredEntries.reduce((sum, e) => sum + (Number(e.credit) || 0), 0)
+                            const lastBal = filteredEntries.length > 0 ? filteredEntries[filteredEntries.length - 1].balance : 0
+                            const closingBalance = Number(lastBal) || 0
+                            const message = `Customer Ledger Statement\n\nCustomer: ${selectedCustomer.name}\nTRN: ${selectedCustomer.trn || 'N/A'}\nPhone: ${selectedCustomer.phone || 'N/A'}\nPeriod: ${dateRange.from} to ${dateRange.to}\n\nSummary:\nTotal Sales: ${formatCurrency(totalDebit)}\nPayments Received: ${formatCurrency(totalCredit)}\nOutstanding: ${formatCurrency(totalDebit - totalCredit)}\nClosing Balance: ${formatBalance(closingBalance)}\n\nGenerated on ${new Date().toLocaleString()}`
+                            await navigator.clipboard.writeText(message)
+                            toast.success('Statement summary copied to clipboard', { id: 'statement-summary-copy', duration: 3000 })
+                            setShowSendStatementModal(false)
+                          } catch (e) {
+                            if (!e?._handledByInterceptor) toast.error('Failed to copy')
+                          }
+                        }}
+                        className="flex items-center justify-center gap-2 px-4 py-2.5 bg-neutral-600 text-white rounded-lg hover:bg-neutral-700 transition-colors"
+                      >
+                        <FileText className="h-4 w-4" />
+                        Copy Summary
+                      </button>
+                    </div>
+                  </div>
+                </Modal>
+              )}
+
+              {/* Date Range & Branch/Route/Staff Filters (staged until Apply clicked) */}
               <div className="bg-neutral-50 border-b border-neutral-200 px-3 py-2 sm:px-4 flex items-center gap-3 flex-wrap">
                 <label className="text-sm font-medium text-neutral-700">Date:</label>
                 <Input
                   type="date"
-                  value={dateRange.from}
-                  onChange={(e) => setDateRange(prev => ({ ...prev, from: e.target.value }))}
+                  value={filterDraft.from}
+                  onChange={(e) => setFilterDraft(prev => ({ ...prev, from: e.target.value }))}
                   className="w-36"
                 />
                 <span className="text-neutral-600">to</span>
                 <Input
                   type="date"
-                  value={dateRange.to}
-                  onChange={(e) => setDateRange(prev => ({ ...prev, to: e.target.value }))}
+                  value={filterDraft.to}
+                  onChange={(e) => setFilterDraft(prev => ({ ...prev, to: e.target.value }))}
                   className="w-36"
                 />
                 <span className="text-neutral-400 mx-1">|</span>
                 <select
-                  value={ledgerBranchId}
-                  onChange={(e) => { setLedgerBranchId(e.target.value); setLedgerRouteId('') }}
+                  value={filterDraft.branchId}
+                  onChange={(e) => setFilterDraft(prev => ({ ...prev, branchId: e.target.value, routeId: '' }))}
                   className="border border-neutral-300 rounded px-2 py-1.5 text-sm bg-white min-w-[100px]"
                   title="Filter by branch"
                 >
@@ -1776,25 +2117,33 @@ const CustomerLedgerPage = () => {
                   {availableBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                 </select>
                 <select
-                  value={ledgerRouteId}
-                  onChange={(e) => setLedgerRouteId(e.target.value)}
+                  value={filterDraft.routeId}
+                  onChange={(e) => setFilterDraft(prev => ({ ...prev, routeId: e.target.value }))}
                   className="border border-neutral-300 rounded px-2 py-1.5 text-sm bg-white min-w-[100px]"
                   title="Filter by route"
                 >
                   {isAdminOrOwner(user) && <option value="">All routes</option>}
-                  {(ledgerBranchId ? availableRoutes.filter(r => r.branchId === parseInt(ledgerBranchId, 10)) : availableRoutes).map(r => (
+                  {(filterDraft.branchId ? availableRoutes.filter(r => r.branchId === parseInt(filterDraft.branchId, 10)) : availableRoutes).map(r => (
                     <option key={r.id} value={r.id}>{r.name}</option>
                   ))}
                 </select>
                 <select
-                  value={ledgerStaffId}
-                  onChange={(e) => setLedgerStaffId(e.target.value)}
+                  value={filterDraft.staffId}
+                  onChange={(e) => setFilterDraft(prev => ({ ...prev, staffId: e.target.value }))}
                   className="border border-neutral-300 rounded px-2 py-1.5 text-sm bg-white min-w-[100px]"
                   title="Filter by staff"
                 >
                   {isAdminOrOwner(user) && <option value="">All staff</option>}
                   {availableStaff.map(u => <option key={u.id} value={u.id}>{u.name || u.email}</option>)}
                 </select>
+                <button
+                  type="button"
+                  onClick={applyLedgerFilters}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary-600 text-white text-sm font-medium rounded hover:bg-primary-700"
+                >
+                  <Filter className="h-3.5 w-3.5" />
+                  Apply Filter
+                </button>
               </div>
 
               {/* TAB SECTIONS - Full Width */}
@@ -1888,7 +2237,7 @@ const CustomerLedgerPage = () => {
                           window.open(url, '_blank')
                           setTimeout(() => window.URL.revokeObjectURL(url), 100)
                         } catch (error) {
-                          toast.error(error?.message || 'Failed to generate PDF')
+                          if (!error?._handledByInterceptor) toast.error(error?.message || 'Failed to generate PDF')
                         }
                       }}
                       onEditInvoice={(invoiceId) => {
@@ -1915,7 +2264,7 @@ const CustomerLedgerPage = () => {
                             try {
                               const response = await salesAPI.unlockInvoice(invoiceId, reason)
                               if (response.success) {
-                                toast.success('Invoice unlocked successfully!')
+                                toast.success('Invoice unlocked successfully!', { id: 'invoice-unlock', duration: 4000 })
                                 if (selectedCustomer) {
                                   await loadCustomerData(selectedCustomer.id)
                                 }
@@ -1923,7 +2272,7 @@ const CustomerLedgerPage = () => {
                                 toast.error(response.message || 'Failed to unlock invoice')
                               }
                             } catch (error) {
-                              toast.error(error?.response?.data?.message || 'Failed to unlock invoice')
+                              if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to unlock invoice')
                             }
                           }
                         })
@@ -1939,7 +2288,7 @@ const CustomerLedgerPage = () => {
                             try {
                               const response = await salesAPI.deleteSale(invoiceId)
                               if (response.success) {
-                                toast.success('Invoice deleted successfully!')
+                                toast.success('Invoice deleted successfully!', { id: 'invoice-delete', duration: 4000 })
                                 if (selectedCustomer) {
                                   // Reload customer data to update ledger
                                   await loadCustomerData(selectedCustomer.id)
@@ -1950,7 +2299,7 @@ const CustomerLedgerPage = () => {
                                 toast.error(response.message || 'Failed to delete invoice')
                               }
                             } catch (error) {
-                              toast.error(error?.response?.data?.message || 'Failed to delete invoice')
+                              if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to delete invoice')
                             }
                           }
                         })
@@ -2046,7 +2395,7 @@ const CustomerLedgerPage = () => {
                           }
                         } catch (error) {
                           console.error('Error generating receipt:', error)
-                          toast.error('Failed to generate receipt', { id: 'receipt' })
+                          if (!error?._handledByInterceptor) toast.error('Failed to generate receipt', { id: 'receipt' })
                         }
                       }}
                       onEditPayment={async (payment) => {
@@ -2108,7 +2457,7 @@ const CustomerLedgerPage = () => {
                                 } catch (error) {
                                   console.error('Error updating payment:', error)
                                   const errorMsg = error?.response?.data?.message || error?.message || 'Failed to update payment'
-                                  toast.error(errorMsg, { id: 'update-payment' })
+                                  if (!error?._handledByInterceptor) toast.error(errorMsg, { id: 'update-payment' })
                                 }
                               }
                             })
@@ -2140,7 +2489,7 @@ const CustomerLedgerPage = () => {
                             } catch (error) {
                               console.error('Error deleting payment:', error)
                               const errorMsg = error?.response?.data?.message || error?.message || 'Failed to delete payment'
-                              toast.error(errorMsg, { id: 'delete-payment' })
+                              if (!error?._handledByInterceptor) toast.error(errorMsg, { id: 'delete-payment' })
                             }
                           }
                         })
@@ -2171,11 +2520,13 @@ const CustomerLedgerPage = () => {
           setShowPaymentModal(false)
           resetPaymentForm()
           setPaymentModalInvoiceId(null)
+          setPayAllOutstandingMode(false)
         }}
         customer={selectedCustomer}
         invoiceId={paymentModalInvoiceId}
         outstandingInvoices={outstandingInvoices}
         allInvoices={customerInvoices}
+        payAllOutstandingMode={payAllOutstandingMode}
         onSubmit={handlePaymentSubmit}
         register={paymentRegister}
         handleSubmit={handlePaymentFormSubmit}
@@ -2206,7 +2557,7 @@ const CustomerLedgerPage = () => {
               }
               setTimeout(() => window.URL.revokeObjectURL(url), 100)
             } catch (error) {
-              toast.error(error?.message || 'Failed to print invoice')
+              if (!error?._handledByInterceptor) toast.error(error?.message || 'Failed to print invoice')
             }
           }}
         />
@@ -2256,10 +2607,20 @@ const CustomerLedgerPage = () => {
               <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
               <input
                 type="text"
-                placeholder="+971 50 123 4567"
+                placeholder="+971 50 123 4567 or 050 123 4567"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                {...customerRegister('phone')}
+                {...customerRegister('phone', {
+                validate: (v) => {
+                  const s = (v || '').trim()
+                  if (!s) return true
+                  const uaePhone = /^(\+971|0)(5[0-9]|[1-9])[0-9]{7}$/
+                  return uaePhone.test(s.replace(/\s/g, '')) || 'Enter valid UAE phone (+971... or 05X...)'
+                }
+              })}
               />
+              {customerErrors.phone && (
+                <p className="mt-1 text-sm text-red-600">{customerErrors.phone.message}</p>
+              )}
             </div>
 
             <div>
@@ -2273,13 +2634,23 @@ const CustomerLedgerPage = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">TRN</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">TRN (15 digits)</label>
               <input
                 type="text"
-                placeholder="Tax Registration Number"
+                placeholder="UAE Tax Registration Number"
+                maxLength={15}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                {...customerRegister('trn')}
+                {...customerRegister('trn', {
+                  validate: (v) => {
+                    const s = (v || '').trim()
+                    if (!s) return true
+                    return /^\d{15}$/.test(s) || 'TRN must be exactly 15 digits'
+                  }
+                })}
               />
+              {customerErrors.trn && (
+                <p className="mt-1 text-sm text-red-600">{customerErrors.trn.message}</p>
+              )}
             </div>
 
             <div className="col-span-2">
@@ -2292,14 +2663,63 @@ const CustomerLedgerPage = () => {
               />
             </div>
 
+            {branches.length > 0 && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Branch {branches.length > 0 && <span className="text-red-500">*</span>}
+                  </label>
+                  <select
+                    className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${customerErrors.branchId ? 'border-red-500' : 'border-gray-300'}`}
+                    {...customerRegister('branchId', {
+                      required: branches.length > 0 ? 'Branch is required when company has branches' : false,
+                      onChange: (e) => {
+                        setCustomerValue('branchId', e.target.value)
+                        setCustomerValue('routeId', '')
+                      }
+                    })}
+                  >
+                    <option value="">Select branch</option>
+                    {branches.map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                  {customerErrors.branchId && (
+                    <p className="mt-1 text-sm text-red-600">{customerErrors.branchId.message}</p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Route {addModalBranchId && <span className="text-red-500">*</span>}
+                  </label>
+                  <select
+                    className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed ${customerErrors.routeId ? 'border-red-500' : 'border-gray-300'}`}
+                    {...customerRegister('routeId', {
+                      required: addModalBranchId ? 'Route is required when branch is selected' : false
+                    })}
+                    disabled={!addModalBranchId}
+                  >
+                    <option value="">
+                      {addModalBranchId ? 'Select route' : 'Select branch first'}
+                    </option>
+                    {(addModalBranchId ? routes.filter(r => r.branchId === parseInt(addModalBranchId, 10)) : []).map(r => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
+                  </select>
+                  {customerErrors.routeId && (
+                    <p className="mt-1 text-sm text-red-600">{customerErrors.routeId.message}</p>
+                  )}
+                </div>
+              </>
+            )}
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Credit Limit</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Credit Limit (AED)</label>
               <input
                 type="number"
                 step="0.01"
                 min="0"
-                placeholder="0.00"
-                defaultValue={0}
+                placeholder="0 = unlimited"
                 className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${customerErrors.creditLimit ? 'border-red-500' : 'border-gray-300'
                   }`}
                 {...customerRegister('creditLimit', {
@@ -2309,6 +2729,33 @@ const CustomerLedgerPage = () => {
               />
               {customerErrors.creditLimit && (
                 <p className="mt-1 text-sm text-red-600">{customerErrors.creditLimit.message}</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Payment Terms {(watchCustomer('creditLimit') || 0) > 0 && <span className="text-red-500">*</span>}
+              </label>
+              <select
+                className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${customerErrors.paymentTerms ? 'border-red-500' : 'border-gray-300'}`}
+                {...customerRegister('paymentTerms', {
+                  validate: (v) => {
+                    const creditLimit = watchCustomer('creditLimit')
+                    const credit = typeof creditLimit === 'number' ? creditLimit : parseFloat(creditLimit) || 0
+                    if (credit > 0 && (!v || !String(v).trim())) return 'Payment terms are required when credit limit is set'
+                    return true
+                  }
+                })}
+              >
+                <option value="">Select payment terms</option>
+                <option value="Cash on Delivery">Cash on Delivery</option>
+                <option value="Net 7">Net 7</option>
+                <option value="Net 15">Net 15</option>
+                <option value="Net 30">Net 30</option>
+                <option value="Net 60">Net 60</option>
+                <option value="Custom">Custom</option>
+              </select>
+              {customerErrors.paymentTerms && (
+                <p className="mt-1 text-sm text-red-600">{customerErrors.paymentTerms.message}</p>
               )}
             </div>
           </div>
@@ -2392,10 +2839,20 @@ const CustomerLedgerPage = () => {
               <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
               <input
                 type="text"
-                placeholder="+971 50 123 4567"
+                placeholder="+971 50 123 4567 or 050 123 4567"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                {...customerRegister('phone')}
+                {...customerRegister('phone', {
+                validate: (v) => {
+                  const s = (v || '').trim()
+                  if (!s) return true
+                  const uaePhone = /^(\+971|0)(5[0-9]|[1-9])[0-9]{7}$/
+                  return uaePhone.test(s.replace(/\s/g, '')) || 'Enter valid UAE phone (+971... or 05X...)'
+                }
+              })}
               />
+              {customerErrors.phone && (
+                <p className="mt-1 text-sm text-red-600">{customerErrors.phone.message}</p>
+              )}
             </div>
 
             <div>
@@ -2409,13 +2866,23 @@ const CustomerLedgerPage = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">TRN</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">TRN (15 digits)</label>
               <input
                 type="text"
-                placeholder="Tax Registration Number"
+                placeholder="UAE Tax Registration Number"
+                maxLength={15}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                {...customerRegister('trn')}
+                {...customerRegister('trn', {
+                  validate: (v) => {
+                    const s = (v || '').trim()
+                    if (!s) return true
+                    return /^\d{15}$/.test(s) || 'TRN must be exactly 15 digits'
+                  }
+                })}
               />
+              {customerErrors.trn && (
+                <p className="mt-1 text-sm text-red-600">{customerErrors.trn.message}</p>
+              )}
             </div>
 
             <div className="col-span-2">
@@ -2428,13 +2895,54 @@ const CustomerLedgerPage = () => {
               />
             </div>
 
+            {branches.length > 0 && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                  <select
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    {...(function () {
+                      const r = customerRegister('branchId')
+                      return {
+                        ...r,
+                        onChange: (e) => {
+                          r.onChange(e)
+                          setCustomerValue('routeId', '')
+                        }
+                      }
+                    })()}
+                  >
+                    <option value="">All branches</option>
+                    {branches.map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Route</label>
+                  <select
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    {...customerRegister('routeId')}
+                    disabled={!watchCustomer('branchId')}
+                  >
+                    <option value="">
+                      {watchCustomer('branchId') ? 'All routes' : 'Select branch first'}
+                    </option>
+                    {(watchCustomer('branchId') ? routes.filter(r => r.branchId === parseInt(watchCustomer('branchId'), 10)) : []).map(r => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            )}
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Credit Limit</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Credit Limit (AED)</label>
               <input
                 type="number"
                 step="0.01"
                 min="0"
-                placeholder="0.00"
+                placeholder="0 = unlimited"
                 className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${customerErrors.creditLimit ? 'border-red-500' : 'border-gray-300'
                   }`}
                 {...customerRegister('creditLimit', {
@@ -2444,6 +2952,33 @@ const CustomerLedgerPage = () => {
               />
               {customerErrors.creditLimit && (
                 <p className="mt-1 text-sm text-red-600">{customerErrors.creditLimit.message}</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Payment Terms {(watchCustomer('creditLimit') || 0) > 0 && <span className="text-red-500">*</span>}
+              </label>
+              <select
+                className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${customerErrors.paymentTerms ? 'border-red-500' : 'border-gray-300'}`}
+                {...customerRegister('paymentTerms', {
+                  validate: (v) => {
+                    const creditLimit = watchCustomer('creditLimit')
+                    const credit = typeof creditLimit === 'number' ? creditLimit : parseFloat(creditLimit) || 0
+                    if (credit > 0 && (!v || !String(v).trim())) return 'Payment terms are required when credit limit is set'
+                    return true
+                  }
+                })}
+              >
+                <option value="">Select payment terms</option>
+                <option value="Cash on Delivery">Cash on Delivery</option>
+                <option value="Net 7">Net 7</option>
+                <option value="Net 15">Net 15</option>
+                <option value="Net 30">Net 30</option>
+                <option value="Net 60">Net 60</option>
+                <option value="Custom">Custom</option>
+              </select>
+              {customerErrors.paymentTerms && (
+                <p className="mt-1 text-sm text-red-600">{customerErrors.paymentTerms.message}</p>
               )}
             </div>
           </div>
@@ -2491,6 +3026,39 @@ const CustomerLedgerPage = () => {
         onConfirm={dangerModal.onConfirm}
         onClose={() => setDangerModal(prev => ({ ...prev, isOpen: false }))}
       />
+
+      <ConfirmDangerModal
+        isOpen={duplicateCheckModal.isOpen}
+        title="Possible Duplicate Customer"
+        message={duplicateCheckModal.message}
+        confirmLabel="Yes, add anyway"
+        onConfirm={() => {
+          if (duplicateCheckModal.customerData) {
+            doCreateCustomer(duplicateCheckModal.customerData)
+            setDuplicateCheckModal({ isOpen: false, message: '', customerData: null })
+          }
+        }}
+        onClose={() => setDuplicateCheckModal({ isOpen: false, message: '', customerData: null })}
+      />
+
+      <ConfirmDangerModal
+        isOpen={duplicatePaymentModal.isOpen}
+        title="Possible Duplicate Payment"
+        message={`A payment of ${formatCurrency(duplicatePaymentModal.amount)} was already recorded for this customer today. Record another payment anyway?`}
+        confirmLabel="Yes, Record Another"
+        onConfirm={async () => {
+          if (pendingPaymentRef.current) {
+            const { data, idempotencyKey, isAllocate } = pendingPaymentRef.current
+            setDuplicatePaymentModal({ isOpen: false })
+            pendingPaymentRef.current = null
+            await executePaymentApi({ data, idempotencyKey, isAllocate })
+          }
+        }}
+        onClose={() => {
+          setDuplicatePaymentModal({ isOpen: false })
+          pendingPaymentRef.current = null
+        }}
+      />
     </div>
   )
 }
@@ -2499,9 +3067,10 @@ const CustomerLedgerPage = () => {
 
 // Ledger Statement Tab Component - Tally Style Redesign
 const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters, onFilterChange }) => {
-  const closingBalance = ledgerEntries.length > 0 ? ledgerEntries[ledgerEntries.length - 1].balance : 0
-  const totalDebit = ledgerEntries.reduce((sum, e) => sum + (e.debit || 0), 0)
-  const totalCredit = ledgerEntries.reduce((sum, e) => sum + (e.credit || 0), 0)
+  const lastEntryBalance = ledgerEntries.length > 0 ? ledgerEntries[ledgerEntries.length - 1].balance : 0
+  const closingBalance = Number(lastEntryBalance) || 0
+  const totalDebit = ledgerEntries.reduce((sum, e) => sum + (Number(e.debit) || 0), 0)
+  const totalCredit = ledgerEntries.reduce((sum, e) => sum + (Number(e.credit) || 0), 0)
 
   return (
     <div className="w-full h-full flex flex-col bg-neutral-50 min-w-0">
@@ -2654,10 +3223,10 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                         {entry.paymentMode || entry.PaymentMode || '-'}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-sm text-right font-medium text-neutral-900 border-r border-neutral-200">
-                        {entry.debit > 0 ? formatCurrency(entry.debit) : '-'}
+                        {(Number(entry.debit) || 0) > 0 ? formatCurrency(Number(entry.debit) || 0) : '-'}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-sm text-right font-medium text-neutral-900 border-r border-neutral-200">
-                        {entry.credit > 0 ? formatCurrency(entry.credit) : '-'}
+                        {(Number(entry.credit) || 0) > 0 ? formatCurrency(Number(entry.credit) || 0) : '-'}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-center border-r border-neutral-200">
                         {status !== '-' ? (
@@ -2668,9 +3237,9 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                           <span className="text-sm text-neutral-400">-</span>
                         )}
                       </td>
-                      <td className={`px-3 py-2 whitespace-nowrap text-sm text-right font-bold ${entry.balance < 0 ? 'text-green-600' : entry.balance > 0 ? 'text-red-600' : 'text-neutral-900'
+                      <td className={`px-3 py-2 whitespace-nowrap text-sm text-right font-bold ${(Number(entry.balance) || 0) < 0 ? 'text-green-600' : (Number(entry.balance) || 0) > 0 ? 'text-red-600' : 'text-neutral-900'
                         }`}>
-                        {formatBalance(entry.balance)}
+                        {formatBalance(Number(entry.balance) || 0)}
                       </td>
                     </tr>
                   )
@@ -2713,20 +3282,20 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
               ? new Date(entry.date).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
               : new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
             return (
-              <div key={idx} className={`rounded-lg border p-4 shadow-sm ${entry.debit > 0 ? 'border-red-200 bg-red-50/50' : entry.credit > 0 ? 'border-green-200 bg-green-50/50' : 'bg-white border-neutral-200'}`}>
+              <div key={idx} className={`rounded-lg border p-4 shadow-sm ${(Number(entry.debit) || 0) > 0 ? 'border-red-200 bg-red-50/50' : (Number(entry.credit) || 0) > 0 ? 'border-green-200 bg-green-50/50' : 'bg-white border-neutral-200'}`}>
                 <div className="flex justify-between items-start mb-2">
                   <div>
                     <p className="font-semibold text-neutral-900">{entry.type}</p>
                     <p className="text-xs text-neutral-500">{entry.reference || '-'}</p>
                     <p className="text-xs text-neutral-600 mt-0.5">{dateStr}</p>
                   </div>
-                  <span className={`text-sm font-bold ${entry.balance < 0 ? 'text-green-600' : entry.balance > 0 ? 'text-red-600' : 'text-neutral-900'}`}>
-                    {formatBalance(entry.balance)}
+                  <span className={`text-sm font-bold ${(Number(entry.balance) || 0) < 0 ? 'text-green-600' : (Number(entry.balance) || 0) > 0 ? 'text-red-600' : 'text-neutral-900'}`}>
+                    {formatBalance(Number(entry.balance) || 0)}
                   </span>
                 </div>
                 <div className="flex justify-between text-xs text-neutral-600 border-t border-neutral-200 pt-2">
-                  <span>{entry.debit > 0 ? formatCurrency(entry.debit) : '-'}</span>
-                  <span>{entry.credit > 0 ? formatCurrency(entry.credit) : '-'}</span>
+                  <span>{(Number(entry.debit) || 0) > 0 ? formatCurrency(Number(entry.debit) || 0) : '-'}</span>
+                  <span>{(Number(entry.credit) || 0) > 0 ? formatCurrency(Number(entry.credit) || 0) : '-'}</span>
                   {entry.status && entry.status !== '-' && (
                     <span className="font-medium">{entry.status}</span>
                   )}
@@ -3232,20 +3801,20 @@ const ReportsTab = ({ customer, summary, invoices, payments, outstandingInvoices
                       {new Date(inv.invoiceDate).toLocaleDateString('en-GB')}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-right text-gray-900">
-                      {formatCurrency(inv.grandTotal)}
+                      {formatCurrency(Number(inv.grandTotal) || 0)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-right text-gray-900">
-                      {formatCurrency(inv.paidAmount)}
+                      {formatCurrency(Number(inv.paidAmount) || 0)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-right font-medium text-red-600">
-                      {formatCurrency(inv.balanceAmount)}
+                      {formatCurrency(Number(inv.balanceAmount) || 0)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${inv.daysOverdue > 30 ? 'bg-red-100 text-red-800' :
                         inv.daysOverdue > 0 ? 'bg-yellow-100 text-yellow-800' :
                           'bg-green-100 text-green-800'
                         }`}>
-                        {inv.daysOverdue} days
+                        {(Number(inv.daysOverdue) || 0)} days
                       </span>
                     </td>
                   </tr>
@@ -3267,6 +3836,7 @@ const PaymentEntryModal = ({
   invoiceId, // Pre-selected invoice ID (from Pay button)
   outstandingInvoices,
   allInvoices = [], // All customer invoices (not just outstanding)
+  payAllOutstandingMode = false,
   onSubmit,
   register,
   handleSubmit,
@@ -3322,7 +3892,7 @@ const PaymentEntryModal = ({
 
   // Load invoice amount when modal opens with pre-selected invoice
   useEffect(() => {
-    if (isOpen && invoiceId) {
+    if (isOpen && invoiceId && !payAllOutstandingMode) {
       setValue('saleId', invoiceId.toString())
       // Find invoice and auto-fill amount
       const selectedInv = allAvailableInvoices.find(inv => inv.id === invoiceId)
@@ -3337,14 +3907,20 @@ const PaymentEntryModal = ({
           }
         }).catch(err => console.error('Failed to load invoice amount:', err))
       }
-    } else if (isOpen && !invoiceId) {
+    } else if (isOpen && !invoiceId && !payAllOutstandingMode) {
       // Reset when modal opens without pre-selected invoice - use default values
       setValue('saleId', '')
       setValue('amount', '')
       setValue('paymentDate', new Date().toISOString().split('T')[0])
       setValue('method', 'CASH')
+    } else if (isOpen && payAllOutstandingMode) {
+      setValue('saleId', '')
+      const total = outstandingInvoices.reduce((s, inv) => s + (Number(inv.balanceAmount) || 0), 0)
+      setValue('amount', total)
+      setValue('paymentDate', new Date().toISOString().split('T')[0])
+      setValue('method', 'CASH')
     }
-  }, [isOpen, invoiceId, allAvailableInvoices, setValue])
+  }, [isOpen, invoiceId, payAllOutstandingMode, allAvailableInvoices, outstandingInvoices, setValue])
 
   // Auto-fill amount when invoice selection changes
   useEffect(() => {
@@ -3373,6 +3949,17 @@ const PaymentEntryModal = ({
           toast.error(errorMessages[0] || 'Please fix the form errors before submitting')
         }
       })} className="space-y-4">
+        {payAllOutstandingMode && (
+          <div className="col-span-2 p-4 bg-emerald-50 border border-emerald-200 rounded-lg">
+            <p className="text-sm font-medium text-emerald-800 flex items-center gap-2">
+              <Wallet className="h-4 w-4" />
+              Pay All Outstanding
+            </p>
+            <p className="text-sm text-emerald-700 mt-1">
+              Payment will be allocated across {outstandingInvoices.length} invoice(s) — Total: {formatCurrency(outstandingInvoices.reduce((s, inv) => s + (Number(inv.balanceAmount) || 0), 0))}
+            </p>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4">
           <Input
             label="Date"
@@ -3383,18 +3970,20 @@ const PaymentEntryModal = ({
             {...register('paymentDate', { required: 'Date is required' })}
           />
 
-          <Select
-            label="Invoice Number (Optional)"
-            options={[
-              { value: '', label: '-- No Invoice (General Payment) --' },
-              ...allAvailableInvoices.map(inv => ({
-                value: inv.id,
-                label: `${inv.invoiceNo} - ${formatCurrency(inv.grandTotal)} - ${inv.balanceAmount > 0 ? `Balance: ${formatCurrency(inv.balanceAmount)}` : 'Paid'}`
-              }))
-            ]}
-            error={errors.saleId?.message}
-            {...register('saleId')}
-          />
+          {!payAllOutstandingMode && (
+            <Select
+              label="Invoice Number (Optional)"
+              options={[
+                { value: '', label: '-- No Invoice (General Payment) --' },
+                ...allAvailableInvoices.map(inv => ({
+                  value: inv.id,
+                  label: `${inv.invoiceNo} - ${formatCurrency(inv.grandTotal)} - ${inv.balanceAmount > 0 ? `Balance: ${formatCurrency(inv.balanceAmount)}` : 'Paid'}`
+                }))
+              ]}
+              error={errors.saleId?.message}
+              {...register('saleId')}
+            />
+          )}
 
           <Input
             label="Amount"
@@ -3432,7 +4021,7 @@ const PaymentEntryModal = ({
           </div>
         </div>
 
-        {selectedSaleId && (
+        {!payAllOutstandingMode && selectedSaleId && (
           <div className={`border rounded-lg p-4 ${allAvailableInvoices.find(inv => inv.id === parseInt(selectedSaleId))?.isOutstanding
             ? 'bg-blue-50 border-blue-200'
             : 'bg-gray-50 border-gray-200'
@@ -3493,7 +4082,7 @@ const PaymentEntryModal = ({
           </div>
         )}
 
-        {!selectedSaleId && (
+        {!payAllOutstandingMode && !selectedSaleId && (
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
             <p className="text-sm text-yellow-800 flex items-center gap-2">
               <span className="font-medium">General Payment:</span>

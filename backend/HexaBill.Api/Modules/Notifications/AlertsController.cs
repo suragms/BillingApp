@@ -189,6 +189,35 @@ namespace HexaBill.Api.Modules.Notifications
             }
         }
 
+        [HttpPost("resolve-all")]
+        public async Task<ActionResult<ApiResponse<int>>> MarkAllAsResolved()
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst("UserId") ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier) ?? User.FindFirst("id");
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId) || userId == 0)
+                {
+                    return Unauthorized(new ApiResponse<int> { Success = false, Message = "Invalid user authentication" });
+                }
+                var count = await _alertService.MarkAllAsResolvedAsync(userId, CurrentTenantId);
+                return Ok(new ApiResponse<int>
+                {
+                    Success = true,
+                    Message = $"Marked {count} alerts as resolved",
+                    Data = count
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<int>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
         [HttpPost("clear-resolved")]
         public async Task<ActionResult<ApiResponse<int>>> ClearResolvedAlerts()
         {

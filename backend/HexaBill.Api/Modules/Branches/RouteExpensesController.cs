@@ -42,6 +42,17 @@ namespace HexaBill.Api.Modules.Branches
             return CreatedAtAction(nameof(GetRouteExpenses), new { routeId }, new ApiResponse<RouteExpenseDto> { Success = true, Data = expense });
         }
 
+        [HttpPut("{id}")]
+        public async Task<ActionResult<ApiResponse<RouteExpenseDto>>> UpdateRouteExpense(int routeId, int id, [FromBody] CreateRouteExpenseRequest request)
+        {
+            var tenantId = CurrentTenantId;
+            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+            request.RouteId = routeId;
+            var expense = await _routeService.UpdateRouteExpenseAsync(id, request, tenantId);
+            if (expense == null) return NotFound(new ApiResponse<RouteExpenseDto> { Success = false, Message = "Expense not found." });
+            return Ok(new ApiResponse<RouteExpenseDto> { Success = true, Data = expense, Message = "Expense updated." });
+        }
+
         [HttpDelete("{id}")]
         public async Task<ActionResult<ApiResponse<object>>> DeleteRouteExpense(int routeId, int id)
         {

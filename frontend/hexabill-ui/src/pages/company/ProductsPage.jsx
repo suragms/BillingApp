@@ -19,6 +19,7 @@ const ProductsPage = () => {
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
   const [totalPages, setTotalPages] = useState(1)
   const [totalCount, setTotalCount] = useState(0)
   const [showForm, setShowForm] = useState(false)
@@ -50,7 +51,7 @@ const ProductsPage = () => {
       setLoading(true)
       const params = {
         page: currentPage,
-        pageSize: 10,
+        pageSize: pageSize,
         search: debouncedSearchTerm || undefined,
         lowStock: activeTab === 'lowStock',
         unitType: activeFilters.unitType || undefined
@@ -68,7 +69,7 @@ const ProductsPage = () => {
     } catch (error) {
       console.error('Error loading products:', error)
       // Only show error if it's not a network error (handled by interceptor)
-      if (error.response || (!error.code || error.code !== 'ERR_NETWORK')) {
+      if (!error?._handledByInterceptor && (error.response || (!error.code || error.code !== 'ERR_NETWORK'))) {
         toast.error(error?.response?.data?.message || 'Failed to load products')
       }
       setProducts([])
@@ -76,7 +77,7 @@ const ProductsPage = () => {
     } finally {
       setLoading(false)
     }
-  }, [currentPage, debouncedSearchTerm, activeTab, activeFilters])
+  }, [currentPage, pageSize, debouncedSearchTerm, activeTab, activeFilters])
 
   useEffect(() => {
     loadProducts()
@@ -90,7 +91,7 @@ const ProductsPage = () => {
 
     return () => clearInterval(refreshInterval)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPage, debouncedSearchTerm, activeTab, activeFilters]) // Only refresh when filters change
+  }, [currentPage, pageSize, debouncedSearchTerm, activeTab, activeFilters]) // Only refresh when filters change
 
   const handleCreateProduct = async (productData) => {
     // Prevent multiple clicks
@@ -126,18 +127,19 @@ const ProductsPage = () => {
       }
     } catch (error) {
       console.error('Error creating product:', error)
-      const data = error?.response?.data
-      const status = error?.response?.status
-
-      if (status === 409) {
-        const msg = data?.message || 'This SKU already exists for your company.'
-        toast.error(`${msg} Use a different SKU or edit the existing product.`, { duration: 6000 })
-        loadProducts()
-      } else {
-        const msg = data?.message || error?.message || 'Failed to create product'
-        const errors = data?.errors
-        const fullMsg = errors?.length ? `${msg} (${errors.join(', ')})` : msg
-        toast.error(fullMsg, { duration: 6000 })
+      if (!error?._handledByInterceptor) {
+        const data = error?.response?.data
+        const status = error?.response?.status
+        if (status === 409) {
+          const msg = data?.message || 'This SKU already exists for your company.'
+          toast.error(`${msg} Use a different SKU or edit the existing product.`, { duration: 6000 })
+          loadProducts()
+        } else {
+          const msg = data?.message || error?.message || 'Failed to create product'
+          const errors = data?.errors
+          const fullMsg = errors?.length ? `${msg} (${errors.join(', ')})` : msg
+          toast.error(fullMsg, { duration: 6000 })
+        }
       }
     } finally {
       setSaving(false)
@@ -226,7 +228,7 @@ const ProductsPage = () => {
       }
     } catch (error) {
       console.error('Error deleting product:', error)
-      toast.error(error?.response?.data?.message || 'Failed to delete product')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to delete product')
     }
   }
 
@@ -270,7 +272,7 @@ const ProductsPage = () => {
       }
     } catch (error) {
       console.error('Error adjusting stock:', error)
-      toast.error(error?.response?.data?.message || 'Failed to adjust stock')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to adjust stock')
     }
   }
 
@@ -291,7 +293,7 @@ const ProductsPage = () => {
       }
     } catch (error) {
       console.error('Error importing Excel:', error)
-      toast.error(error?.response?.data?.message || 'Failed to import Excel file')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to import Excel file')
     } finally {
       setImporting(false)
     }
@@ -322,8 +324,10 @@ const ProductsPage = () => {
           }
         } catch (error) {
           console.error('Reset stock error:', error)
-          const errorMsg = error?.response?.data?.message || error?.message || 'Failed to reset stock'
-          toast.error(`Reset failed: ${errorMsg}`)
+          if (!error?._handledByInterceptor) {
+            const errorMsg = error?.response?.data?.message || error?.message || 'Failed to reset stock'
+            toast.error(`Reset failed: ${errorMsg}`)
+          }
         }
       }
     })
@@ -523,8 +527,23 @@ const ProductsPage = () => {
 
       {/* Pagination */}
       {
-        totalPages > 1 && (
-          <div className="flex justify-center">
+        (totalPages > 1 || totalCount > 10) && (
+          <div className="flex flex-wrap justify-center items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-neutral-600">Rows per page:</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value))
+                  setCurrentPage(1)
+                }}
+                className="border border-neutral-300 rounded px-2 py-1 text-sm"
+              >
+                {[10, 20, 50, 100].map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
             <div className="flex space-x-2">
               <button
                 onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}

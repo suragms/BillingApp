@@ -2,11 +2,13 @@ import { useState, useEffect, useRef } from 'react'
 import { X, Wallet, DollarSign, Calendar, FileText, AlertTriangle, CheckCircle } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { paymentsAPI, salesAPI } from '../services'
+import ConfirmDangerModal from './ConfirmDangerModal'
 
 const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess }) => {
   const [loading, setLoading] = useState(false)
   const [invoice, setInvoice] = useState(null)
   const [showConfirmation, setShowConfirmation] = useState(false) // Confirmation step
+  const [showDuplicateWarning, setShowDuplicateWarning] = useState(false)
   const submitButtonRef = useRef(null) // Prevent double-click
   const submissionInProgressRef = useRef(false) // Track submission state synchronously
   const [formData, setFormData] = useState({
@@ -53,7 +55,7 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
       }
     } catch (error) {
       console.error('Failed to load invoice amount:', error)
-      toast.error('Failed to load invoice details')
+      if (!error?._handledByInterceptor) toast.error('Failed to load invoice details')
     }
   }
 
@@ -77,17 +79,39 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
       return
     }
 
-    if (invoice && formData.amount > invoice.outstandingAmount + 0.01) {
-      toast.error(`Amount exceeds outstanding by ${(formData.amount - invoice.outstandingAmount).toFixed(2)}. Outstanding: ${invoice.outstandingAmount.toFixed(2)}`)
+    if ((formData.mode === 'CHEQUE' || formData.mode === 'ONLINE') && !formData.reference?.trim()) {
+      toast.error('Reference number is required for Cheque and Bank Transfer payments')
       return
     }
-    
-    // CONFIRMATION STEP: Show confirmation dialog for payments
+
+    // CONFIRMATION STEP: Show confirmation dialog for payments (overpayment allowed — excess becomes customer credit)
     if (!showConfirmation) {
       setShowConfirmation(true)
       return
     }
 
+    // DUPLICATE PAYMENT CHECK: same customer + same amount + same day
+    if (customerId) {
+      try {
+        const checkRes = await paymentsAPI.checkDuplicatePayment(
+          customerId,
+          parseFloat(formData.amount),
+          formData.paymentDate || new Date().toISOString().split('T')[0]
+        )
+        const hasDuplicate = checkRes?.data?.hasDuplicate || checkRes?.hasDuplicate
+        if (hasDuplicate) {
+          setShowDuplicateWarning(true)
+          return
+        }
+      } catch (err) {
+        console.warn('Duplicate check failed, proceeding:', err)
+      }
+    }
+
+    await doSubmitPayment()
+  }
+
+  const doSubmitPayment = async () => {
     // Mark as in-progress immediately (synchronous)
     submissionInProgressRef.current = true
     setLoading(true)
@@ -121,12 +145,10 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
         const mode = paymentResult?.mode || formData.mode
         const amount = paymentResult?.amount || formData.amount
         
-        toast.success(`Payment saved: ${amount.toFixed(2)} AED (${mode})`)
-        
-        if (invoiceData) {
-          const status = invoiceData.status || invoiceData.paymentStatus || 'PENDING'
-          toast.success(`Invoice ${invoiceData.invoiceNo || ''} status: ${status}`)
-        }
+        const statusMsg = invoiceData?.invoiceNo
+          ? ` Invoice ${invoiceData.invoiceNo} status: ${invoiceData.status || invoiceData.paymentStatus || 'PENDING'}`
+          : ''
+        toast.success(`Payment recorded: ${amount.toFixed(2)} AED (${mode})${statusMsg}`, { id: 'payment-success', duration: 5000 })
         
         onPaymentSuccess?.(response?.data || response)
         onClose()
@@ -140,7 +162,7 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
         })
         setShowConfirmation(false)
       } else {
-        toast.error(response?.message || 'Failed to save payment')
+        toast.error(response?.message || 'Failed to save payment', { id: 'payment-error' })
         setShowConfirmation(false) // Reset confirmation on error
       }
     } catch (error) {
@@ -154,9 +176,15 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
       
       setShowConfirmation(false) // Reset confirmation on error
       
+      // Skip if interceptor already showed the error (prevents double toast)
+      if (error._handledByInterceptor) {
+        return
+      }
+      
       // Handle specific error cases
       if (error.message?.includes('CONFLICT') || error.response?.status === 409) {
         toast.error('Another user updated this invoice. Please refresh and try again.', {
+          id: 'payment-error',
           duration: 5000
         })
         if (onPaymentSuccess) {
@@ -165,17 +193,17 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
       } else if (error.response?.data?.message?.includes('already recorded') || 
                  error.response?.data?.message?.includes('already fully paid')) {
         // Duplicate payment or already paid - show specific message
-        toast.error(error.response.data.message, { duration: 6000 })
+        toast.error(error.response.data.message, { id: 'payment-error', duration: 6000 })
         // Close modal and refresh data
         onPaymentSuccess?.(null)
         onClose()
       } else if (error.response?.data?.errors && Array.isArray(error.response.data.errors)) {
         const errorMsg = error.response.data.errors.join(', ')
-        toast.error(errorMsg)
+        toast.error(errorMsg, { id: 'payment-error' })
       } else if (error.response?.data?.message) {
-        toast.error(error.response.data.message)
+        toast.error(error.response.data.message, { id: 'payment-error' })
       } else {
-        toast.error(error?.message || 'Failed to save payment')
+        toast.error(error?.message || 'Failed to save payment', { id: 'payment-error' })
       }
     } finally {
       submissionInProgressRef.current = false
@@ -191,9 +219,15 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
     setShowConfirmation(false)
   }
 
+  const handleConfirmDuplicate = () => {
+    setShowDuplicateWarning(false)
+    doSubmitPayment()
+  }
+
   if (!isOpen) return null
 
   return (
+  <>
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
         {/* Header */}
@@ -249,7 +283,7 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
               type="number"
               step="0.01"
               min="0.01"
-              max={invoice?.outstandingAmount || 999999}
+              max={999999}
               value={formData.amount}
               onChange={(e) => setFormData(prev => ({ ...prev, amount: parseFloat(e.target.value) || 0 }))}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500"
@@ -258,7 +292,12 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
             />
             {invoice && (
               <p className="mt-1 text-xs text-gray-500">
-                Outstanding: {invoice.outstandingAmount?.toFixed(2) || '0.00'} AED
+                Outstanding: {(Number(invoice.outstandingAmount) || 0).toFixed(2)} AED
+                {formData.amount > (Number(invoice.outstandingAmount) || 0) + 0.01 && (
+                  <span className="block mt-1 text-amber-600 font-medium">
+                    Excess will be added as customer credit
+                  </span>
+                )}
               </p>
             )}
           </div>
@@ -282,18 +321,18 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
             </select>
           </div>
 
-          {/* Reference */}
+          {/* Reference - required for Cheque and Online Transfer */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               <FileText className="w-4 h-4 inline mr-1" />
-              Reference (Cheque No / Transaction ID)
+              Reference (Cheque No / Transaction ID) {(formData.mode === 'CHEQUE' || formData.mode === 'ONLINE') && <span className="text-red-500">*</span>}
             </label>
             <input
               type="text"
               value={formData.reference}
               onChange={(e) => setFormData(prev => ({ ...prev, reference: e.target.value }))}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500"
-              placeholder="Enter cheque number or transaction ID"
+              placeholder={(formData.mode === 'CHEQUE' || formData.mode === 'ONLINE') ? 'Required for Cheque/Bank Transfer' : 'Optional'}
               maxLength={200}
               disabled={loading}
             />
@@ -332,7 +371,7 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
                   type="submit"
                   ref={submitButtonRef}
                   className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={loading || formData.amount <= 0}
+                  disabled={loading || formData.amount <= 0 || ((formData.mode === 'CHEQUE' || formData.mode === 'ONLINE') && !formData.reference?.trim())}
                 >
                   {loading ? 'Processing...' : 'Continue'}
                 </button>
@@ -353,6 +392,11 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
                     Payment Mode: <strong>{formData.mode}</strong>
                     {formData.mode === 'CHEQUE' && <span className="text-orange-600"> (Pending Clearance)</span>}
                   </p>
+                  {invoice && formData.amount > (Number(invoice.outstandingAmount) || 0) + 0.01 && (
+                    <p className="text-sm text-amber-700 mt-2 font-medium">
+                      This payment exceeds outstanding by {(formData.amount - (Number(invoice.outstandingAmount) || 0)).toFixed(2)} AED. The excess will be added as customer credit.
+                    </p>
+                  )}
                   <p className="text-xs text-yellow-600 mt-2">
                     This action cannot be easily undone. Please verify the details before confirming.
                   </p>
@@ -385,6 +429,17 @@ const PaymentModal = ({ isOpen, onClose, invoiceId, customerId, onPaymentSuccess
         </form>
       </div>
     </div>
+
+    {/* Duplicate payment warning — same amount + same day */}
+    <ConfirmDangerModal
+      isOpen={showDuplicateWarning}
+      onClose={() => setShowDuplicateWarning(false)}
+      onConfirm={handleConfirmDuplicate}
+      title="Possible Duplicate Payment"
+      message={`A payment of ${(formData.amount || 0).toFixed(2)} AED was already recorded for this customer today. Record another payment anyway?`}
+      confirmLabel="Yes, Record Another"
+    />
+  </>
   )
 }
 

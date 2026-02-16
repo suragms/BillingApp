@@ -29,7 +29,8 @@ namespace HexaBill.Api.Modules.Reports
         Task<StockReportDto> GetStockReportAsync(int tenantId, bool lowOnly = false);
         Task<List<ExpenseByCategoryDto>> GetExpensesByCategoryAsync(int tenantId, DateTime fromDate, DateTime toDate, int? branchId = null);
         Task<List<SalesVsExpensesDto>> GetSalesVsExpensesAsync(int tenantId, DateTime fromDate, DateTime toDate, string groupBy = "day");
-        Task<SalesLedgerReportDto> GetComprehensiveSalesLedgerAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? branchId = null, int? routeId = null, int? userIdForStaff = null, string? roleForStaff = null);
+        Task<SalesLedgerReportDto> GetComprehensiveSalesLedgerAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? branchId = null, int? routeId = null, int? staffId = null, int? userIdForStaff = null, string? roleForStaff = null);
+        Task<List<StaffPerformanceDto>> GetStaffPerformanceAsync(int tenantId, DateTime fromDate, DateTime toDate);
     }
 
     public class ReportService : IReportService
@@ -1523,7 +1524,7 @@ namespace HexaBill.Api.Modules.Reports
             };
         }
 
-        public async Task<SalesLedgerReportDto> GetComprehensiveSalesLedgerAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? branchId = null, int? routeId = null, int? userIdForStaff = null, string? roleForStaff = null)
+        public async Task<SalesLedgerReportDto> GetComprehensiveSalesLedgerAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? branchId = null, int? routeId = null, int? staffId = null, int? userIdForStaff = null, string? roleForStaff = null)
         {
             var from = (fromDate ?? DateTime.UtcNow.Date.AddDays(-365)).ToUtcKind();
             var to = (toDate ?? DateTime.UtcNow.Date).AddDays(1).AddTicks(-1).ToUtcKind();
@@ -1532,6 +1533,7 @@ namespace HexaBill.Api.Modules.Reports
                 .Where(s => s.TenantId == tenantId && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate < to);
             if (branchId.HasValue) salesQuery = salesQuery.Where(s => s.BranchId == branchId.Value);
             if (routeId.HasValue) salesQuery = salesQuery.Where(s => s.RouteId == routeId.Value);
+            if (staffId.HasValue) salesQuery = salesQuery.Where(s => s.CreatedBy == staffId.Value);
             if (tenantId > 0 && userIdForStaff.HasValue && string.Equals(roleForStaff, "Staff", StringComparison.OrdinalIgnoreCase))
             {
                 var restrictedRouteIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userIdForStaff.Value, tenantId, roleForStaff ?? "");
@@ -1545,9 +1547,14 @@ namespace HexaBill.Api.Modules.Reports
                 .ThenBy(s => s.Id)
                 .ToListAsync();
 
-            // Get all payments within date range
-            var payments = await _context.Payments
-                .Where(p => p.TenantId == tenantId && p.PaymentDate >= from && p.PaymentDate <= to)
+            var saleIds = sales.Select(s => s.Id).ToHashSet();
+
+            // Get payments within date range; when branch/route/staff filter is active, only include payments linked to filtered sales
+            var paymentsQuery = _context.Payments
+                .Where(p => p.TenantId == tenantId && p.PaymentDate >= from && p.PaymentDate <= to);
+            if (branchId.HasValue || routeId.HasValue || staffId.HasValue)
+                paymentsQuery = paymentsQuery.Where(p => !p.SaleId.HasValue || saleIds.Contains(p.SaleId.Value));
+            var payments = await paymentsQuery
                 .OrderBy(p => p.PaymentDate)
                 .ThenBy(p => p.Id)
                 .ToListAsync();
@@ -1757,6 +1764,69 @@ namespace HexaBill.Api.Modules.Reports
                     TotalPayments = totalPayments // CORRECTED: Sum of all payments
                 }
             };
+        }
+
+        public async Task<List<StaffPerformanceDto>> GetStaffPerformanceAsync(int tenantId, DateTime fromDate, DateTime toDate)
+        {
+            var from = fromDate.ToUtcKind();
+            var to = toDate.AddDays(1).AddTicks(-1).ToUtcKind();
+
+            var staffUsers = await _context.Users
+                .Where(u => u.TenantId == tenantId && u.Role == UserRole.Staff)
+                .Select(u => new { u.Id, u.Name })
+                .ToListAsync();
+
+            var result = new List<StaffPerformanceDto>();
+
+            foreach (var staff in staffUsers)
+            {
+                var routeIdsFromRouteStaff = await _context.RouteStaff
+                    .Where(rs => rs.UserId == staff.Id)
+                    .Select(rs => rs.RouteId)
+                    .ToListAsync();
+                var routeIdsFromAssigned = await _context.Routes
+                    .Where(r => r.TenantId == tenantId && r.AssignedStaffId == staff.Id)
+                    .Select(r => r.Id)
+                    .ToListAsync();
+                var allRouteIds = routeIdsFromRouteStaff.Union(routeIdsFromAssigned).Distinct().ToList();
+                var routeNames = await _context.Routes
+                    .Where(r => allRouteIds.Contains(r.Id))
+                    .Select(r => r.Name)
+                    .ToListAsync();
+                var assignedRoutes = string.Join(", ", routeNames);
+                if (string.IsNullOrEmpty(assignedRoutes)) assignedRoutes = "-";
+
+                var sales = await _context.Sales
+                    .Where(s => s.TenantId == tenantId && !s.IsDeleted && s.CreatedBy == staff.Id
+                        && s.InvoiceDate >= from && s.InvoiceDate < to)
+                    .ToListAsync();
+
+                var invoicesCreated = sales.Count;
+                var totalBilled = sales.Sum(s => s.GrandTotal);
+                var cashCollected = sales.Sum(s => s.PaidAmount);
+                var collectionRate = totalBilled > 0 ? (double)(cashCollected / totalBilled * 100) : 0;
+
+                var avgDaysToPay = 0.0;
+                var paidSales = sales.Where(s => s.PaidAmount > 0 && s.LastPaymentDate.HasValue).ToList();
+                if (paidSales.Any())
+                {
+                    avgDaysToPay = paidSales.Average(s => (s.LastPaymentDate!.Value - s.InvoiceDate).TotalDays);
+                }
+
+                result.Add(new StaffPerformanceDto
+                {
+                    UserId = staff.Id,
+                    UserName = staff.Name ?? "Unknown",
+                    AssignedRoutes = assignedRoutes,
+                    InvoicesCreated = invoicesCreated,
+                    TotalBilled = totalBilled,
+                    CashCollected = cashCollected,
+                    CollectionRatePercent = (decimal)Math.Round(collectionRate, 1),
+                    AvgDaysToPay = Math.Round(avgDaysToPay, 1)
+                });
+            }
+
+            return result.OrderByDescending(r => r.TotalBilled).ToList();
         }
     }
 

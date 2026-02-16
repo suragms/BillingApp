@@ -49,6 +49,12 @@ namespace HexaBill.Api.Models
         [MaxLength(500)]
         public string? Address { get; set; }
         public decimal CreditLimit { get; set; }
+
+        /// <summary>
+        /// Payment terms: Cash on Delivery, Net 7, Net 15, Net 30, Net 60, Custom, etc.
+        /// </summary>
+        [MaxLength(100)]
+        public string? PaymentTerms { get; set; }
             
         // REAL-TIME BALANCE TRACKING FIELDS
         public decimal TotalSales { get; set; } = 0; // Sum of all invoice GrandTotal (excluding deleted)

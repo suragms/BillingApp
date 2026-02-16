@@ -48,24 +48,29 @@ class ConnectionManager {
 
   // Mark connection as successful
   markConnected() {
-    if (!this.isConnected || this.failedRequests > 0) {
+    const wasDisconnected = !this.isConnected || this.failedRequests > 0
+    if (wasDisconnected) {
       this.isConnected = true
       this.failedRequests = 0
       this.lastConnectionCheck = Date.now()
       this.notifyStatusChange(true)
       this.stopConnectionCheck()
-      
+      // Fire connectionRestored event so pages can auto-refresh
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('connectionRestored'))
+      }
       // Retry queued requests
       this.retryQueuedRequests()
     }
   }
 
-  // Check if server is available
+  // Check if server is available (same URL logic as api.js for production)
   async checkConnection() {
     try {
-      // Server root for health (backend serves /health at root, not under /api)
-      const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api').trim().replace(/\/$/, '')
-      const baseURL = apiBase.endsWith('/api') ? apiBase.replace(/\/api$/, '') : apiBase
+      const envApi = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
+      const isProduction = typeof window !== 'undefined' && window.location?.hostname !== 'localhost' && window.location?.hostname !== '127.0.0.1'
+      const rawBase = envApi && envApi.startsWith('http') ? envApi : (isProduction ? 'https://hexabill.onrender.com/api' : 'http://localhost:5000/api')
+      const baseURL = rawBase.endsWith('/api') ? rawBase.replace(/\/api$/, '') : rawBase
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 3000) // 3 second timeout
       

@@ -15,7 +15,7 @@ namespace HexaBill.Api.Modules.Customers
     public interface ICustomerService
     {
         // MULTI-TENANT: All methods now require tenantId for data isolation
-        Task<PagedResponse<CustomerDto>> GetCustomersAsync(int tenantId, int page = 1, int pageSize = 10, string? search = null);
+        Task<PagedResponse<CustomerDto>> GetCustomersAsync(int tenantId, int page = 1, int pageSize = 10, string? search = null, int? branchId = null, int? routeId = null);
         Task<CustomerDto?> GetCustomerByIdAsync(int id, int tenantId);
         Task<CustomerDto> CreateCustomerAsync(CreateCustomerRequest request, int tenantId);
         Task<CustomerDto?> UpdateCustomerAsync(int id, CreateCustomerRequest request, int tenantId);
@@ -42,7 +42,7 @@ namespace HexaBill.Api.Modules.Customers
             QuestPDF.Settings.License = LicenseType.Community;
         }
 
-        public async Task<PagedResponse<CustomerDto>> GetCustomersAsync(int tenantId, int page = 1, int pageSize = 10, string? search = null)
+        public async Task<PagedResponse<CustomerDto>> GetCustomersAsync(int tenantId, int page = 1, int pageSize = 10, string? search = null, int? branchId = null, int? routeId = null)
         {
             // NOTE: DatabaseFixer should only run at application startup (Program.cs)
             // Calling it here could interfere with transactions if this method is called
@@ -56,6 +56,18 @@ namespace HexaBill.Api.Modules.Customers
                 .Where(c => c.TenantId == tenantId)
                 .AsNoTracking() // Performance: No change tracking needed
                 .AsQueryable();
+
+            if (branchId.HasValue)
+                query = query.Where(c => c.BranchId == branchId.Value);
+            if (routeId.HasValue)
+            {
+                // Customers on route: either Customer.RouteId or in RouteCustomers
+                var routeCustomerIds = await _context.RouteCustomers
+                    .Where(rc => rc.RouteId == routeId.Value)
+                    .Select(rc => rc.CustomerId)
+                    .ToListAsync();
+                query = query.Where(c => c.RouteId == routeId.Value || routeCustomerIds.Contains(c.Id));
+            }
 
             if (!string.IsNullOrEmpty(search))
             {
@@ -121,6 +133,7 @@ namespace HexaBill.Api.Modules.Customers
                 Trn = customer.Trn,
                 Address = customer.Address,
                 CreditLimit = customer.CreditLimit,
+                PaymentTerms = customer.PaymentTerms,
                 Balance = customer.Balance,
                 CustomerType = customer.CustomerType.ToString(),
                 TotalSales = customer.TotalSales,
@@ -186,6 +199,7 @@ namespace HexaBill.Api.Modules.Customers
                     Trn = request.Trn?.Trim(),
                     Address = request.Address?.Trim(),
                     CreditLimit = creditLimit, // Explicitly set - must never be NULL
+                    PaymentTerms = string.IsNullOrWhiteSpace(request.PaymentTerms) ? null : request.PaymentTerms.Trim(),
                     Balance = 0m, // Explicitly set to 0 decimal - must never be NULL
                     CustomerType = ParseCustomerType(request.CustomerType), // Parse and set customer type
                     CreatedAt = DateTime.UtcNow,
@@ -223,6 +237,7 @@ namespace HexaBill.Api.Modules.Customers
                     Trn = customer.Trn,
                     Address = customer.Address,
                     CreditLimit = customer.CreditLimit,
+                    PaymentTerms = customer.PaymentTerms,
                     Balance = customer.Balance,
                     CustomerType = customer.CustomerType.ToString(),
                     TotalSales = customer.TotalSales,
@@ -299,6 +314,7 @@ namespace HexaBill.Api.Modules.Customers
             customer.Trn = request.Trn;
             customer.Address = request.Address;
             customer.CreditLimit = request.CreditLimit;
+            customer.PaymentTerms = string.IsNullOrWhiteSpace(request.PaymentTerms) ? null : request.PaymentTerms.Trim();
             customer.CustomerType = newCustomerType;
             customer.UpdatedAt = DateTime.UtcNow;
 
@@ -319,6 +335,7 @@ namespace HexaBill.Api.Modules.Customers
                 Trn = customer.Trn,
                 Address = customer.Address,
                 CreditLimit = customer.CreditLimit,
+                PaymentTerms = customer.PaymentTerms,
                 Balance = customer.Balance,
                 CustomerType = customer.CustomerType.ToString(),
                 TotalSales = customer.TotalSales,
@@ -522,7 +539,8 @@ namespace HexaBill.Api.Modules.Customers
             if (routeId.HasValue) salesQuery = salesQuery.Where(s => s.RouteId == routeId.Value);
             if (staffId.HasValue) salesQuery = salesQuery.Where(s => s.CreatedBy == staffId.Value);
             if (fromDate.HasValue) salesQuery = salesQuery.Where(s => s.InvoiceDate >= fromDate.Value);
-            if (toDate.HasValue) salesQuery = salesQuery.Where(s => s.InvoiceDate <= toDate.Value);
+            // CRITICAL: toDate is sent as YYYY-MM-DD (midnight). Include full day by using < next day
+            if (toDate.HasValue) salesQuery = salesQuery.Where(s => s.InvoiceDate < toDate.Value.Date.AddDays(1));
             var sales = await salesQuery
                 .OrderBy(s => s.InvoiceDate)
                 .ThenBy(s => s.Id)
@@ -539,13 +557,13 @@ namespace HexaBill.Api.Modules.Customers
                 .ToListAsync();
             payments = payments.Where(p => !p.SaleId.HasValue || filteredSaleIds.Contains(p.SaleId.Value)).ToList();
             if (fromDate.HasValue) payments = payments.Where(p => p.PaymentDate >= fromDate.Value).ToList();
-            if (toDate.HasValue) payments = payments.Where(p => p.PaymentDate <= toDate.Value).ToList();
+            if (toDate.HasValue) payments = payments.Where(p => p.PaymentDate < toDate.Value.Date.AddDays(1)).ToList();
 
             // Sales returns: filter by date if provided (returns don't have branch/route)
             var salesReturnsQuery = _context.SaleReturns
                 .Where(sr => sr.CustomerId.HasValue && sr.CustomerId.Value == customerId && sr.TenantId == tenantId);
             if (fromDate.HasValue) salesReturnsQuery = salesReturnsQuery.Where(sr => sr.ReturnDate >= fromDate.Value);
-            if (toDate.HasValue) salesReturnsQuery = salesReturnsQuery.Where(sr => sr.ReturnDate <= toDate.Value);
+            if (toDate.HasValue) salesReturnsQuery = salesReturnsQuery.Where(sr => sr.ReturnDate < toDate.Value.Date.AddDays(1));
             var salesReturns = await salesReturnsQuery
                 .OrderBy(sr => sr.ReturnDate)
                 .ToListAsync();

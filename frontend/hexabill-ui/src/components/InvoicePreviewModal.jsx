@@ -35,7 +35,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
         setInvoice(response.data)
       }
     } catch (error) {
-      toast.error('Failed to load invoice')
+      if (!error?._handledByInterceptor) toast.error('Failed to load invoice')
     } finally {
       setLoading(false)
     }
@@ -57,7 +57,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
         pdfBlob = await salesAPI.getInvoicePdf(saleId)
       } catch (apiError) {
         console.error('API Error:', apiError)
-        toast.error(apiError.message || 'Failed to generate PDF')
+        if (!apiError?._handledByInterceptor) toast.error(apiError.message || 'Failed to generate PDF')
         setLoading(false)
         return
       }
@@ -91,7 +91,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
       toast.success('Invoice downloaded successfully')
     } catch (error) {
       console.error('Download error:', error)
-      toast.error(error.message || 'Failed to download invoice. Please try again.')
+      if (!error?._handledByInterceptor) toast.error(error.message || 'Failed to download invoice. Please try again.')
     } finally {
       setLoading(false)
     }
@@ -122,7 +122,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
         pdfBlob = await salesAPI.getInvoicePdf(saleId)
       } catch (apiError) {
         console.error('PDF API Error:', apiError)
-        toast.error(apiError.message || 'Failed to generate PDF')
+        if (!apiError?._handledByInterceptor) toast.error(apiError.message || 'Failed to generate PDF')
         return
       }
 
@@ -178,7 +178,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
       toast.success('PDF downloaded. WhatsApp opened. Please attach the downloaded PDF file.')
     } catch (error) {
       console.error('WhatsApp share error:', error)
-      toast.error(error.message || 'Failed to share via WhatsApp. Please try downloading PDF manually.')
+      if (!error?._handledByInterceptor) toast.error(error.message || 'Failed to share via WhatsApp. Please try downloading PDF manually.')
     } finally {
       setLoading(false)
     }
@@ -207,7 +207,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
             pdfBlob = await salesAPI.getInvoicePdf(saleId)
           } catch (apiError) {
             console.error('API Error:', apiError)
-            toast.error(apiError.message || 'Failed to generate PDF')
+            if (!apiError?._handledByInterceptor) toast.error(apiError.message || 'Failed to generate PDF')
             return
           }
 
@@ -265,7 +265,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
       await executeSendEmail(customerEmail)
     } catch (error) {
       console.error('Email share error:', error)
-      toast.error('Failed to send email. Please download PDF and send manually.')
+      if (!error?._handledByInterceptor) toast.error('Failed to send email. Please download PDF and send manually.')
     }
   }
 

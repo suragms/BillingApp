@@ -78,9 +78,15 @@ module.exports = {
         pulse: {
           '50%': { opacity: 0.5 },
         },
+        shake: {
+          '0%, 100%': { transform: 'translateX(0)' },
+          '10%, 30%, 50%, 70%, 90%': { transform: 'translateX(-4px)' },
+          '20%, 40%, 60%, 80%': { transform: 'translateX(4px)' },
+        },
       },
       animation: {
         slideUp: 'slideUp 200ms ease-out',
+        shake: 'shake 300ms ease-in-out',
       },
       boxShadow: {
         'sm': '0 1px 2px 0 rgb(0 0 0 / 0.05)',

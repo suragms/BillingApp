@@ -102,6 +102,41 @@ namespace HexaBill.Api.Modules.Users
             }
         }
 
+        // GET: api/users/me/assigned-routes - Returns current user's assigned routes (server-side truth for Staff)
+        [HttpGet("me/assigned-routes")]
+        public async Task<ActionResult<ApiResponse<object>>> GetMyAssignedRoutes()
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<object> { Success = false, Message = "Invalid user" });
+                }
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0)
+                {
+                    return Ok(new ApiResponse<object> { Success = true, Data = new { assignedRouteIds = Array.Empty<int>(), assignedBranchIds = Array.Empty<int>() } });
+                }
+                var (branchIds, routeIds) = await _authService.GetUserAssignmentsAsync(userId);
+                // Include routes where user is AssignedStaffId
+                var assignedStaffRouteIds = await _context.Routes
+                    .Where(r => r.TenantId == tenantId && r.AssignedStaffId == userId)
+                    .Select(r => r.Id)
+                    .ToListAsync();
+                var allRouteIds = routeIds.Union(assignedStaffRouteIds).Distinct().ToList();
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Data = new { assignedRouteIds = allRouteIds, assignedBranchIds = branchIds }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+            }
+        }
+
         // GET: api/users/{id} - Get user by ID (Admin and Owner)
         [HttpGet("{id}")]
         [Authorize(Roles = "Admin,Owner,SystemAdmin")]
@@ -484,8 +519,8 @@ namespace HexaBill.Api.Modules.Users
                     });
                 }
 
-                // Check if user has any associated records (sales, etc.)
-                var hasSales = await _context.Sales.AnyAsync(s => s.CreatedBy == id || s.LastModifiedBy == id);
+                // Check if user has any associated records (sales, etc.) - CRITICAL: filter by tenant for data isolation
+                var hasSales = await _context.Sales.AnyAsync(s => s.TenantId == tenantId && (s.CreatedBy == id || s.LastModifiedBy == id));
                 if (hasSales)
                 {
                     return BadRequest(new ApiResponse<bool>

@@ -14,7 +14,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
 {
     [ApiController]
     [Route("api/[controller]")]
-    [Authorize(Roles = "Admin,Owner")] // CRITICAL: Allow Owner role to access backups
+    [Authorize(Policy = "AdminOrOwner")] // Production: case-insensitive Admin/Owner/SystemAdmin
     public class BackupController : ControllerBase
     {
         private const long MaxRestoreFileSizeBytes = 100L * 1024 * 1024; // 100 MB

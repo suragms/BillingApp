@@ -13,7 +13,8 @@ import {
   AlertTriangle,
   Building2,
   Filter,
-  RefreshCw
+  RefreshCw,
+  Copy
 } from 'lucide-react'
 import { superAdminAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
@@ -53,6 +54,9 @@ const SuperAdminTenantsPage = () => {
     trialDays: '14'
   })
   const [createLoading, setCreateLoading] = useState(false)
+  const [showCredentialsModal, setShowCredentialsModal] = useState(false)
+  const [credentialsData, setCredentialsData] = useState(null)
+  const [credentialsAcknowledged, setCredentialsAcknowledged] = useState(false)
 
   useEffect(() => {
     fetchTenants()
@@ -76,7 +80,7 @@ const SuperAdminTenantsPage = () => {
       }
     } catch (error) {
       console.error('Error loading companies:', error)
-      toast.error('Failed to load companies')
+      if (!error?._handledByInterceptor) toast.error('Failed to load companies')
     } finally {
       setLoading(false)
     }
@@ -97,7 +101,7 @@ const SuperAdminTenantsPage = () => {
         toast.error(response.message || 'Failed to suspend company')
       }
     } catch (error) {
-      toast.error('Failed to suspend company')
+      if (!error?._handledByInterceptor) toast.error('Failed to suspend company')
     }
   }
 
@@ -111,7 +115,7 @@ const SuperAdminTenantsPage = () => {
         toast.error(response.message || 'Failed to activate company')
       }
     } catch (error) {
-      toast.error('Failed to activate company')
+      if (!error?._handledByInterceptor) toast.error('Failed to activate company')
     }
   }
 
@@ -130,7 +134,7 @@ const SuperAdminTenantsPage = () => {
         toast.error(response.message || 'Failed to delete company')
       }
     } catch (error) {
-      toast.error('Failed to delete company')
+      if (!error?._handledByInterceptor) toast.error('Failed to delete company')
     } finally {
       setDeleteLoading(false)
     }
@@ -158,6 +162,7 @@ const SuperAdminTenantsPage = () => {
 
   const columns = [
     { key: 'company', label: 'Company' },
+    { key: 'clientId', label: 'Client ID' },
     { key: 'name', label: 'Company Name' },
     { key: 'country', label: 'Country' },
     { key: 'currency', label: 'Currency' },
@@ -171,8 +176,22 @@ const SuperAdminTenantsPage = () => {
     { key: 'actions', label: 'Actions' }
   ]
 
+  const copyClientId = (e, id) => {
+    e?.stopPropagation?.()
+    navigator.clipboard?.writeText(String(id))
+    toast.success('Client ID copied')
+  }
+
   const tableData = tenants.map(tenant => ({
     ...tenant,
+    clientId: (
+      <div className="flex items-center gap-1">
+        <code className="text-xs bg-neutral-100 px-2 py-1 rounded font-mono">{tenant.id}</code>
+        <button type="button" onClick={(e) => copyClientId(e, tenant.id)} className="p-1 hover:bg-neutral-200 rounded" title="Copy">
+          <Copy className="h-3.5 w-3.5 text-neutral-500" />
+        </button>
+      </div>
+    ),
     company: (
       <div className="flex items-center gap-3">
         <div className="h-10 w-10 rounded-lg bg-neutral-100 flex items-center justify-center overflow-hidden flex-shrink-0">
@@ -420,6 +439,7 @@ const SuperAdminTenantsPage = () => {
       >
         <form onSubmit={async (e) => {
           e.preventDefault()
+          if (createLoading) return
           if (!createFormData.name.trim()) {
             toast.error('Company name is required')
             return
@@ -439,7 +459,26 @@ const SuperAdminTenantsPage = () => {
               trialEndDate: undefined // Let backend handle via trialDays
             })
 
-            if (response.success) {
+            if (response.success && response.data?.clientCredentials) {
+              setCredentialsData(response.data.clientCredentials)
+              setCredentialsAcknowledged(false)
+              setShowCreateModal(false)
+              setCreateFormData({
+                name: '',
+                companyNameEn: '',
+                companyNameAr: '',
+                email: '',
+                phone: '',
+                country: 'AE',
+                currency: 'AED',
+                vatNumber: '',
+                address: '',
+                status: 'Trial',
+                trialDays: 14
+              })
+              setShowCredentialsModal(true)
+              fetchTenants()
+            } else if (response.success) {
               toast.success('Company created successfully')
               setShowCreateModal(false)
               setCreateFormData({
@@ -460,7 +499,7 @@ const SuperAdminTenantsPage = () => {
               toast.error(response.message || 'Failed to create company')
             }
           } catch (error) {
-            toast.error(error.response?.data?.message || 'Failed to create company')
+            if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to create company')
           } finally {
             setCreateLoading(false)
           }
@@ -673,6 +712,80 @@ const SuperAdminTenantsPage = () => {
             >
               Delete Permanently
             </LoadingButton>
+          </div>
+        </div>
+      </Modal>
+
+      {/* One-Time Credentials Modal - cannot be reopened */}
+      <Modal
+        isOpen={showCredentialsModal}
+        onClose={() => {}}
+        title="Company Credentials — Save Now"
+        size="lg"
+        closeOnOverlayClick={false}
+        showCloseButton={false}
+      >
+        <div className="space-y-6 p-2">
+          <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm font-medium">
+            These credentials are shown only once. Save them before closing.
+          </p>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Login URL</label>
+              <p className="font-mono text-sm bg-gray-100 p-3 rounded border break-all">{credentialsData?.clientAppLink || '—'}</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Owner Email</label>
+              <p className="font-mono text-sm bg-gray-100 p-3 rounded border">{credentialsData?.email || '—'}</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Temporary Password</label>
+              <p className="font-mono text-sm bg-gray-100 p-3 rounded border">{credentialsData?.password || '—'}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const text = `Login URL: ${credentialsData?.clientAppLink || ''}\nEmail: ${credentialsData?.email || ''}\nPassword: ${credentialsData?.password || ''}`
+                navigator.clipboard.writeText(text).then(() => toast.success('Credentials copied to clipboard', { id: 'credentials-copy' }))
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+            >
+              <Copy className="h-4 w-4" />
+              Copy All Credentials
+            </button>
+            <a
+              href={`mailto:${credentialsData?.email || ''}?subject=${encodeURIComponent('Your HexaBill Company Login Credentials')}&body=${encodeURIComponent(
+                `Your HexaBill company account has been created.\n\nLogin URL: ${credentialsData?.clientAppLink || ''}\nEmail: ${credentialsData?.email || ''}\nPassword: ${credentialsData?.password || ''}\n\nPlease save these credentials securely.`
+              )}`}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm font-medium no-underline"
+            >
+              Send via Email
+            </a>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={credentialsAcknowledged}
+              onChange={(e) => setCredentialsAcknowledged(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            <span className="text-sm text-gray-700">I've saved these details</span>
+          </label>
+          <div className="flex justify-end pt-4 border-t">
+            <button
+              type="button"
+              disabled={!credentialsAcknowledged}
+              onClick={() => {
+                setShowCredentialsModal(false)
+                setCredentialsData(null)
+                setCredentialsAcknowledged(false)
+              }}
+              className="px-5 py-2.5 bg-primary-600 text-white font-medium rounded-xl disabled:opacity-50 disabled:cursor-not-allowed hover:bg-primary-700"
+            >
+              Close
+            </button>
           </div>
         </div>
       </Modal>

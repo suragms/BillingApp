@@ -34,7 +34,7 @@ import { formatCurrency } from '../../utils/currency'
 import { showToast } from '../../utils/toast'
 import { isAdminOrOwner, isOwner } from '../../utils/roles'  // CRITICAL: Multi-tenant role checking
 import { LoadingCard } from '../../components/Loading'
-import { StatCard } from '../../components/ui'
+import { StatCard, KpiSkeleton, EmptyState } from '../../components/ui'
 import { reportsAPI, adminAPI, productsAPI } from '../../services'
 import PendingBillsPanel from '../../components/PendingBillsPanel'
 import QuickActionsPanel from '../../components/QuickActionsPanel'
@@ -250,6 +250,16 @@ const Dashboard = () => {
     }
   }, [])
 
+  // Listen for connection restored to auto-refresh data
+  useEffect(() => {
+    const handleConnectionRestored = () => {
+      toast.success('Connection restored. Refreshing data...')
+      fetchDashboardData()
+    }
+    window.addEventListener('connectionRestored', handleConnectionRestored)
+    return () => window.removeEventListener('connectionRestored', handleConnectionRestored)
+  }, [])
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.ctrlKey || e.metaKey) {
@@ -307,12 +317,22 @@ const Dashboard = () => {
   }
 
   if (loading) {
-    return <LoadingCard message="Loading dashboard..." />
+    return (
+      <div className="min-h-screen bg-primary-50 overflow-x-hidden">
+        <div className="w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+          <div className="h-10 w-48 animate-pulse bg-neutral-200 rounded" />
+          <KpiSkeleton />
+          <div className="animate-pulse bg-neutral-200 h-[280px] rounded-xl" />
+        </div>
+      </div>
+    )
   }
 
   if (!summary) {
     return <LoadingCard message="Loading dashboard data..." />
   }
+
+  const isNewUser = !salesData?.length && (summary?.salesToday ?? 0) === 0 && (summary?.pendingBillsCount ?? 0) === 0
 
   return (
     <div className="min-h-screen bg-primary-50 overflow-x-hidden">
@@ -495,7 +515,7 @@ const Dashboard = () => {
                     axisLine={false}
                     tickFormatter={(value) => new Date(value).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                   />
-                  <YAxis tick={{ fill: '#737373', fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
+                  <YAxis tick={{ fill: '#737373', fontSize: 11 }} tickLine={false} axisLine={false} width={45} tickFormatter={(v) => (v >= 1000 ? `₹${(v/1000).toFixed(0)}k` : `₹${v}`)} />
                   <Tooltip
                     formatter={(value) => formatCurrency(value)}
                     contentStyle={{
@@ -508,7 +528,7 @@ const Dashboard = () => {
                     labelStyle={{ fontWeight: 600, color: '#1e40af' }}
                   />
                   <Area
-                    type="monotone"
+                    type="linear"
                     dataKey="sales"
                     stroke="#3B82F6"
                     strokeWidth={2}

@@ -20,8 +20,10 @@ namespace HexaBill.Api.Modules.Branches
         Task<bool> UnassignStaffFromRouteAsync(int routeId, int userId, int tenantId);
         Task<List<RouteExpenseDto>> GetRouteExpensesAsync(int routeId, int tenantId, DateTime? fromDate, DateTime? toDate);
         Task<RouteExpenseDto?> CreateRouteExpenseAsync(CreateRouteExpenseRequest request, int userId, int tenantId);
+        Task<RouteExpenseDto?> UpdateRouteExpenseAsync(int id, CreateRouteExpenseRequest request, int tenantId);
         Task<bool> DeleteRouteExpenseAsync(int id, int tenantId);
         Task<RouteSummaryDto?> GetRouteSummaryAsync(int routeId, int tenantId, DateTime? fromDate, DateTime? toDate);
+        Task<RouteCollectionSheetDto?> GetRouteCollectionSheetAsync(int routeId, int tenantId, DateTime date);
     }
 
     public class RouteService : IRouteService
@@ -45,7 +47,7 @@ namespace HexaBill.Api.Modules.Branches
                 {
                     Id = r.Id,
                     BranchId = r.BranchId,
-                    BranchName = r.Branch.Name,
+                    BranchName = r.Branch != null ? r.Branch.Name : "",
                     TenantId = r.TenantId,
                     Name = r.Name,
                     AssignedStaffId = r.AssignedStaffId,
@@ -54,7 +56,7 @@ namespace HexaBill.Api.Modules.Branches
                     CustomerCount = r.RouteCustomers.Count,
                     StaffCount = r.RouteStaff.Count
                 })
-                .OrderBy(r => r.BranchName).ThenBy(r => r.Name)
+                .OrderBy(r => r.BranchName ?? "").ThenBy(r => r.Name)
                 .ToListAsync();
         }
 
@@ -245,6 +247,28 @@ namespace HexaBill.Api.Modules.Branches
             };
         }
 
+        public async Task<RouteExpenseDto?> UpdateRouteExpenseAsync(int id, CreateRouteExpenseRequest request, int tenantId)
+        {
+            var e = await _context.RouteExpenses.FirstOrDefaultAsync(x => x.Id == id && x.TenantId == tenantId);
+            if (e == null) return null;
+            var category = Enum.TryParse<RouteExpenseType>(request.Category, true, out var c) ? c : RouteExpenseType.Misc;
+            e.Category = category;
+            e.Amount = request.Amount;
+            e.ExpenseDate = request.ExpenseDate.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(request.ExpenseDate, DateTimeKind.Utc) : request.ExpenseDate.ToUniversalTime();
+            e.Description = request.Description;
+            await _context.SaveChangesAsync();
+            return new RouteExpenseDto
+            {
+                Id = e.Id,
+                RouteId = e.RouteId,
+                Category = e.Category.ToString(),
+                Amount = e.Amount,
+                ExpenseDate = e.ExpenseDate,
+                Description = e.Description,
+                CreatedAt = e.CreatedAt
+            };
+        }
+
         public async Task<bool> DeleteRouteExpenseAsync(int id, int tenantId)
         {
             var e = await _context.RouteExpenses.FirstOrDefaultAsync(x => x.Id == id && x.TenantId == tenantId);
@@ -269,6 +293,17 @@ namespace HexaBill.Api.Modules.Branches
             var totalExpenses = await _context.RouteExpenses
                 .Where(e => e.RouteId == routeId && e.ExpenseDate >= from && e.ExpenseDate <= to)
                 .SumAsync(e => e.Amount);
+            var saleIds = await _context.Sales
+                .Where(s => s.RouteId == routeId && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
+                .Select(s => s.Id)
+                .ToListAsync();
+            var costOfGoodsSold = saleIds.Count > 0
+                ? await (from si in _context.SaleItems
+                    join p in _context.Products on si.ProductId equals p.Id
+                    where saleIds.Contains(si.SaleId)
+                    select si.Qty * p.CostPrice)
+                    .SumAsync()
+                : 0m;
             return new RouteSummaryDto
             {
                 RouteId = route.Id,
@@ -276,7 +311,60 @@ namespace HexaBill.Api.Modules.Branches
                 BranchName = route.Branch.Name,
                 TotalSales = totalSales,
                 TotalExpenses = totalExpenses,
-                Profit = totalSales - totalExpenses
+                CostOfGoodsSold = costOfGoodsSold,
+                Profit = totalSales - costOfGoodsSold - totalExpenses
+            };
+        }
+
+        public async Task<RouteCollectionSheetDto?> GetRouteCollectionSheetAsync(int routeId, int tenantId, DateTime date)
+        {
+            var route = await _context.Routes
+                .AsNoTracking()
+                .Include(r => r.Branch)
+                .Include(r => r.AssignedStaff)
+                .Include(r => r.RouteCustomers).ThenInclude(rc => rc.Customer)
+                .FirstOrDefaultAsync(r => r.Id == routeId && (tenantId <= 0 || r.TenantId == tenantId));
+            if (route == null) return null;
+
+            var dateStart = date.Date;
+            var dateEnd = dateStart.AddDays(1).AddTicks(-1);
+
+            var customerIds = route.RouteCustomers.Select(rc => rc.CustomerId).ToList();
+            var todayInvoices = await _context.Sales
+                .Where(s => s.RouteId == routeId && !s.IsDeleted && s.InvoiceDate >= dateStart && s.InvoiceDate <= dateEnd && s.CustomerId != null)
+                .Select(s => new { s.CustomerId, s.GrandTotal })
+                .ToListAsync();
+            var todayByCustomer = todayInvoices
+                .Where(x => x.CustomerId.HasValue)
+                .GroupBy(x => x.CustomerId!.Value)
+                .ToDictionary(g => g.Key, g => g.Sum(x => x.GrandTotal));
+
+            var entries = new List<RouteCollectionSheetEntryDto>();
+            decimal totalOutstanding = 0;
+            foreach (var rc in route.RouteCustomers.OrderBy(rc => rc.Customer.Name))
+            {
+                var c = rc.Customer;
+                var balance = c.Balance > 0.01m ? c.Balance : 0m;
+                var todayAmount = todayByCustomer.ContainsKey(c.Id) ? (decimal?)todayByCustomer[c.Id] : null;
+                totalOutstanding += balance;
+                entries.Add(new RouteCollectionSheetEntryDto
+                {
+                    CustomerId = c.Id,
+                    CustomerName = c.Name ?? "",
+                    Phone = c.Phone,
+                    OutstandingBalance = balance,
+                    TodayInvoiceAmount = todayAmount
+                });
+            }
+
+            return new RouteCollectionSheetDto
+            {
+                RouteName = route.Name,
+                BranchName = route.Branch?.Name ?? "",
+                Date = date.ToString("yyyy-MM-dd"),
+                StaffName = route.AssignedStaff?.Name,
+                Customers = entries,
+                TotalOutstanding = totalOutstanding
             };
         }
     }

@@ -18,6 +18,7 @@ import {
   Building2,
   Trash2,
   LogIn,
+  LogOut,
   ShoppingCart,
   Receipt,
   BarChart3,
@@ -32,6 +33,7 @@ import {
   CheckCircle2,
   RefreshCw,
   Lock,
+  Sliders,
   User as UserIcon,
   Copy
 } from 'lucide-react'
@@ -77,6 +79,10 @@ const SuperAdminTenantDetailPage = () => {
     status: 'Active'
   })
 
+  const [tenantHealth, setTenantHealth] = useState(null)
+  const [limitsData, setLimitsData] = useState({ maxRequestsPerMinute: 200, maxConcurrentUsers: 50, maxStorageMb: 1024, maxInvoicesPerMonth: 1000 })
+  const [limitsLoading, setLimitsLoading] = useState(false)
+  const [limitsSaving, setLimitsSaving] = useState(false)
   const [dangerModal, setDangerModal] = useState({
     isOpen: false,
     title: '',
@@ -99,6 +105,34 @@ const SuperAdminTenantDetailPage = () => {
       fetchPlans()
     }
   }, [id])
+
+  useEffect(() => {
+    if (id && activeTab === 'overview') {
+      superAdminAPI.getTenantHealth(parseInt(id))
+        .then((res) => res?.success && res?.data && setTenantHealth(res.data))
+        .catch(() => setTenantHealth(null))
+    }
+  }, [id, activeTab])
+
+  useEffect(() => {
+    if (id && activeTab === 'limits') {
+      setLimitsLoading(true)
+      superAdminAPI.getTenantLimits(parseInt(id))
+        .then((res) => {
+          const d = res?.data ?? res
+          if (d && typeof d === 'object') {
+            setLimitsData({
+              maxRequestsPerMinute: d.maxRequestsPerMinute ?? 200,
+              maxConcurrentUsers: d.maxConcurrentUsers ?? 50,
+              maxStorageMb: d.maxStorageMb ?? 1024,
+              maxInvoicesPerMonth: d.maxInvoicesPerMonth ?? 1000
+            })
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLimitsLoading(false))
+    }
+  }, [id, activeTab])
 
   const fetchPlans = async () => {
     try {
@@ -123,7 +157,7 @@ const SuperAdminTenantDetailPage = () => {
       }
     } catch (error) {
       console.error('Error loading tenant:', error)
-      toast.error('Failed to load company')
+      if (!error?._handledByInterceptor) toast.error('Failed to load company')
       navigate('/superadmin/tenants')
     } finally {
       setLoading(false)
@@ -145,7 +179,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to suspend company')
       }
     } catch (error) {
-      toast.error('Failed to suspend company')
+      if (!error?._handledByInterceptor) toast.error('Failed to suspend company')
     } finally {
       setLoadingAction(false)
     }
@@ -182,12 +216,15 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to activate company')
       }
     } catch (error) {
-      toast.error('Failed to activate company')
+      if (!error?._handledByInterceptor) toast.error('Failed to activate company')
     }
   }
 
-  const handleEnterWorkspace = () => {
+  const handleEnterWorkspace = async () => {
     if (!tenant) return
+    try {
+      await superAdminAPI.impersonateEnter(tenant.id)
+    } catch (_) { /* Audit logging failure should not block */ }
     impersonateTenant(tenant.id)
     localStorage.setItem('selected_tenant_name', tenant.name)
     toast.success(`Entering ${tenant.name}'s workspace`)
@@ -213,7 +250,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to clear company data')
       }
     } catch (error) {
-      toast.error('An error occurred while clearing data')
+      if (!error?._handledByInterceptor) toast.error('An error occurred while clearing data')
     } finally {
       setLoadingAction(false)
     }
@@ -226,7 +263,7 @@ const SuperAdminTenantDetailPage = () => {
         if (res?.data?.items) setTenantsList(res.data.items)
         else if (Array.isArray(res?.data)) setTenantsList(res.data)
       } catch (e) {
-        toast.error('Failed to load companies list')
+        if (!e?._handledByInterceptor) toast.error('Failed to load companies list')
         return
       }
     }
@@ -258,7 +295,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response?.message || 'Duplicate failed')
       }
     } catch (error) {
-      toast.error(error?.response?.data?.message || 'An error occurred')
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'An error occurred')
     } finally {
       setLoadingAction(false)
     }
@@ -280,7 +317,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to update subscription')
       }
     } catch (error) {
-      toast.error('An error occurred while updating subscription')
+      if (!error?._handledByInterceptor) toast.error('An error occurred while updating subscription')
     } finally {
       setLoadingAction(false)
     }
@@ -288,6 +325,7 @@ const SuperAdminTenantDetailPage = () => {
 
   const handleAddUser = async (e) => {
     e.preventDefault()
+    if (loadingAction) return
     try {
       setLoadingAction(true)
       const response = await superAdminAPI.addTenantUser(tenant.id, userFormData)
@@ -300,7 +338,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to add user')
       }
     } catch (error) {
-      toast.error(error.response?.data?.message || 'Failed to add user')
+      if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to add user')
     } finally {
       setLoadingAction(false)
     }
@@ -319,7 +357,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to update user')
       }
     } catch (error) {
-      toast.error(error.response?.data?.message || 'Failed to update user')
+      if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to update user')
     } finally {
       setLoadingAction(false)
     }
@@ -341,7 +379,28 @@ const SuperAdminTenantDetailPage = () => {
             toast.error(response.message || 'Failed to delete user')
           }
         } catch (error) {
-          toast.error(error.response?.data?.message || 'Failed to delete user')
+          if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to delete user')
+        }
+      }
+    })
+  }
+
+  const handleForceLogout = (userId, userName) => {
+    setDangerModal({
+      isOpen: true,
+      title: 'Force Logout User?',
+      message: `Force ${userName || 'this user'} to log out immediately? They will need to log in again on their next request.`,
+      confirmLabel: 'Force Logout',
+      onConfirm: async () => {
+        try {
+          const response = await superAdminAPI.forceLogoutTenantUser(tenant.id, userId)
+          if (response.success) {
+            toast.success('User will be logged out on next request')
+          } else {
+            toast.error(response.message || 'Failed to force logout')
+          }
+        } catch (error) {
+          if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to force logout')
         }
       }
     })
@@ -359,7 +418,7 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to reset password')
       }
     } catch (error) {
-      toast.error(error.response?.data?.message || 'Failed to reset password')
+      if (!error?._handledByInterceptor) toast.error(error.response?.data?.message || 'Failed to reset password')
     } finally {
       setLoadingAction(false)
     }
@@ -409,7 +468,24 @@ const SuperAdminTenantDetailPage = () => {
         </button>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">{tenant.name}</h1>
+            <div className="flex items-center gap-3 flex-wrap">
+              <h1 className="text-3xl font-bold text-gray-900">{tenant.name}</h1>
+              <div className="flex items-center gap-1.5 bg-neutral-100 rounded-lg px-3 py-1.5">
+                <span className="text-xs font-medium text-neutral-500">Database Client ID</span>
+                <code className="text-sm font-mono font-semibold">{tenant.id}</code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(String(tenant.id))
+                    toast.success('Client ID copied')
+                  }}
+                  className="p-1 hover:bg-neutral-200 rounded"
+                  title="Copy Client ID"
+                >
+                  <Copy className="h-3.5 w-3.5 text-neutral-500" />
+                </button>
+              </div>
+            </div>
             <p className="text-gray-600 mt-1">{tenant.companyNameEn || tenant.companyNameAr || 'No company name'}</p>
           </div>
           <div className="flex items-center space-x-3">
@@ -467,7 +543,7 @@ const SuperAdminTenantDetailPage = () => {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 font-bold">
         <nav className="-mb-px flex space-x-8">
-          {['overview', 'users', 'subscription', 'usage', 'reports'].map((tab) => (
+          {['overview', 'users', 'subscription', 'usage', 'limits', 'reports'].map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -485,6 +561,45 @@ const SuperAdminTenantDetailPage = () => {
       {/* Tab Content */}
       {activeTab === 'overview' && (
         <div className="space-y-6">
+          {/* Health Score Card */}
+          {tenantHealth != null && (
+            <div className={`rounded-lg border shadow-sm p-6 ${
+              tenantHealth.level === 'Green' ? 'bg-green-50 border-green-200' :
+              tenantHealth.level === 'Yellow' ? 'bg-amber-50 border-amber-200' :
+              'bg-red-50 border-red-200'
+            }`}>
+              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                <Shield className="h-5 w-5" />
+                Tenant Health Score
+              </h2>
+              <div className="flex flex-wrap items-center gap-6">
+                <div className={`text-4xl font-bold ${
+                  tenantHealth.level === 'Green' ? 'text-green-700' :
+                  tenantHealth.level === 'Yellow' ? 'text-amber-700' : 'text-red-700'
+                }`}>
+                  {tenantHealth.score}/100
+                </div>
+                <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                  tenantHealth.level === 'Green' ? 'bg-green-200 text-green-800' :
+                  tenantHealth.level === 'Yellow' ? 'bg-amber-200 text-amber-800' :
+                  'bg-red-200 text-red-800'
+                }`}>
+                  {tenantHealth.level}
+                </span>
+                {(tenantHealth.riskFactors || []).length > 0 && (
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-600 mb-1">Risk factors:</p>
+                    <ul className="text-sm text-gray-700 list-disc list-inside">
+                      {(tenantHealth.riskFactors || []).map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Basic Information</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -593,7 +708,8 @@ const SuperAdminTenantDetailPage = () => {
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <div className="flex justify-end space-x-2">
                         <button onClick={() => { setSelectedUser(user); setUserFormData({ name: user.name, role: user.role, phone: user.phone || '' }); setShowEditUserModal(true); }} className="text-blue-600 hover:text-blue-900"><Edit className="h-4 w-4" /></button>
-                        <button onClick={() => { setSelectedUser(user); setShowPasswordModal(true); }} className="text-green-600 hover:text-green-900"><CheckCircle2 className="h-4 w-4" /></button>
+                        <button onClick={() => { setSelectedUser(user); setShowPasswordModal(true); }} title="Reset Password" className="text-green-600 hover:text-green-900"><CheckCircle2 className="h-4 w-4" /></button>
+                        <button onClick={() => handleForceLogout(user.id, user.name)} title="Force Logout" className="text-amber-600 hover:text-amber-900"><LogOut className="h-4 w-4" /></button>
                         <button onClick={() => handleDeleteUser(user.id)} className="text-red-600 hover:text-red-900"><Trash2 className="h-4 w-4" /></button>
                       </div>
                     </td>
@@ -871,6 +987,73 @@ const SuperAdminTenantDetailPage = () => {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'limits' && (
+        <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
+          <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+            <Sliders className="h-6 w-6 text-indigo-600" />
+            Per-Tenant Limits & Rate Limiting
+          </h2>
+          <p className="text-sm text-gray-600 mb-6">
+            Configure API rate limits and quotas for this company. When limits are exceeded, requests return 429.
+          </p>
+          {limitsLoading ? (
+            <LoadingCard />
+          ) : (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                setLimitsSaving(true)
+                try {
+                  await superAdminAPI.updateTenantLimits(parseInt(id), limitsData)
+                  toast.success('Limits updated successfully')
+                } catch (err) {
+                  toast.error(err?.message || 'Failed to update limits')
+                } finally {
+                  setLimitsSaving(false)
+                }
+              }}
+              className="space-y-6 max-w-xl"
+            >
+              <Input
+                label="Max API requests per minute"
+                type="number"
+                min={1}
+                max={2000}
+                value={limitsData.maxRequestsPerMinute}
+                onChange={(e) => setLimitsData({ ...limitsData, maxRequestsPerMinute: parseInt(e.target.value, 10) || 200 })}
+              />
+              <Input
+                label="Max concurrent users"
+                type="number"
+                min={1}
+                max={500}
+                value={limitsData.maxConcurrentUsers}
+                onChange={(e) => setLimitsData({ ...limitsData, maxConcurrentUsers: parseInt(e.target.value, 10) || 50 })}
+              />
+              <Input
+                label="Max storage (MB)"
+                type="number"
+                min={1}
+                max={10240}
+                value={limitsData.maxStorageMb}
+                onChange={(e) => setLimitsData({ ...limitsData, maxStorageMb: parseInt(e.target.value, 10) || 1024 })}
+              />
+              <Input
+                label="Max invoices per month"
+                type="number"
+                min={1}
+                max={100000}
+                value={limitsData.maxInvoicesPerMonth}
+                onChange={(e) => setLimitsData({ ...limitsData, maxInvoicesPerMonth: parseInt(e.target.value, 10) || 1000 })}
+              />
+              <LoadingButton type="submit" loading={limitsSaving} className="bg-indigo-600 hover:bg-indigo-700">
+                Save Limits
+              </LoadingButton>
+            </form>
+          )}
         </div>
       )}
 

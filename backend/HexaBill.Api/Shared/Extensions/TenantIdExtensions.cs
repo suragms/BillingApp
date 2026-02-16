@@ -30,9 +30,11 @@ namespace HexaBill.Api.Shared.Extensions
         /// <exception cref="UnauthorizedAccessException">If tenant_id is missing or invalid</exception>
         public static int GetTenantIdFromToken(this ClaimsPrincipal user)
         {
-            // Try tenant_id first (new), fallback to owner_id (migration)
+            // Try tenant_id first (new), fallback to owner_id - support both short and full claim types (JWT mapping)
             var tenantIdClaim = user.FindFirst("tenant_id")?.Value
-                ?? user.FindFirst("owner_id")?.Value;
+                ?? user.FindFirst("owner_id")?.Value
+                ?? user.Claims.FirstOrDefault(c => c.Type.EndsWith("tenant_id", StringComparison.OrdinalIgnoreCase))?.Value
+                ?? user.Claims.FirstOrDefault(c => c.Type.EndsWith("owner_id", StringComparison.OrdinalIgnoreCase))?.Value;
             
             if (tenantIdClaim == null)
             {
