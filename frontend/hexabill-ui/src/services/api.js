@@ -6,12 +6,9 @@ import { connectionManager } from './connectionManager'
 import { showMaintenanceOverlay } from '../components/MaintenanceOverlay'
 import { setSubscriptionGraceFromResponse } from '../components/SubscriptionGraceBanner'
 
-// API base URL: prefer build-time env (Vercel) then production hostname, else localhost
-const envApi = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
-const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
-const API_BASE_URL = envApi && envApi.startsWith('http')
-  ? (envApi.endsWith('/api') ? envApi : envApi + '/api')
-  : (isProduction ? 'https://hexabill.onrender.com/api' : 'http://localhost:5000/api')
+// API base URL: single source of truth so production never uses localhost
+import { getApiBaseUrl } from './apiConfig'
+const API_BASE_URL = getApiBaseUrl()
 
 // Error throttling to prevent flooding
 let lastErrorToast = null
@@ -21,6 +18,22 @@ const ERROR_THROTTLE_MS = 3000 // Show max 1 error toast per 3 seconds for gener
 const SERVER_ERROR_THROTTLE_MS = 12000 // Show max 1 server (500) toast per 12 seconds to avoid spam
 const NETWORK_ERROR_THROTTLE_MS = 15000 // Show max 1 network error toast per 15 seconds
 let lastServerErrorToast = null
+
+// Client-reported errors: queue when backend is down, send to backend when it's back (Super Admin sees in Error Logs)
+const clientErrorQueue = []
+const MAX_QUEUED_CLIENT_ERRORS = 50
+function queueClientError(message, path) {
+  const p = path || (typeof window !== 'undefined' ? window.location?.pathname : '') || ''
+  clientErrorQueue.push({ message, path: p })
+  if (clientErrorQueue.length > MAX_QUEUED_CLIENT_ERRORS) clientErrorQueue.shift()
+}
+function flushClientErrorsToBackend() {
+  if (clientErrorQueue.length === 0) return
+  const items = clientErrorQueue.splice(0, clientErrorQueue.length)
+  const message = items[0]?.message || 'Service temporarily unavailable'
+  const path = items.length === 1 ? (items[0]?.path || '') : `multiple (${items.length} requests failed)`
+  api.post('/error-logs/client', { message, path, count: items.length }).catch(() => {})
+}
 
 // Request deduplication and throttling to prevent 429 errors
 const pendingRequests = new Map()
@@ -201,6 +214,8 @@ api.interceptors.response.use(
   (response) => {
     // Mark connection as successful on any successful response
     connectionManager.markConnected()
+    // Send any client-reported errors (e.g. connection refused) to backend so Super Admin can see them
+    flushClientErrorsToBackend()
 
     // Clean up pending request tracking
     if (response.config?._requestKey) {
@@ -227,6 +242,13 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
 
+    // Ping is best-effort; never trigger disconnect or toasts (avoids 404/network spam and health-check flood)
+    const isPingRequest = (error.config?.url || '').includes('me/ping')
+    if (isPingRequest) {
+      error._handledByInterceptor = true
+      return Promise.reject(error)
+    }
+
     // Handle network/connection errors (includes timeout ECONNABORTED)
     const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout')
     const isNetworkError = !error.response && (
@@ -244,25 +266,22 @@ api.interceptors.response.use(
       // Mark connection as failed
       connectionManager.markDisconnected()
 
-      // Show throttled error message (timeout gets specific message)
+      // Login page shows its own message for auth/login — avoid duplicate toast
+      const isLoginRequest = (error.config?.url || '').includes('auth/login')
       const errorMsg = isTimeout
         ? 'The request timed out. If using Render free tier, the backend may be starting (cold start). Wait 30-60 seconds and try again.'
         : error.code === 'ERR_CORS'
-          ? 'Backend server may have stopped. Please restart the backend.'
-          : `Cannot connect to server. Please ensure the backend is running at ${API_BASE_URL.replace('/api', '')}`
+          ? 'Service is temporarily unavailable. Please try again or contact support.'
+          : 'Service temporarily unavailable. Please try again or contact support.'
 
-      showThrottledError(errorMsg, true)
+      if (!isLoginRequest) showThrottledError(errorMsg, true)
       error._handledByInterceptor = true
+      // Queue so Super Admin sees it in Error Logs when backend is back
+      queueClientError(errorMsg, error.config?.url || (typeof window !== 'undefined' ? window.location?.pathname : ''))
 
-      // Only log once per error type
-      if (errorToastCount === 1) {
-        console.error('Network Error Details:', {
-          url: error.config?.url,
-          baseURL: API_BASE_URL,
-          method: error.config?.method,
-          message: error.message,
-          code: error.code
-        })
+      // Notify Login page so it can show the banner without an extra health check
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hexabill-backend-unavailable'))
       }
 
       return Promise.reject(error)
@@ -304,20 +323,47 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    // Handle 404 for Branches/Routes API (backend may need rebuild + migrations)
-    const url = (error.config?.url || '').toLowerCase()
-    if (error.response?.status === 404 && (url.includes('/branches') || url.includes('/routes'))) {
+    // Handle 400 Bad Request - validation errors (show errors array or message)
+    if (error.response?.status === 400) {
       connectionManager.markConnected()
-      if (!sessionStorage.getItem('hexabill_branches_routes_404_shown')) {
-        sessionStorage.setItem('hexabill_branches_routes_404_shown', '1')
-        showThrottledError(
-          'Branches & Routes API not found. Stop the API, then run backend/HexaBill.Api/run-api.ps1 (or: dotnet build && dotnet ef database update && dotnet run in that folder), then restart.',
-          false
-        )
-        error._handledByInterceptor = true
-      }
+      const body = error.response?.data
+      const errors = body?.errors
+      const message = Array.isArray(errors) && errors.length > 0
+        ? errors.join('. ')
+        : (body?.message || 'Invalid request. Please check your input.')
+      showThrottledError(message, false)
+      error._handledByInterceptor = true
       return Promise.reject(error)
     }
+
+    // Handle 404 Not Found (with special message for Branches/Routes API)
+    if (error.response?.status === 404) {
+      connectionManager.markConnected()
+      const url = (error.config?.url || '').toLowerCase()
+      const isBranchesOrRoutes = url.includes('/branches') || url.includes('/routes')
+      let msg
+      if (isBranchesOrRoutes && !sessionStorage.getItem('hexabill_branches_routes_404_shown')) {
+        sessionStorage.setItem('hexabill_branches_routes_404_shown', '1')
+        msg = 'Branches & Routes feature is currently unavailable. Please try again later or contact support.'
+      } else {
+        msg = error.response?.data?.message || 'Resource not found.'
+      }
+      showThrottledError(msg, false)
+      error._handledByInterceptor = true
+      return Promise.reject(error)
+    }
+
+    // Handle 502 Bad Gateway - show retry
+    if (error.response?.status === 502) {
+      connectionManager.markConnected()
+      queueClientError('Server 502 Bad Gateway', error.config?.url)
+      const msg = error.response?.data?.message || 'Server temporarily unavailable. Please try again.'
+      showThrottledError(msg, false, { isServerError: true })
+      error._handledByInterceptor = true
+      return Promise.reject(error)
+    }
+
+    const url = (error.config?.url || '').toLowerCase()
 
     // Handle 403 Forbidden - tenant suspended/expired or insufficient permissions
     if (error.response?.status === 403) {
@@ -407,6 +453,9 @@ api.interceptors.response.use(
         error._handledByInterceptor = true
         return Promise.reject(error)
       }
+      // Queue so Super Admin sees in Error Logs
+      const baseMessage = error.response?.data?.message || 'Server error (500)'
+      queueClientError(`Server 500: ${baseMessage}`, error.config?.url)
       // Server errors - throttle heavily to avoid repeated toasts for branches/routes/reports
       const now = Date.now()
       if (lastServerErrorToast && (now - lastServerErrorToast) < SERVER_ERROR_THROTTLE_MS) {
@@ -414,7 +463,6 @@ api.interceptors.response.use(
       }
       lastServerErrorToast = now
       const correlationId = error.response?.data?.correlationId || error.response?.headers?.['x-correlation-id']
-      const baseMessage = error.response?.data?.message || 'Server is having trouble. Check that the backend is running and try again.'
       const errorMsg = correlationId ? `${baseMessage} (Ref: ${correlationId})` : baseMessage
       showThrottledError(errorMsg, false, { isServerError: true })
       error._handledByInterceptor = true

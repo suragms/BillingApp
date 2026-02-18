@@ -1,5 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { adminAPI } from '../services'
+import { getApiBaseUrlNoSuffix } from '../services/apiConfig'
+import { useAuth } from '../hooks/useAuth'
 
 const BrandingContext = createContext()
 
@@ -17,12 +19,8 @@ export const useBranding = () => {
   return context
 }
 
-const getApiBaseUrl = () => {
-  const env = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
-  return env.replace(/\/api\/?$/, '')
-}
-
 export const BrandingProvider = ({ children }) => {
+  const { impersonatedTenantId } = useAuth()
   const [branding, setBranding] = useState({
     companyName: 'HexaBill',
     companyLogo: null,
@@ -34,8 +32,9 @@ export const BrandingProvider = ({ children }) => {
   const updateFavicon = useCallback((logoUrl) => {
     if (!logoUrl) return
     try {
-      const base = getApiBaseUrl()
-      const href = logoUrl.startsWith('http') ? logoUrl : `${base}${logoUrl.startsWith('/') ? '' : '/'}${logoUrl}`
+      const base = getApiBaseUrlNoSuffix()
+      const path = logoUrl.startsWith('http') ? logoUrl : (logoUrl.startsWith('/') ? logoUrl : `/uploads/${logoUrl}`)
+      const href = path.startsWith('http') ? path : `${base}${path.startsWith('/') ? '' : '/'}${path}`
       const link = document.querySelector("link[rel*='icon']") || document.createElement('link')
       link.rel = 'shortcut icon'
       link.href = href
@@ -48,8 +47,12 @@ export const BrandingProvider = ({ children }) => {
   }, [])
 
   const loadBranding = useCallback(async () => {
-    // CRITICAL: Only call /api/settings when user is logged in (has token).
-    // Prevents flood of 401s on login page and when token expired.
+    // Skip API on login page to avoid ERR_CONNECTION_REFUSED flood when backend is down
+    const path = typeof window !== 'undefined' ? window.location.pathname : ''
+    if (path === '/login' || path === '/Admin26') {
+      setBranding(prev => ({ ...prev, companyName: 'HexaBill', loading: false }))
+      return
+    }
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null
     if (!token) {
       setBranding(prev => ({ ...prev, companyName: 'HexaBill', loading: false }))
@@ -65,17 +68,24 @@ export const BrandingProvider = ({ children }) => {
         const primary = data.primaryColor || data.primary_color || '#2563EB'
         const accent = data.accentColor || data.accent_color || '#10B981'
 
+        // Add cache-busting parameter to logo URL to force refresh
+        const logoUrlWithCache = logoUrl ? `${logoUrl}${logoUrl.includes('?') ? '&' : '?'}t=${Date.now()}` : null
+
         setBranding(prev => ({
           ...prev,
           companyName: name,
-          companyLogo: logoUrl,
+          companyLogo: logoUrlWithCache,
           primaryColor: primary,
           accentColor: accent,
           loading: false,
         }))
 
         document.title = name
-        if (logoUrl) updateFavicon(logoUrl)
+        if (logoUrl) {
+          // Use original URL for favicon but with cache-busting
+          const faviconUrl = `${logoUrl}${logoUrl.includes('?') ? '&' : '?'}t=${Date.now()}`
+          updateFavicon(faviconUrl)
+        }
       } else {
         setBranding(prev => ({ ...prev, loading: false }))
       }
@@ -87,6 +97,13 @@ export const BrandingProvider = ({ children }) => {
   useEffect(() => {
     loadBranding()
   }, [loadBranding])
+
+  // Phase 4: After Super Admin impersonation, refetch settings/logo for the selected tenant
+  useEffect(() => {
+    if (impersonatedTenantId != null) {
+      loadBranding()
+    }
+  }, [impersonatedTenantId, loadBranding])
 
   return (
     <BrandingContext.Provider value={{ ...branding, refresh: loadBranding }}>

@@ -4,7 +4,9 @@ using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using HexaBill.Api.Modules.SuperAdmin;
+using HexaBill.Api.Shared.Extensions;
 using HexaBill.Api.Shared.Security;
+using HexaBill.Api.Shared.Services;
 
 namespace HexaBill.Api.Modules.SuperAdmin
 {
@@ -15,12 +17,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
         private readonly AppDbContext _db;
         private readonly IConfiguration _config;
         private readonly IFontService _fontService;
+        private readonly IErrorLogService _errorLogService;
 
-        public DiagnosticsController(AppDbContext db, IConfiguration config, IFontService fontService)
+        public DiagnosticsController(AppDbContext db, IConfiguration config, IFontService fontService, IErrorLogService errorLogService)
         {
             _db = db;
             _config = config;
             _fontService = fontService;
+            _errorLogService = errorLogService;
         }
 
         [HttpGet("health")]
@@ -69,16 +73,49 @@ namespace HexaBill.Api.Modules.SuperAdmin
             });
         }
 
-        /// <summary>Enterprise: last 100 server errors. SuperAdmin/Admin only.</summary>
+        /// <summary>Lightweight summary for Super Admin alert bell: unresolved count, last 24h/1h, recent items. (PRODUCTION_MASTER_TODO #49)</summary>
+        [HttpGet("superadmin/alert-summary")]
+        [Authorize(Roles = "SystemAdmin")]
+        public async Task<IActionResult> GetAlertSummary()
+        {
+            var now = DateTime.UtcNow;
+            var last24h = now.AddHours(-24);
+            var last1h = now.AddHours(-1);
+            var unresolvedCount = await _db.ErrorLogs.CountAsync(e => e.ResolvedAt == null);
+            var last24hCount = await _db.ErrorLogs.CountAsync(e => e.CreatedAt >= last24h);
+            var last1hCount = await _db.ErrorLogs.CountAsync(e => e.CreatedAt >= last1h);
+            var recent = await (from e in _db.ErrorLogs
+                join t in _db.Tenants on e.TenantId equals t.Id into tj
+                from t in tj.DefaultIfEmpty()
+                where e.ResolvedAt == null
+                orderby e.CreatedAt descending
+                select new { e.Id, e.Message, e.TenantId, e.CreatedAt, TenantName = t != null ? t.Name : (string?)null })
+                .Take(5)
+                .ToListAsync();
+            return Ok(new
+            {
+                success = true,
+                unresolvedCount,
+                last24hCount,
+                last1hCount,
+                recent = recent.Select(r => new { r.Id, r.Message, r.TenantId, r.TenantName, r.CreatedAt })
+            });
+        }
+
+        /// <summary>Enterprise: last 100 server errors. SuperAdmin/Admin only. includeResolved=true to show resolved/suppressed entries.</summary>
         [HttpGet("error-logs")]
         [Authorize(Roles = "Admin,Owner,SystemAdmin")]
-        public async Task<IActionResult> GetErrorLogs([FromQuery] int limit = 100)
+        public async Task<IActionResult> GetErrorLogs([FromQuery] int limit = 100, [FromQuery] bool includeResolved = false)
         {
             limit = Math.Clamp(limit, 1, 500);
-            var list = await _db.ErrorLogs
-                .OrderByDescending(e => e.CreatedAt)
-                .Take(limit)
-                .Select(e => new
+            var query = _db.ErrorLogs.AsQueryable();
+            if (!includeResolved)
+                query = query.Where(e => e.ResolvedAt == null);
+            var list = await (from e in query
+                join t in _db.Tenants on e.TenantId equals t.Id into tj
+                from t in tj.DefaultIfEmpty()
+                orderby e.CreatedAt descending
+                select new
                 {
                     e.Id,
                     e.TraceId,
@@ -88,10 +125,47 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     e.Method,
                     e.TenantId,
                     e.UserId,
-                    e.CreatedAt
+                    e.CreatedAt,
+                    e.ResolvedAt,
+                    TenantName = t != null ? t.Name : (string?)null
                 })
+                .Take(limit)
                 .ToListAsync();
             return Ok(new { success = true, count = list.Count, items = list });
+        }
+
+        /// <summary>Mark an error log as resolved/suppressed so it can be hidden from the default list.</summary>
+        [HttpPatch("error-logs/{id}/resolve")]
+        [Authorize(Roles = "Admin,Owner,SystemAdmin")]
+        public async Task<IActionResult> ResolveErrorLog(int id)
+        {
+            var entry = await _db.ErrorLogs.FindAsync(id);
+            if (entry == null)
+                return NotFound(new { success = false, message = "Error log not found." });
+            entry.ResolvedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+            return Ok(new { success = true, message = "Marked as resolved.", resolvedAt = entry.ResolvedAt });
+        }
+
+        /// <summary>Client-reported errors (e.g. "Service temporarily unavailable", connection refused). Stored in ErrorLogs so Super Admin can see them.</summary>
+        [HttpPost("error-logs/client")]
+        [Authorize(Roles = "Admin,Owner,SystemAdmin,Staff")]
+        public async Task<IActionResult> PostClientError([FromBody] ClientErrorRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Message))
+            {
+                return BadRequest(new { success = false, message = "Message is required." });
+            }
+            var message = request.Message.Length > 1900 ? request.Message[..1900] : request.Message;
+            var path = (request.Path ?? "").Length > 450 ? request.Path[..450] : request.Path;
+            var traceId = "client-" + Guid.NewGuid().ToString("N")[..12];
+            int? tenantId = User?.GetTenantIdOrNullForSystemAdmin();
+            int? userId = int.TryParse(User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out var uid) ? uid : (int?)null;
+            var fullMessage = request.Count > 1
+                ? $"[Client] {message} (occurred {request.Count} times)"
+                : $"[Client] {message}";
+            await _errorLogService.LogAsync(traceId, "CLIENT", fullMessage, null, path, request.Method ?? "GET", tenantId, userId);
+            return Ok(new { success = true, traceId });
         }
 
         /// <summary>Platform-wide audit logs for Super Admin. Optional filters: tenantId, userId, action, fromDate, toDate. SystemAdmin only.</summary>
@@ -138,6 +212,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     a.EntityType,
                     a.EntityId,
                     a.Details,
+                    a.OldValues,
+                    a.NewValues,
                     a.CreatedAt
                 })
                 .ToListAsync();
@@ -374,6 +450,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 return StatusCode(500, new { error = ex.Message, stackTrace = ex.StackTrace });
             }
         }
+    }
+
+    public class ClientErrorRequest
+    {
+        public string Message { get; set; } = string.Empty;
+        public string? Path { get; set; }
+        public string? Method { get; set; }
+        public int Count { get; set; } = 1;
     }
 }
 

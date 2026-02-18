@@ -15,9 +15,13 @@ import {
   ClipboardList,
   AlertCircle,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  Search,
+  Database,
+  Bell
 } from 'lucide-react'
 import Logo from './Logo'
+import { connectionManager } from '../services/connectionManager'
 
 const SuperAdminLayout = () => {
   const { user, logout } = useAuth()
@@ -26,7 +30,17 @@ const SuperAdminLayout = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showProfileDropdown, setShowProfileDropdown] = useState(false)
+  const [showAlertDropdown, setShowAlertDropdown] = useState(false)
+  const [alertSummary, setAlertSummary] = useState(null)
+  const [backendUnavailable, setBackendUnavailable] = useState(() => !connectionManager.isConnected)
   const profileDropdownRef = useRef(null)
+  const alertDropdownRef = useRef(null)
+
+  useEffect(() => {
+    const unsub = connectionManager.onStatusChange((connected) => setBackendUnavailable(!connected))
+    setBackendUnavailable(!connectionManager.isConnected)
+    return () => { if (unsub) unsub() }
+  }, [])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -34,19 +48,40 @@ const SuperAdminLayout = () => {
       if (profileDropdownRef.current && !profileDropdownRef.current.contains(event.target)) {
         setShowProfileDropdown(false)
       }
+      if (alertDropdownRef.current && !alertDropdownRef.current.contains(event.target)) {
+        setShowAlertDropdown(false)
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Fetch alert summary for bell (critical events). #49
+  useEffect(() => {
+    const fetchSummary = async () => {
+      try {
+        const { superAdminAPI } = await import('../services')
+        const res = await superAdminAPI.getAlertSummary()
+        if (res?.success && res != null) setAlertSummary(res?.data ?? res)
+      } catch {
+        setAlertSummary(null)
+      }
+    }
+    fetchSummary()
+    const interval = setInterval(fetchSummary, 60000)
+    return () => clearInterval(interval)
   }, [])
 
   // Super Admin navigation – enterprise structure (Dashboard, Companies, Subscriptions, Audit Logs, Infrastructure, Settings)
   const navigation = [
     { name: 'Dashboard', href: '/superadmin/dashboard', icon: LayoutDashboard },
     { name: 'Companies', href: '/superadmin/tenants', icon: Building2 },
+    { name: 'Global Search', href: '/superadmin/search', icon: Search },
     { name: 'Subscriptions', href: '/superadmin/subscriptions', icon: DollarSign },
     { name: 'Audit Logs', href: '/superadmin/audit-logs', icon: ClipboardList },
     { name: 'Error Logs', href: '/superadmin/error-logs', icon: AlertCircle },
     { name: 'Infrastructure', href: '/superadmin/health', icon: Activity },
+    { name: 'SQL Console', href: '/superadmin/sql-console', icon: Database },
     { name: 'Settings', href: '/superadmin/settings', icon: Shield },
   ]
 
@@ -73,6 +108,22 @@ const SuperAdminLayout = () => {
             <Logo size="default" showText={false} className="h-6 w-6" />
             <span className="text-base font-bold">HexaBill Platform</span>
           </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault()
+              navigate('/superadmin/error-logs')
+            }}
+            className="relative p-2.5 rounded-xl hover:bg-indigo-700 active:bg-indigo-600 transition-all duration-200 touch-manipulation shadow-md"
+            aria-label="Alerts"
+          >
+            <Bell className="h-5 w-5" />
+            {(alertSummary?.unresolvedCount ?? 0) > 0 && (
+              <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 flex items-center justify-center text-[10px] font-bold text-white bg-red-500 rounded-full">
+                {alertSummary.unresolvedCount > 99 ? '99+' : alertSummary.unresolvedCount}
+              </span>
+            )}
+          </button>
           <button
             type="button"
             onClick={(e) => {
@@ -218,6 +269,12 @@ const SuperAdminLayout = () => {
 
       {/* Main content - full width, dynamic padding for sidebar */}
       <div className={`transition-all duration-300 ${sidebarCollapsed ? 'lg:pl-20' : 'lg:pl-72'}`}>
+        {backendUnavailable && (
+          <div className="flex items-center justify-center gap-2 px-4 py-2 bg-amber-100 border-b border-amber-200 text-amber-900 text-sm text-left">
+            <span className="font-medium">Service temporarily unavailable.</span>
+            <span>Service is temporarily unavailable. Please try again in a moment or contact your administrator.</span>
+          </div>
+        )}
         {/* Top Header Bar - Premium Design */}
         <div className={`hidden lg:block fixed top-0 right-0 bg-white border-b border-gray-200 shadow-sm z-30 transition-all duration-300 ${sidebarCollapsed ? 'left-20' : 'left-72'}`}>
           <div className="flex items-center justify-between px-6 py-4">
@@ -228,6 +285,51 @@ const SuperAdminLayout = () => {
               </div>
             </div>
             <div className="flex items-center space-x-3 flex-shrink-0">
+              {/* Error alert bell #49 */}
+              <div className="relative" ref={alertDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowAlertDropdown(!showAlertDropdown)}
+                  className="relative p-2.5 hover:bg-gray-100 rounded-xl transition-all"
+                  aria-label="Critical alerts"
+                >
+                  <Bell className="h-5 w-5 text-gray-600" />
+                  {(alertSummary?.unresolvedCount ?? 0) > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center text-xs font-bold text-white bg-red-500 rounded-full">
+                      {alertSummary.unresolvedCount > 99 ? '99+' : alertSummary.unresolvedCount}
+                    </span>
+                  )}
+                </button>
+                {showAlertDropdown && (
+                  <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-lg border border-gray-200 py-2 z-50">
+                    <div className="px-4 py-2 border-b border-gray-100">
+                      <p className="text-sm font-semibold text-gray-900">Critical events</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {alertSummary?.unresolvedCount ?? 0} unresolved · {(alertSummary?.last24hCount ?? 0)} in last 24h
+                        {(alertSummary?.last1hCount ?? 0) > 0 && ` · ${alertSummary.last1hCount} in last 1h`}
+                      </p>
+                    </div>
+                    {(alertSummary?.recent?.length ?? 0) > 0 && (
+                      <div className="max-h-48 overflow-y-auto px-4 py-2 space-y-2">
+                        {alertSummary.recent.map((r) => (
+                          <div key={r.id} className="text-xs text-gray-700 border-l-2 border-red-200 pl-2 py-1">
+                            <p className="truncate font-medium">{r.message || 'Error'}</p>
+                            <p className="text-gray-500">{r.tenantName ? `${r.tenantName}` : 'Platform'} · {r.createdAt ? new Date(r.createdAt).toLocaleString() : ''}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <Link
+                      to="/superadmin/error-logs"
+                      onClick={() => setShowAlertDropdown(false)}
+                      className="block px-4 py-3 text-sm font-medium text-indigo-600 hover:bg-indigo-50"
+                    >
+                      View Error Logs →
+                    </Link>
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white rounded-lg shadow-md">
                 <Shield className="h-4 w-4" />
                 <span className="text-sm font-semibold">System Admin</span>

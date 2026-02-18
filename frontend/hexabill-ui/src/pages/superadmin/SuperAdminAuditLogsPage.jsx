@@ -4,10 +4,35 @@ import { superAdminAPI } from '../../services'
 import { LoadingCard } from '../../components/Loading'
 import toast from 'react-hot-toast'
 
-const PAGE_SIZE = 20
+const PAGE_SIZE = 50
+
+const ACTION_TYPE_OPTIONS = [
+  { value: '', label: 'All actions' },
+  { value: 'User Created', label: 'User Created' },
+  { value: 'User Updated', label: 'User Updated' },
+  { value: 'User Deleted', label: 'User Deleted' },
+  { value: 'Password Reset', label: 'Password Reset' },
+  { value: 'Sale Created', label: 'Sale / Invoice Created' },
+  { value: 'Sale Updated', label: 'Sale Updated' },
+  { value: 'Sale Deleted', label: 'Sale / Invoice Deleted' },
+  { value: 'Payment Created', label: 'Payment Created' },
+  { value: 'Payment Updated', label: 'Payment Updated' },
+  { value: 'Payment Deleted', label: 'Payment Deleted' },
+  { value: 'Expense Created', label: 'Expense Created' },
+  { value: 'Expense Updated', label: 'Expense Updated' },
+  { value: 'Expense Deleted', label: 'Expense Deleted' },
+  { value: 'Purchase Created', label: 'Purchase Created' },
+  { value: 'Purchase Updated', label: 'Purchase Updated' },
+  { value: 'Purchase Deleted', label: 'Purchase Deleted' },
+  { value: 'SuperAdmin', label: 'SuperAdmin (force logout, clear data, etc.)' },
+  { value: 'Backup', label: 'Backup (created, restored, deleted)' },
+  { value: 'SYSTEM_RESET', label: 'System Reset' },
+  { value: 'TENANT_DATA_CLEAR', label: 'Tenant Data Clear' }
+]
 
 const SuperAdminAuditLogsPage = () => {
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [logs, setLogs] = useState([])
   const [totalCount, setTotalCount] = useState(0)
   const [page, setPage] = useState(1)
@@ -23,10 +48,11 @@ const SuperAdminAuditLogsPage = () => {
   })
   const [appliedFilters, setAppliedFilters] = useState({})
 
-  const fetchLogs = async () => {
+  const fetchLogs = async (pageNum = page, append = false) => {
     try {
       setError(null)
-      setLoading(true)
+      if (!append) setLoading(true)
+      else setLoadingMore(true)
       const actionFilter = appliedFilters.superAdminOnly ? 'SuperAdmin' : (appliedFilters.action || undefined)
       const params = {
         tenantId: appliedFilters.tenantId ? parseInt(appliedFilters.tenantId, 10) : undefined,
@@ -35,25 +61,32 @@ const SuperAdminAuditLogsPage = () => {
         fromDate: appliedFilters.fromDate || undefined,
         toDate: appliedFilters.toDate || undefined
       }
-      const res = await superAdminAPI.getAuditLogs(page, PAGE_SIZE, params)
+      const res = await superAdminAPI.getAuditLogs(pageNum, PAGE_SIZE, params)
       const data = res?.data ?? res
       const items = data?.items ?? []
-      setLogs(items)
+      if (append) {
+        setLogs((prev) => [...prev, ...items])
+        setPage(pageNum)
+      } else {
+        setLogs(items)
+        setPage(pageNum)
+      }
       setTotalCount(data?.totalCount ?? 0)
       setTotalPages(data?.totalPages ?? Math.ceil((data?.totalCount ?? 0) / PAGE_SIZE))
     } catch (err) {
       console.error('Audit logs fetch error:', err)
       setError(err?.response?.data?.message || err?.message || 'Failed to load audit logs')
-      setLogs([])
+      if (!append) setLogs([])
       toast.error('Failed to load audit logs')
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
   }
 
   useEffect(() => {
-    fetchLogs()
-  }, [page, appliedFilters])
+    fetchLogs(1, false)
+  }, [appliedFilters])
 
   const handleApplyFilters = () => {
     setAppliedFilters({ ...filters })
@@ -117,13 +150,16 @@ const SuperAdminAuditLogsPage = () => {
             onChange={(e) => setFilters((f) => ({ ...f, userId: e.target.value }))}
             className="px-3 py-2 border border-neutral-200 rounded-lg text-sm"
           />
-          <input
-            type="text"
-            placeholder="Action (e.g. Login)"
+          <select
             value={filters.action}
             onChange={(e) => setFilters((f) => ({ ...f, action: e.target.value }))}
-            className="px-3 py-2 border border-neutral-200 rounded-lg text-sm"
-          />
+            className="px-3 py-2 border border-neutral-200 rounded-lg text-sm bg-white"
+            title="Filter by action type"
+          >
+            {ACTION_TYPE_OPTIONS.map((opt) => (
+              <option key={opt.value || 'all'} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
           <input
             type="date"
             placeholder="From"
@@ -139,6 +175,7 @@ const SuperAdminAuditLogsPage = () => {
             className="px-3 py-2 border border-neutral-200 rounded-lg text-sm"
           />
         </div>
+        <p className="text-xs text-neutral-500 mt-1">Action filter: backend matches action text containing the selected value.</p>
         <div className="flex flex-wrap gap-2 mt-3">
           <button
             onClick={handleApplyFilters}
@@ -179,12 +216,13 @@ const SuperAdminAuditLogsPage = () => {
                 <th className="px-4 py-3 text-left text-xs font-semibold text-neutral-600 uppercase tracking-wider">Action</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-neutral-600 uppercase tracking-wider">Entity</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-neutral-600 uppercase tracking-wider">Details</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-neutral-600 uppercase tracking-wider">Old → New</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-200">
               {logs.length === 0 && !error && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-neutral-500">
+                  <td colSpan={7} className="px-4 py-12 text-center text-neutral-500">
                     <FileText className="h-12 w-12 mx-auto text-neutral-300 mb-2" />
                     <p>No audit logs yet</p>
                   </td>
@@ -202,6 +240,26 @@ const SuperAdminAuditLogsPage = () => {
                     {log.entityType ? `${log.entityType}${log.entityId != null ? ` #${log.entityId}` : ''}` : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm text-neutral-600 max-w-[200px] truncate" title={log.details}>{log.details ?? '—'}</td>
+                  <td className="px-4 py-3 text-sm text-neutral-600 max-w-[220px]">
+                    {log.oldValues || log.newValues ? (
+                      <span className="block text-xs" title={[log.oldValues, log.newValues].filter(Boolean).join(' → ')}>
+                        {[log.oldValues, log.newValues].filter(Boolean).map((raw, i) => {
+                          try {
+                            const obj = typeof raw === 'string' ? JSON.parse(raw) : raw
+                            if (obj && typeof obj === 'object') {
+                              const parts = []
+                              if (obj.GrandTotal != null) parts.push(`Total: ${obj.GrandTotal}`)
+                              if (obj.Subtotal != null) parts.push(`Sub: ${obj.Subtotal}`)
+                              if (obj.Discount != null) parts.push(`Disc: ${obj.Discount}`)
+                              if (obj.VatTotal != null) parts.push(`VAT: ${obj.VatTotal}`)
+                              if (parts.length) return parts.join(', ')
+                            }
+                            return String(raw).slice(0, 60)
+                          } catch { return String(raw).slice(0, 60) }
+                        }).join(' → ')}
+                      </span>
+                    ) : '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -209,22 +267,43 @@ const SuperAdminAuditLogsPage = () => {
         </div>
         <div className="px-4 py-3 bg-neutral-50 border-t border-neutral-200 flex items-center justify-between flex-wrap gap-2">
           <p className="text-sm text-neutral-500">
-            Page {page} of {totalPages || 1} · {totalCount} total
+            Showing {logs.length} of {totalCount} · Page {page} of {totalPages || 1}
           </p>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              onClick={() => {
+                const nextPage = Math.max(1, page - 1)
+                fetchLogs(nextPage, false)
+                setPage(nextPage)
+              }}
               disabled={page <= 1 || loading}
               className="p-2 rounded-lg border border-neutral-200 hover:bg-neutral-100 disabled:opacity-50 disabled:pointer-events-none"
+              title="Previous page"
             >
               <ChevronLeft className="h-5 w-5" />
             </button>
             <button
-              onClick={() => setPage((p) => Math.min(totalPages || 1, p + 1))}
+              onClick={() => {
+                const nextPage = Math.min(totalPages || 1, page + 1)
+                fetchLogs(nextPage, false)
+                setPage(nextPage)
+              }}
               disabled={page >= (totalPages || 1) || loading}
               className="p-2 rounded-lg border border-neutral-200 hover:bg-neutral-100 disabled:opacity-50 disabled:pointer-events-none"
+              title="Next page"
             >
               <ChevronRight className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => {
+                const nextPage = page + 1
+                fetchLogs(nextPage, true)
+                setPage(nextPage)
+              }}
+              disabled={page >= (totalPages || 1) || loading || loadingMore}
+              className="px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 rounded-lg border border-blue-200 hover:bg-blue-100 disabled:opacity-50 disabled:pointer-events-none"
+            >
+              {loadingMore ? 'Loading…' : 'Load more'}
             </button>
           </div>
         </div>

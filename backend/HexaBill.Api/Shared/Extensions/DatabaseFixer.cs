@@ -114,6 +114,14 @@ namespace HexaBill.Api.Shared.Extensions
                     // Purchases table - Ensure all columns exist (CRITICAL FIX)
                     ("ALTER TABLE Purchases ADD COLUMN ExternalReference TEXT NULL", "Purchases", "ExternalReference"),
                     ("ALTER TABLE Purchases ADD COLUMN ExpenseCategory TEXT NULL", "Purchases", "ExpenseCategory"),
+
+                    // Expenses table - Fixes 500 on /api/expenses when columns missing (SQLite)
+                    ("ALTER TABLE Expenses ADD COLUMN AttachmentUrl TEXT NULL", "Expenses", "AttachmentUrl"),
+                    ("ALTER TABLE Expenses ADD COLUMN Status INTEGER NOT NULL DEFAULT 1", "Expenses", "Status"),
+                    ("ALTER TABLE Expenses ADD COLUMN RecurringExpenseId INTEGER NULL", "Expenses", "RecurringExpenseId"),
+                    ("ALTER TABLE Expenses ADD COLUMN ApprovedBy INTEGER NULL", "Expenses", "ApprovedBy"),
+                    ("ALTER TABLE Expenses ADD COLUMN ApprovedAt TEXT NULL", "Expenses", "ApprovedAt"),
+                    ("ALTER TABLE Expenses ADD COLUMN RejectionReason TEXT NULL", "Expenses", "RejectionReason"),
                 };
 
                 int columnsAdded = 0;

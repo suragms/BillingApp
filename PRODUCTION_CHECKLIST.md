@@ -47,6 +47,13 @@ Do the steps below in order. When you finish, you can say **Production ready**.
 
 ---
 
+## Error handling and production readiness
+
+- **Error matrix:** See `docs/ERROR_MATRIX.md` for how each HTTP status (400, 401, 403, 404, 500, 502, 503) is mapped to user messages and retry.
+- **Risk factors:** Same email across tenants is allowed (user choice); enforce strong password and rate limiting. SQLite is not for production scale; use PostgreSQL in production. Unhandled 500s are persisted to ErrorLogs (Super Admin can view).
+
+---
+
 ## Your 4 questions (one-line answers)
 
 - **How much errors?** → **Zero** red errors in F12 when you use the app. You check this in Part 4.

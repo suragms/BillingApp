@@ -162,6 +162,7 @@ namespace HexaBill.Api.Modules.Billing
                     IsLocked = s.IsLocked,
                     LastModifiedAt = s.LastModifiedAt,
                     LastModifiedBy = s.LastModifiedByUser != null ? s.LastModifiedByUser.Name : null,
+                    EditReason = s.EditReason, // Reason for editing invoice
                     RowVersion = s.RowVersion != null && s.RowVersion.Length > 0 
                         ? Convert.ToBase64String(s.RowVersion) 
                         : null
@@ -251,6 +252,7 @@ namespace HexaBill.Api.Modules.Billing
                 IsLocked = sale.IsLocked,
                 LastModifiedAt = sale.LastModifiedAt,
                 LastModifiedBy = sale.LastModifiedByUser?.Name,
+                EditReason = sale.EditReason, // Reason for editing invoice
                 RowVersion = sale.RowVersion != null && sale.RowVersion.Length > 0 
                     ? Convert.ToBase64String(sale.RowVersion) 
                     : null
@@ -424,8 +426,8 @@ namespace HexaBill.Api.Modules.Billing
                     }
                 }
 
-                // Calculate totals
-                var vatPercent = await GetVatPercentAsync();
+                // Calculate totals — VAT% from company settings (tenant-scoped), not hardcoded. PRODUCTION_MASTER_TODO #37
+                var vatPercent = await GetVatPercentAsync(tenantId);
                 decimal subtotal = 0;
                 decimal vatTotal = 0;
 
@@ -489,7 +491,7 @@ namespace HexaBill.Api.Modules.Billing
                         throw new InvalidOperationException($"Insufficient stock for {product.NameEn}. Available: {product.StockQty}, Required: {baseQty}");
                     }
 
-                    // Calculate line totals: Total = qty × price, VAT = Total × 5%, Amount = Total + VAT
+                    // Calculate line totals: Total = qty × price, VAT = Total × vatPercent%, Amount = Total + VAT
                     var rowTotal = item.UnitPrice * item.Qty;
                     var vatAmount = Math.Round(rowTotal * (vatPercent / 100), 2);
                     var lineAmount = rowTotal + vatAmount;
@@ -871,7 +873,7 @@ namespace HexaBill.Api.Modules.Billing
             {
                 // Similar to CreateSaleAsync but without stock validation
                 var invoiceNo = await GenerateInvoiceNumberAsync(tenantId);
-                var vatPercent = await GetVatPercentAsync();
+                var vatPercent = await GetVatPercentAsync(tenantId);
                 decimal subtotal = 0;
                 decimal vatTotal = 0;
 
@@ -885,7 +887,7 @@ namespace HexaBill.Api.Modules.Billing
                         throw new InvalidOperationException($"Product with ID {item.ProductId} not found");
 
                     var baseQty = item.Qty * product.ConversionToBase;
-                    // Calculate line totals: Total = qty × price, VAT = Total × 5%, Amount = Total + VAT
+                    // Calculate line totals: Total = qty × price, VAT = Total × vatPercent%, Amount = Total + VAT
                     var rowTotal = item.UnitPrice * item.Qty;
                     var vatAmount = Math.Round(rowTotal * (vatPercent / 100), 2);
                     var lineAmount = rowTotal + vatAmount;
@@ -1233,6 +1235,7 @@ namespace HexaBill.Api.Modules.Billing
 
                 var versionJson = JsonSerializer.Serialize(versionSnapshot);
                 var newVersion = saleForUpdate.Version + 1;
+                var oldTotalsForAudit = new { GrandTotal = saleForUpdate.GrandTotal, Subtotal = saleForUpdate.Subtotal, Discount = saleForUpdate.Discount, VatTotal = saleForUpdate.VatTotal };
 
                 // Use validation service for robust validation
                 var validationResult = await _validationService.ValidateSaleEditAsync(saleId, request.Items);
@@ -1304,8 +1307,8 @@ namespace HexaBill.Api.Modules.Billing
 
                 // REVERSE customer balance will be recalculated after new amounts are set
 
-                // Calculate new totals
-                var vatPercent = await GetVatPercentAsync();
+                // Calculate new totals — VAT% from company settings (tenant-scoped)
+                var vatPercent = await GetVatPercentAsync(tenantId);
                 decimal subtotal = 0;
                 decimal vatTotal = 0;
 
@@ -1712,14 +1715,19 @@ namespace HexaBill.Api.Modules.Billing
                 };
                 _context.InvoiceVersions.Add(invoiceVersion);
 
-                // Create audit log
+                // Create audit log with old/new values for edits
+                var newTotalsForAudit = new { GrandTotal = saleForUpdate.GrandTotal, Subtotal = saleForUpdate.Subtotal, Discount = saleForUpdate.Discount, VatTotal = saleForUpdate.VatTotal };
                 var auditLog = new AuditLog
                 {
-                    OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
-                    TenantId = tenantId, // CRITICAL: Set new TenantId
+                    OwnerId = tenantId,
+                    TenantId = tenantId,
                     UserId = userId,
                     Action = "Sale Updated",
+                    EntityType = "Sale",
+                    EntityId = saleId,
                     Details = $"Invoice: {saleForUpdate.InvoiceNo} updated to Version {newVersion}. Reason: {editReason ?? "N/A"}",
+                    OldValues = JsonSerializer.Serialize(oldTotalsForAudit),
+                    NewValues = JsonSerializer.Serialize(newTotalsForAudit),
                     CreatedAt = DateTime.UtcNow
                 };
                 _context.AuditLogs.Add(auditLog);
@@ -2218,11 +2226,11 @@ namespace HexaBill.Api.Modules.Billing
             }
         }
 
-        private async Task<decimal> GetVatPercentAsync()
+        /// <summary>VAT% from company settings (tenant-scoped). Fallback 5 when not set. PRODUCTION_MASTER_TODO #37.</summary>
+        private async Task<decimal> GetVatPercentAsync(int tenantId)
         {
             var setting = await _context.Settings
-                .FirstOrDefaultAsync(s => s.Key == "VAT_PERCENT");
-            
+                .FirstOrDefaultAsync(s => s.Key == "VAT_PERCENT" && s.OwnerId == tenantId);
             return decimal.TryParse(setting?.Value, out decimal vatPercent) ? vatPercent : 5;
         }
 
@@ -2259,6 +2267,7 @@ namespace HexaBill.Api.Modules.Billing
                 CreatedAt = s.CreatedAt,
                 DeletedBy = s.DeletedByUser?.Name,
                 DeletedAt = s.DeletedAt,
+                EditReason = s.EditReason, // Reason for editing invoice
                 Items = s.Items.Select(i => new SaleItemDto
                 {
                     Id = i.Id,

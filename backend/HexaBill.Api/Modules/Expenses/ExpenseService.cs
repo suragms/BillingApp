@@ -15,8 +15,8 @@ namespace HexaBill.Api.Modules.Expenses
         Task<PagedResponse<ExpenseDto>> GetExpensesAsync(int tenantId, int page = 1, int pageSize = 10, string? category = null, DateTime? fromDate = null, DateTime? toDate = null, string? groupBy = null, int? branchId = null, IReadOnlyList<int>? staffAllowedBranchIds = null);
         Task<List<ExpenseAggregateDto>> GetExpensesAggregatedAsync(int tenantId, DateTime fromDate, DateTime toDate, string groupBy = "monthly", IReadOnlyList<int>? staffAllowedBranchIds = null); // weekly, monthly, yearly
         Task<ExpenseDto?> GetExpenseByIdAsync(int id, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null);
-        Task<ExpenseDto> CreateExpenseAsync(CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null);
-        Task<ExpenseDto?> UpdateExpenseAsync(int id, CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null);
+        Task<ExpenseDto> CreateExpenseAsync(CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null, IReadOnlyList<int>? staffAllowedRouteIds = null);
+        Task<ExpenseDto?> UpdateExpenseAsync(int id, CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null, IReadOnlyList<int>? staffAllowedRouteIds = null);
         Task<bool> DeleteExpenseAsync(int id, int userId, int tenantId);
         Task<List<string>> GetExpenseCategoriesAsync();
     }
@@ -40,6 +40,7 @@ namespace HexaBill.Api.Modules.Expenses
                 .Where(e => e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
                 .Include(e => e.Category)
                 .Include(e => e.Branch)
+                .Include(e => e.CreatedByUser)
                 .AsQueryable();
 
             // Staff: only see expenses for their assigned branches (and expenses with no branch if any). If Staff has no branches assigned, they see nothing.
@@ -81,12 +82,21 @@ namespace HexaBill.Api.Modules.Expenses
                     Id = e.Id,
                     BranchId = e.BranchId,
                     BranchName = e.Branch != null ? e.Branch.Name : null,
+                    RouteId = e.RouteId,
+                    RouteName = e.Route != null ? e.Route.Name : null,
                     CategoryId = e.CategoryId,
-                    CategoryName = e.Category.Name,
-                    CategoryColor = e.Category.ColorCode,
+                    CategoryName = e.Category != null ? e.Category.Name : "",
+                    CategoryColor = e.Category != null ? e.Category.ColorCode : "#6B7280",
                     Amount = e.Amount,
                     Date = e.Date,
-                    Note = e.Note
+                    Note = e.Note,
+                    AttachmentUrl = e.AttachmentUrl,
+                    Status = e.Status.ToString(),
+                    RecurringExpenseId = e.RecurringExpenseId,
+                    ApprovedBy = e.ApprovedBy,
+                    ApprovedAt = e.ApprovedAt,
+                    RejectionReason = e.RejectionReason,
+                    CreatedByName = e.CreatedByUser != null ? e.CreatedByUser.Name : ""
                 })
                 .ToListAsync();
 
@@ -249,6 +259,8 @@ namespace HexaBill.Api.Modules.Expenses
                 .Where(e => e.Id == id && e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
                 .Include(e => e.Category)
                 .Include(e => e.Branch)
+                .Include(e => e.Route)
+                .Include(e => e.CreatedByUser)
                 .FirstOrDefaultAsync();
             if (expense == null) return null;
             if (staffAllowedBranchIds != null)
@@ -262,16 +274,25 @@ namespace HexaBill.Api.Modules.Expenses
                 Id = expense.Id,
                 BranchId = expense.BranchId,
                 BranchName = expense.Branch?.Name,
+                RouteId = expense.RouteId,
+                RouteName = expense.Route?.Name,
                 CategoryId = expense.CategoryId,
                 CategoryName = expense.Category.Name,
                 CategoryColor = expense.Category.ColorCode,
                 Amount = expense.Amount,
                 Date = expense.Date,
-                Note = expense.Note
+                Note = expense.Note,
+                AttachmentUrl = expense.AttachmentUrl,
+                Status = expense.Status.ToString(),
+                RecurringExpenseId = expense.RecurringExpenseId,
+                ApprovedBy = expense.ApprovedBy,
+                ApprovedAt = expense.ApprovedAt,
+                RejectionReason = expense.RejectionReason,
+                CreatedByName = expense.CreatedByUser?.Name ?? ""
             };
         }
 
-        public async Task<ExpenseDto> CreateExpenseAsync(CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null)
+        public async Task<ExpenseDto> CreateExpenseAsync(CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null, IReadOnlyList<int>? staffAllowedRouteIds = null)
         {
             if (staffAllowedBranchIds != null)
             {
@@ -280,6 +301,11 @@ namespace HexaBill.Api.Modules.Expenses
                 if (request.BranchId.HasValue && !staffAllowedBranchIds.Contains(request.BranchId.Value))
                     throw new InvalidOperationException("You can only add expenses to your assigned branch(es).");
             }
+            if (staffAllowedRouteIds != null && request.RouteId.HasValue)
+            {
+                if (staffAllowedRouteIds.Count == 0 || !staffAllowedRouteIds.Contains(request.RouteId.Value))
+                    throw new InvalidOperationException("You can only add expenses to your assigned route(s).");
+            }
 
             var category = await _context.ExpenseCategories.FindAsync(request.CategoryId);
             if (category == null)
@@ -287,18 +313,33 @@ namespace HexaBill.Api.Modules.Expenses
                 throw new InvalidOperationException($"Category with ID {request.CategoryId} not found");
             }
 
+            // Determine status: Staff expenses are Pending, Owner/Admin are Approved
+            var isStaff = staffAllowedBranchIds != null;
+            var expenseStatus = isStaff ? ExpenseStatus.Pending : ExpenseStatus.Approved;
+            
             var expense = new Expense
             {
                 OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
                 TenantId = tenantId, // CRITICAL: Set new TenantId
                 BranchId = request.BranchId,
+                RouteId = request.RouteId,
                 CategoryId = request.CategoryId,
                 Amount = request.Amount,
                 Date = request.Date.ToUtcKind(), // Ensure UTC for PostgreSQL
                 Note = request.Note,
+                AttachmentUrl = request.AttachmentUrl,
+                Status = expenseStatus,
+                RecurringExpenseId = request.RecurringExpenseId,
                 CreatedBy = userId,
                 CreatedAt = DateTime.UtcNow
             };
+            
+            // Auto-approve if owner/admin
+            if (!isStaff)
+            {
+                expense.ApprovedBy = userId;
+                expense.ApprovedAt = DateTime.UtcNow;
+            }
 
             _context.Expenses.Add(expense);
             await _context.SaveChangesAsync();
@@ -319,26 +360,38 @@ namespace HexaBill.Api.Modules.Expenses
 
             await _context.Entry(expense).Reference(e => e.Category).LoadAsync();
 
+            await _context.Entry(expense).Reference(e => e.CreatedByUser).LoadAsync();
+            
             return new ExpenseDto
             {
                 Id = expense.Id,
                 BranchId = expense.BranchId,
                 BranchName = null,
+                RouteId = expense.RouteId,
+                RouteName = null,
                 CategoryId = expense.CategoryId,
                 CategoryName = expense.Category.Name,
                 CategoryColor = expense.Category.ColorCode,
                 Amount = expense.Amount,
                 Date = expense.Date,
-                Note = expense.Note
+                Note = expense.Note,
+                AttachmentUrl = expense.AttachmentUrl,
+                Status = expense.Status.ToString(),
+                RecurringExpenseId = expense.RecurringExpenseId,
+                ApprovedBy = expense.ApprovedBy,
+                ApprovedAt = expense.ApprovedAt,
+                RejectionReason = expense.RejectionReason,
+                CreatedByName = expense.CreatedByUser?.Name ?? ""
             };
         }
 
-        public async Task<ExpenseDto?> UpdateExpenseAsync(int id, CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null)
+        public async Task<ExpenseDto?> UpdateExpenseAsync(int id, CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null, IReadOnlyList<int>? staffAllowedRouteIds = null)
         {
             var expense = await _context.Expenses
                 .Where(e => e.Id == id && e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
                 .Include(e => e.Category)
                 .Include(e => e.Branch)
+                .Include(e => e.Route)
                 .FirstOrDefaultAsync();
             if (expense == null) return null;
             if (staffAllowedBranchIds != null)
@@ -349,6 +402,11 @@ namespace HexaBill.Api.Modules.Expenses
                 if (request.BranchId.HasValue && !staffAllowedBranchIds.Contains(request.BranchId.Value))
                     throw new InvalidOperationException("You can only assign expenses to your assigned branch(es).");
             }
+            if (staffAllowedRouteIds != null && request.RouteId.HasValue)
+            {
+                if (staffAllowedRouteIds.Count == 0 || !staffAllowedRouteIds.Contains(request.RouteId.Value))
+                    throw new InvalidOperationException("You can only assign expenses to your assigned route(s).");
+            }
 
             var category = await _context.ExpenseCategories.FindAsync(request.CategoryId);
             if (category == null)
@@ -357,10 +415,13 @@ namespace HexaBill.Api.Modules.Expenses
             }
 
             expense.BranchId = request.BranchId;
+            expense.RouteId = request.RouteId;
             expense.CategoryId = request.CategoryId;
             expense.Amount = request.Amount;
             expense.Date = request.Date.ToUtcKind(); // Ensure UTC for PostgreSQL
             expense.Note = request.Note;
+            expense.AttachmentUrl = request.AttachmentUrl;
+            expense.RecurringExpenseId = request.RecurringExpenseId;
 
             await _context.SaveChangesAsync();
 
@@ -380,18 +441,29 @@ namespace HexaBill.Api.Modules.Expenses
 
             await _context.Entry(expense).Reference(e => e.Category).LoadAsync();
             await _context.Entry(expense).Reference(e => e.Branch).LoadAsync();
+            await _context.Entry(expense).Reference(e => e.Route).LoadAsync();
+            await _context.Entry(expense).Reference(e => e.CreatedByUser).LoadAsync();
 
             return new ExpenseDto
             {
                 Id = expense.Id,
                 BranchId = expense.BranchId,
                 BranchName = expense.Branch?.Name,
+                RouteId = expense.RouteId,
+                RouteName = expense.Route?.Name,
                 CategoryId = expense.CategoryId,
                 CategoryName = expense.Category.Name,
                 CategoryColor = expense.Category.ColorCode,
                 Amount = expense.Amount,
                 Date = expense.Date,
-                Note = expense.Note
+                Note = expense.Note,
+                AttachmentUrl = expense.AttachmentUrl,
+                Status = expense.Status.ToString(),
+                RecurringExpenseId = expense.RecurringExpenseId,
+                ApprovedBy = expense.ApprovedBy,
+                ApprovedAt = expense.ApprovedAt,
+                RejectionReason = expense.RejectionReason,
+                CreatedByName = expense.CreatedByUser?.Name ?? ""
             };
         }
 

@@ -136,7 +136,8 @@ namespace HexaBill.Api.Shared.Middleware
                     int? tenantId = null;
                     if (context.User?.Identity?.IsAuthenticated == true)
                         tenantId = context.User.GetTenantIdOrNullForSystemAdmin();
-                    var userIdClaim = context.User?.FindFirst("user_id")?.Value;
+                    var userIdClaim = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                        ?? context.User?.FindFirst("id")?.Value;
                     int? userId = int.TryParse(userIdClaim, out var uid) ? uid : null;
                     await errorLogService.LogAsync(
                         requestId,

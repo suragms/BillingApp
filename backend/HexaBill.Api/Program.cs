@@ -111,8 +111,13 @@ else if (!string.IsNullOrWhiteSpace(databaseUrl))
         
         // Use default PostgreSQL port (5432) if not specified
         var dbPort = uri.Port > 0 ? uri.Port : 5432;
+        // Password may contain ':' or '@' - split only on first colon (Render/standard format: user:password)
+        var userInfo = uri.UserInfo ?? "";
+        var firstColon = userInfo.IndexOf(':');
+        var username = firstColon >= 0 ? userInfo.Substring(0, firstColon) : userInfo;
+        var password = firstColon >= 0 ? userInfo.Substring(firstColon + 1) : "";
         
-        connectionString = $"Host={uri.Host};Port={dbPort};Database={uri.AbsolutePath.TrimStart('/')};Username={uri.UserInfo.Split(':')[0]};Password={uri.UserInfo.Split(':')[1]};SSL Mode=Require;Trust Server Certificate=true";
+        connectionString = $"Host={uri.Host};Port={dbPort};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};SSL Mode=Require;Trust Server Certificate=true";
         // Include Error Detail in Development or when explicitly requested (needed to diagnose DbUpdateException)
         var includeErrorDetail = string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase)
             || string.Equals(Environment.GetEnvironmentVariable("INCLUDE_PG_ERROR_DETAIL"), "true", StringComparison.OrdinalIgnoreCase);
@@ -180,6 +185,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 {
     if (usePostgreSQL)
     {
+        // For 2000+ tenants or multiple instances, use PgBouncer (point connection string to pooler) or set Maximum Pool Size in connection string. See docs/CONNECTION_POOLING_AND_PGBOUNCER.md.
         options.UseNpgsql(connectionString);
         logger.LogInformation("✅ PostgreSQL database configured");
     }
@@ -244,7 +250,9 @@ builder.Services.AddScoped<ISubscriptionService, SubscriptionService>(); // Subs
 builder.Services.AddScoped<ISignupService, SignupService>(); // Public signup service
 builder.Services.AddScoped<HexaBill.Api.Modules.SuperAdmin.IDemoRequestService, HexaBill.Api.Modules.SuperAdmin.DemoRequestService>(); // Demo request approval flow
 builder.Services.AddScoped<IErrorLogService, ErrorLogService>(); // Enterprise: persist 500 errors for SuperAdmin
-builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.LogOnlyAutomationProvider>(); // Goal Step 4: log-only, plug WhatsApp/Email later
+// Automation provider - can switch between LogOnlyAutomationProvider (dev) and EmailAutomationProvider (production)
+// For production with email: builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.EmailAutomationProvider>();
+builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.LogOnlyAutomationProvider>(); // Log-only for now, switch to EmailAutomationProvider when email is configured
 builder.Services.AddSingleton<HexaBill.Api.Modules.Auth.ILoginLockoutService, HexaBill.Api.Modules.Auth.LoginLockoutService>(); // Login lockout 5 attempts, 15 min
 builder.Services.AddSingleton<HexaBill.Api.Shared.Services.ITenantActivityService, HexaBill.Api.Shared.Services.TenantActivityService>(); // SuperAdmin Live Activity
 
@@ -266,6 +274,8 @@ using (var scope = app.Services.CreateScope())
         try
         {
             ctx.Database.ExecuteSqlRaw(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""SessionVersion"" integer NOT NULL DEFAULT 0");
+            ctx.Database.ExecuteSqlRaw(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""ProfilePhotoUrl"" character varying(500) NULL");
+            ctx.Database.ExecuteSqlRaw(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""LanguagePreference"" character varying(10) NULL");
             ctx.Database.ExecuteSqlRaw(@"ALTER TABLE ""Customers"" ADD COLUMN IF NOT EXISTS ""PaymentTerms"" character varying(100) NULL");
             // Customers.BranchId and RouteId (EnterpriseBranchRoutePlan) - add if missing
             ctx.Database.ExecuteSqlRaw(@"ALTER TABLE ""Customers"" ADD COLUMN IF NOT EXISTS ""BranchId"" integer NULL");
@@ -294,8 +304,86 @@ using (var scope = app.Services.CreateScope())
                         ALTER TABLE ""Branches"" ADD COLUMN ""IsActive"" boolean NOT NULL DEFAULT true;
                     END IF;
                 END $$");
+            // UserSessions table for "who is logged in" / recent logins
+            ctx.Database.ExecuteSqlRaw(@"
+                CREATE TABLE IF NOT EXISTS ""UserSessions"" (
+                    ""Id"" serial PRIMARY KEY,
+                    ""UserId"" integer NOT NULL,
+                    ""TenantId"" integer NOT NULL,
+                    ""LoginAt"" timestamp with time zone NOT NULL,
+                    ""UserAgent"" character varying(500) NULL,
+                    ""IpAddress"" character varying(45) NULL,
+                    CONSTRAINT ""FK_UserSessions_Users_UserId"" FOREIGN KEY (""UserId"") REFERENCES ""Users""(""Id"") ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS ""IX_UserSessions_TenantId"" ON ""UserSessions"" (""TenantId"");
+                CREATE INDEX IF NOT EXISTS ""IX_UserSessions_LoginAt"" ON ""UserSessions"" (""LoginAt"");
+                ");
         }
-        catch { /* columns may already exist */ }
+        catch { /* columns/tables may already exist */ }
+    }
+    else if (ctx.Database.IsSqlite())
+    {
+        // CRITICAL: Add User columns and UserSessions BEFORE any requests (fixes "no such column: u.LanguagePreference" on login)
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Users ADD COLUMN SessionVersion INTEGER NOT NULL DEFAULT 0"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Users ADD COLUMN ProfilePhotoUrl TEXT NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Users ADD COLUMN LanguagePreference TEXT NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Users ADD COLUMN LastLoginAt TEXT NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Users ADD COLUMN LastActiveAt TEXT NULL"); } catch { }
+        try
+        {
+            ctx.Database.ExecuteSqlRaw(@"
+                CREATE TABLE IF NOT EXISTS UserSessions (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    UserId INTEGER NOT NULL,
+                    TenantId INTEGER NOT NULL,
+                    LoginAt TEXT NOT NULL,
+                    UserAgent TEXT NULL,
+                    IpAddress TEXT NULL,
+                    FOREIGN KEY (UserId) REFERENCES Users(Id) ON DELETE CASCADE
+                )");
+            ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_UserSessions_TenantId ON UserSessions (TenantId)");
+            ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_UserSessions_LoginAt ON UserSessions (LoginAt)");
+        }
+        catch { /* table may already exist */ }
+        // Expenses table - fixes 500 on /api/expenses (prevents server from crashing when dashboard loads)
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN AttachmentUrl TEXT NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN Status INTEGER NOT NULL DEFAULT 1"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN RecurringExpenseId INTEGER NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN ApprovedBy INTEGER NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN ApprovedAt TEXT NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN RejectionReason TEXT NULL"); } catch { }
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN RouteId INTEGER NULL"); } catch { }
+        // RecurringExpenses table - fixes 500 on /api/expenses/recurring when migrations did not run
+        try
+        {
+            ctx.Database.ExecuteSqlRaw(@"
+                CREATE TABLE IF NOT EXISTS RecurringExpenses (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    OwnerId INTEGER NOT NULL,
+                    TenantId INTEGER NULL,
+                    BranchId INTEGER NULL,
+                    CategoryId INTEGER NOT NULL,
+                    Amount TEXT NOT NULL,
+                    Note TEXT NULL,
+                    Frequency INTEGER NOT NULL,
+                    DayOfRecurrence INTEGER NULL,
+                    StartDate TEXT NOT NULL,
+                    EndDate TEXT NULL,
+                    IsActive INTEGER NOT NULL DEFAULT 1,
+                    CreatedBy INTEGER NOT NULL,
+                    CreatedAt TEXT NOT NULL,
+                    UpdatedAt TEXT NOT NULL,
+                    FOREIGN KEY (CategoryId) REFERENCES ExpenseCategories(Id) ON DELETE CASCADE,
+                    FOREIGN KEY (BranchId) REFERENCES Branches(Id),
+                    FOREIGN KEY (CreatedBy) REFERENCES Users(Id) ON DELETE CASCADE
+                )");
+            ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_RecurringExpenses_TenantId ON RecurringExpenses (TenantId)");
+            ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_RecurringExpenses_BranchId ON RecurringExpenses (BranchId)");
+            ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_RecurringExpenses_CategoryId ON RecurringExpenses (CategoryId)");
+        }
+        catch { /* table may already exist */ }
+        // ErrorLogs.ResolvedAt - fixes 500 on /api/superadmin/alert-summary and /api/error-logs (SQLite)
+        try { ctx.Database.ExecuteSqlRaw("ALTER TABLE ErrorLogs ADD COLUMN ResolvedAt TEXT NULL"); } catch { }
     }
 }
 
@@ -471,19 +559,42 @@ _ = Task.Run(async () =>
         {
             var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             
-            // CRITICAL: Ensure SessionVersion exists (fixes 42703 login error when migrations haven't run)
+            // CRITICAL: Ensure SessionVersion, ProfilePhotoUrl, LanguagePreference exist (fixes login when migrations haven't run)
             if (context.Database.IsNpgsql())
             {
                 try
                 {
                     await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""SessionVersion"" integer NOT NULL DEFAULT 0");
+                    await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""ProfilePhotoUrl"" character varying(500) NULL");
+                    await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""LanguagePreference"" character varying(10) NULL");
                     await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE ""Customers"" ADD COLUMN IF NOT EXISTS ""PaymentTerms"" character varying(100) NULL");
-                    initLogger.LogInformation("PostgreSQL: SessionVersion and PaymentTerms columns ensured");
+                    await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE ""ErrorLogs"" ADD COLUMN IF NOT EXISTS ""ResolvedAt"" timestamp with time zone NULL");
+                    initLogger.LogInformation("PostgreSQL: SessionVersion, ProfilePhotoUrl, LanguagePreference, PaymentTerms and ErrorLogs.ResolvedAt columns ensured");
                 }
                 catch (Exception ex)
                 {
                     initLogger.LogWarning(ex, "PostgreSQL: Ensure columns failed (may already exist): {Message}", ex.Message);
                 }
+            }
+            else if (context.Database.IsSqlite())
+            {
+                try
+                {
+                    await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE Users ADD COLUMN SessionVersion INTEGER NOT NULL DEFAULT 0");
+                    initLogger.LogInformation("SQLite: SessionVersion column added (if missing)");
+                }
+                catch { /* column may already exist */ }
+                try
+                {
+                    await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE Users ADD COLUMN ProfilePhotoUrl TEXT NULL");
+                }
+                catch { /* column may already exist */ }
+                try
+                {
+                    await context.Database.ExecuteSqlRawAsync(@"ALTER TABLE Users ADD COLUMN LanguagePreference TEXT NULL");
+                    initLogger.LogInformation("SQLite: LanguagePreference column added (if missing)");
+                }
+                catch { /* column may already exist */ }
             }
             
             // Create performance indexes for large datasets (100K+ records)
@@ -516,7 +627,7 @@ _ = Task.Run(async () =>
                 
                 if (!string.IsNullOrEmpty(indexSql))
                 {
-                    initLogger.LogInformation("Found index SQL file at: {Path}", foundPath);
+                    initLogger.LogInformation("Index SQL file found at: {Path}", foundPath ?? "(unknown)");
                     // Execute each CREATE INDEX statement separately (SQLite doesn't support multi-statement in one call)
                     var statements = indexSql.Split(';', StringSplitOptions.RemoveEmptyEntries)
                         .Select(s => s.Trim())
@@ -541,7 +652,7 @@ _ = Task.Run(async () =>
                 }
                 else
                 {
-                    initLogger.LogWarning("Index SQL file not found. Searched paths: {Paths}", string.Join(", ", possiblePaths));
+                    initLogger.LogWarning("Index SQL file not found. Searched paths: {Paths}. See docs/PERFORMANCE_INDEXES.md for manual CREATE INDEX steps.", string.Join("; ", possiblePaths));
                 }
             }
             catch (Exception idxEx)

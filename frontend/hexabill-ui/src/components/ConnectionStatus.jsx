@@ -48,8 +48,8 @@ function ConnectionStatus() {
             <WifiOff className="h-5 w-5 text-red-600" strokeWidth={2} />
           </div>
           <div>
-            <p className="text-sm font-semibold">No connection</p>
-            <p className="text-xs text-red-600/90">Check your network or try again shortly.</p>
+            <p className="text-sm font-semibold">Service temporarily unavailable</p>
+            <p className="text-xs text-red-600/90">Service may be temporarily unavailable. Please try again or contact support.</p>
           </div>
           <button
             type="button"

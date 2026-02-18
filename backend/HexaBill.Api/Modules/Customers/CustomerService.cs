@@ -118,12 +118,14 @@ namespace HexaBill.Api.Modules.Customers
                     Trn = c.Trn,
                     Address = c.Address,
                     CreditLimit = c.CreditLimit,
+                    PaymentTerms = c.PaymentTerms,
                     Balance = c.Balance,
                     CustomerType = c.CustomerType.ToString(),
                     TotalSales = c.TotalSales,
                     TotalPayments = c.TotalPayments,
                     PendingBalance = c.PendingBalance,
                     LastPaymentDate = c.LastPaymentDate,
+                    LastActivity = c.LastActivity,
                     BranchId = c.BranchId,
                     RouteId = c.RouteId
             }).ToList();
@@ -2040,10 +2042,9 @@ namespace HexaBill.Api.Modules.Customers
                 .Where(s => s.CustomerId == customerId && s.TenantId == tenantId && !s.IsDeleted)
                 .SumAsync(s => (decimal?)s.GrandTotal) ?? 0m;
 
-            // CRITICAL FIX: Count ALL non-VOID payments (including PENDING) to match invoice PaidAmount
-            // This ensures consistency - invoice shows PaidAmount for all payments, so balance should too
+            // CLEARED only (PRODUCTION_MASTER_TODO #7): aligns with Sale.PaidAmount; pending cheques don't reduce balance
             var totalPayments = await _context.Payments
-                .Where(p => p.CustomerId == customerId && p.TenantId == tenantId && p.Status != PaymentStatus.VOID)
+                .Where(p => p.CustomerId == customerId && p.TenantId == tenantId && p.Status == PaymentStatus.CLEARED)
                 .SumAsync(p => (decimal?)p.Amount) ?? 0m;
 
             // Calculate total sales returns (credits)
@@ -2091,9 +2092,9 @@ namespace HexaBill.Api.Modules.Customers
                     .Where(s => s.CustomerId == customer.Id && s.TenantId == tenantId && !s.IsDeleted)
                     .SumAsync(s => (decimal?)s.GrandTotal) ?? 0m;
 
-                // CRITICAL FIX: Count ALL non-VOID payments (including PENDING) to match invoice PaidAmount
+                // CLEARED only (aligns with Sale.PaidAmount; pending cheques don't reduce balance)
                 var totalPayments = await _context.Payments
-                    .Where(p => p.CustomerId == customer.Id && p.TenantId == tenantId && p.Status != PaymentStatus.VOID)
+                    .Where(p => p.CustomerId == customer.Id && p.TenantId == tenantId && p.Status == PaymentStatus.CLEARED)
                     .SumAsync(p => (decimal?)p.Amount) ?? 0m;
 
                 var totalSalesReturns = await _context.SaleReturns

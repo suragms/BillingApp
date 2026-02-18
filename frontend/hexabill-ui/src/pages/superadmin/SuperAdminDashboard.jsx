@@ -12,7 +12,9 @@ import {
   ChevronRight,
   Wallet,
   Zap,
-  TrendingUp
+  TrendingUp,
+  ClipboardCheck,
+  XCircle
 } from 'lucide-react'
 import { superAdminAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
@@ -27,13 +29,39 @@ const SuperAdminDashboard = () => {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [dashboard, setDashboard] = useState(null)
+  const [revenueReport, setRevenueReport] = useState(null)
   const [tenantActivity, setTenantActivity] = useState([])
   const [activityLoading, setActivityLoading] = useState(false)
   const [extendingTrialId, setExtendingTrialId] = useState(null)
+  const [onboardingReport, setOnboardingReport] = useState(null)
+  const [onboardingIncompleteOnly, setOnboardingIncompleteOnly] = useState(false)
+  const [onboardingLoading, setOnboardingLoading] = useState(false)
 
   useEffect(() => {
     fetchDashboard()
   }, [])
+
+  useEffect(() => {
+    if (!dashboard) return
+    superAdminAPI.getRevenueReport()
+      .then((res) => { if (res?.success && res?.data) setRevenueReport(res.data) })
+      .catch(() => setRevenueReport(null))
+  }, [dashboard])
+
+  useEffect(() => {
+    const fetchOnboarding = async () => {
+      try {
+        setOnboardingLoading(true)
+        const res = await superAdminAPI.getOnboardingReport(onboardingIncompleteOnly)
+        if (res?.success && res?.data) setOnboardingReport(res.data)
+      } catch {
+        setOnboardingReport(null)
+      } finally {
+        setOnboardingLoading(false)
+      }
+    }
+    fetchOnboarding()
+  }, [onboardingIncompleteOnly])
 
   useEffect(() => {
     let interval
@@ -119,9 +147,9 @@ const SuperAdminDashboard = () => {
     },
     {
       title: 'Platform MRR',
-      value: formatCurrency(Number(dashboard?.mrr) || 0),
+      value: dashboard?.hasSubscriptionData === false ? 'No subscription data' : formatCurrency(Number(dashboard?.mrr) || 0),
       icon: Wallet,
-      desc: 'Subscription revenue from active plans'
+      desc: dashboard?.hasSubscriptionData === false ? 'Subscriptions table has no plans yet' : 'Subscription revenue from active plans'
     },
     {
       title: 'Total Active Users',
@@ -130,10 +158,12 @@ const SuperAdminDashboard = () => {
       desc: 'Across all companies'
     },
     {
-      title: 'Total DB Storage Used',
+      title: dashboard?.isRealDatabaseSize ? 'Total DB Storage Used' : 'Estimated DB Storage',
       value: `${(dashboard?.estimatedStorageUsedMb ?? 0).toFixed(0)} MB`,
       icon: Database,
-      desc: 'Estimated (row-based)'
+      desc: dashboard?.isRealDatabaseSize
+        ? 'PostgreSQL database size (pg_database_size)'
+        : (dashboard?.storageFormulaDescription || 'Row-based estimate')
     }
   ]
 
@@ -151,12 +181,13 @@ const SuperAdminDashboard = () => {
           </div>
         </div>
 
-        {/* Live Activity - Top tenants by API calls (last 60 min) */}
+        {/* Live Activity - Top tenants by API calls (last 60 min). In-memory; resets on server restart. */}
         <div className="mb-6 p-4 bg-white border border-neutral-200 rounded-xl">
-          <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-3">
+          <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-1">
             <Zap className="h-5 w-5 text-amber-500" />
             Live Activity — Top 10 by API calls (last 60 min)
           </h3>
+          <p className="text-xs text-neutral-500 mb-3">Activity resets on server restart.</p>
           {activityLoading && tenantActivity.length === 0 ? (
             <p className="text-sm text-neutral-500">Loading…</p>
           ) : tenantActivity.length === 0 ? (
@@ -292,6 +323,151 @@ const SuperAdminDashboard = () => {
               </div>
             )
           })}
+        </div>
+
+        {/* Platform revenue report: MRR trend, churn, new signups (#45) */}
+        {revenueReport && (
+          <div className="mt-8 p-4 sm:p-6 bg-white border border-neutral-200 rounded-xl shadow-sm">
+            <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-4">
+              <TrendingUp className="h-5 w-5 text-emerald-600" />
+              Platform revenue report
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+              <div className="p-3 bg-neutral-50 rounded-lg">
+                <p className="text-xs text-neutral-500">Current MRR</p>
+                <p className="text-lg font-bold text-neutral-900">{formatCurrency(Number(revenueReport.currentMrr) || 0)}</p>
+              </div>
+              <div className="p-3 bg-neutral-50 rounded-lg">
+                <p className="text-xs text-neutral-500">Active subscriptions</p>
+                <p className="text-lg font-bold text-neutral-900">{revenueReport.currentActiveSubscriptions ?? 0}</p>
+              </div>
+              <div className="p-3 bg-neutral-50 rounded-lg">
+                <p className="text-xs text-neutral-500">Churned (30 days)</p>
+                <p className="text-lg font-bold text-red-600">{revenueReport.churnedLast30Days ?? 0}</p>
+              </div>
+              <div className="p-3 bg-neutral-50 rounded-lg">
+                <p className="text-xs text-neutral-500">Churn rate</p>
+                <p className="text-lg font-bold text-neutral-900">{Number(revenueReport.churnRatePercent ?? 0).toFixed(1)}%</p>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-neutral-200">
+                    <th className="text-left py-2 font-medium text-neutral-600">Month</th>
+                    <th className="text-right py-2 font-medium text-neutral-600">MRR</th>
+                    <th className="text-right py-2 font-medium text-neutral-600">New signups</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(revenueReport.mrrByMonth || []).map((row) => (
+                    <tr key={row.month} className="border-b border-neutral-100">
+                      <td className="py-2 text-neutral-800">{row.month}</td>
+                      <td className="text-right py-2 font-medium">{formatCurrency(Number(row.mrr) || 0)}</td>
+                      <td className="text-right py-2">{row.newSignups ?? 0}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Tenant onboarding tracker: who completed setup, who stuck (#46) */}
+        <div className="mt-8 p-4 sm:p-6 bg-white border border-neutral-200 rounded-xl shadow-sm">
+          <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-4">
+            <ClipboardCheck className="h-5 w-5 text-blue-600" />
+            Tenant onboarding tracker
+          </h3>
+          <p className="text-sm text-neutral-500 mb-3">
+            Steps: Company info → VAT → Add product → Add customer → Create invoice. Derived from tenant data.
+          </p>
+          <label className="flex items-center gap-2 mb-4 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={onboardingIncompleteOnly}
+              onChange={(e) => setOnboardingIncompleteOnly(e.target.checked)}
+              className="rounded border-neutral-300"
+            />
+            <span className="text-sm text-neutral-700">Show incomplete only (stuck)</span>
+          </label>
+          {onboardingLoading ? (
+            <p className="text-sm text-neutral-500">Loading…</p>
+          ) : onboardingReport ? (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+                <div className="p-3 bg-neutral-50 rounded-lg">
+                  <p className="text-xs text-neutral-500">Total tenants</p>
+                  <p className="text-lg font-bold text-neutral-900">{onboardingReport.totalTenants ?? 0}</p>
+                </div>
+                <div className="p-3 bg-emerald-50 rounded-lg">
+                  <p className="text-xs text-emerald-700">Complete (5/5)</p>
+                  <p className="text-lg font-bold text-emerald-800">{onboardingReport.completeCount ?? 0}</p>
+                </div>
+                <div className="p-3 bg-amber-50 rounded-lg">
+                  <p className="text-xs text-amber-700">Incomplete</p>
+                  <p className="text-lg font-bold text-amber-800">{onboardingReport.incompleteCount ?? 0}</p>
+                </div>
+                <div className="p-3 bg-neutral-50 rounded-lg">
+                  <p className="text-xs text-neutral-500">Showing</p>
+                  <p className="text-lg font-bold text-neutral-900">{(onboardingReport.tenants || []).length}</p>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-neutral-200">
+                      <th className="text-left py-2 font-medium text-neutral-600">Tenant</th>
+                      <th className="text-left py-2 font-medium text-neutral-600">Status</th>
+                      <th className="text-center py-2 font-medium text-neutral-600" title="Company info">1</th>
+                      <th className="text-center py-2 font-medium text-neutral-600" title="VAT">2</th>
+                      <th className="text-center py-2 font-medium text-neutral-600" title="Product">3</th>
+                      <th className="text-center py-2 font-medium text-neutral-600" title="Customer">4</th>
+                      <th className="text-center py-2 font-medium text-neutral-600" title="Invoice">5</th>
+                      <th className="text-right py-2 font-medium text-neutral-600">Steps</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(onboardingReport.tenants || []).map((row) => (
+                      <tr
+                        key={row.tenantId}
+                        className="border-b border-neutral-100 hover:bg-neutral-50 cursor-pointer"
+                        onClick={() => navigate(`/superadmin/tenants/${row.tenantId}`)}
+                      >
+                        <td className="py-2 font-medium text-neutral-900">{row.tenantName}</td>
+                        <td className="py-2 text-neutral-600">{row.status ?? '—'}</td>
+                        <td className="py-2 text-center">
+                          {row.step1CompanyInfo ? <CheckCircle className="h-4 w-4 text-emerald-600 inline" /> : <XCircle className="h-4 w-4 text-neutral-300 inline" />}
+                        </td>
+                        <td className="py-2 text-center">
+                          {row.step2VatSetup ? <CheckCircle className="h-4 w-4 text-emerald-600 inline" /> : <XCircle className="h-4 w-4 text-neutral-300 inline" />}
+                        </td>
+                        <td className="py-2 text-center">
+                          {row.step3HasProduct ? <CheckCircle className="h-4 w-4 text-emerald-600 inline" /> : <XCircle className="h-4 w-4 text-neutral-300 inline" />}
+                        </td>
+                        <td className="py-2 text-center">
+                          {row.step4HasCustomer ? <CheckCircle className="h-4 w-4 text-emerald-600 inline" /> : <XCircle className="h-4 w-4 text-neutral-300 inline" />}
+                        </td>
+                        <td className="py-2 text-center">
+                          {row.step5HasInvoice ? <CheckCircle className="h-4 w-4 text-emerald-600 inline" /> : <XCircle className="h-4 w-4 text-neutral-300 inline" />}
+                        </td>
+                        <td className="py-2 text-right font-medium">
+                          {row.completedSteps}/5 {row.isComplete && <span className="text-emerald-600">Done</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {(onboardingReport.tenants || []).length === 0 && (
+                <p className="text-sm text-neutral-500 py-4">
+                  {onboardingIncompleteOnly ? 'No incomplete tenants.' : 'No tenants to show.'}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-sm text-neutral-500">Could not load onboarding report.</p>
+          )}
         </div>
       </div>
     </div>

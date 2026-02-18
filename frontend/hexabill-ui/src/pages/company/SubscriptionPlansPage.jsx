@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Check, CreditCard, Calendar, Users, FileText, Package, Database, Zap, Shield } from 'lucide-react'
 import { subscriptionAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
@@ -7,6 +8,7 @@ import Modal from '../../components/Modal'
 import toast from 'react-hot-toast'
 
 const SubscriptionPlansPage = () => {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [loading, setLoading] = useState(true)
   const [plans, setPlans] = useState([])
   const [currentSubscription, setCurrentSubscription] = useState(null)
@@ -17,6 +19,20 @@ const SubscriptionPlansPage = () => {
   useEffect(() => {
     fetchData()
   }, [])
+
+  // After Stripe redirect: show success/cancel and refetch
+  useEffect(() => {
+    const success = searchParams.get('success')
+    const cancel = searchParams.get('cancel')
+    if (success === '1') {
+      toast.success('Payment successful! Your subscription is active.')
+      setSearchParams({})
+      fetchData()
+    } else if (cancel === '1') {
+      toast('Payment cancelled.')
+      setSearchParams({})
+    }
+  }, [searchParams])
 
   const fetchData = async () => {
     try {
@@ -48,13 +64,24 @@ const SubscriptionPlansPage = () => {
 
   const confirmSubscribe = async () => {
     if (!selectedPlan) return
+    const cycle = billingCycle === 'Monthly' ? 'Monthly' : 'Yearly'
+    const baseUrl = window.location.origin
+    const successUrl = `${baseUrl}/subscription-plans?success=1`
+    const cancelUrl = `${baseUrl}/subscription-plans?cancel=1`
 
     try {
-      const response = await subscriptionAPI.createSubscription(
-        selectedPlan.id,
-        billingCycle === 'Monthly' ? 'Monthly' : 'Yearly'
-      )
+      // Try Stripe Checkout first (PRODUCTION_MASTER_TODO #43)
+      const checkoutRes = await subscriptionAPI.createCheckoutSession(selectedPlan.id, cycle, successUrl, cancelUrl)
+      if (checkoutRes?.success && checkoutRes?.data?.url) {
+        setShowConfirmModal(false)
+        setSelectedPlan(null)
+        toast.success('Redirecting to payment...')
+        window.location.href = checkoutRes.data.url
+        return
+      }
 
+      // Fallback: no payment gateway configured — create trial subscription
+      const response = await subscriptionAPI.createSubscription(selectedPlan.id, cycle)
       if (response.success) {
         toast.success('Subscription created successfully!')
         setShowConfirmModal(false)
@@ -64,6 +91,24 @@ const SubscriptionPlansPage = () => {
         toast.error(response.message || 'Failed to create subscription')
       }
     } catch (error) {
+      if (error?.response?.status === 404) {
+        // Gateway not configured — create trial
+        try {
+          const response = await subscriptionAPI.createSubscription(selectedPlan.id, cycle)
+          if (response.success) {
+            toast.success('Subscription created (trial).')
+            setShowConfirmModal(false)
+            setSelectedPlan(null)
+            fetchData()
+          } else {
+            toast.error(response.message || 'Failed to create subscription')
+          }
+        } catch (e) {
+          console.error(e)
+          toast.error('Failed to create subscription')
+        }
+        return
+      }
       console.error('Error creating subscription:', error)
       toast.error('Failed to create subscription')
     }

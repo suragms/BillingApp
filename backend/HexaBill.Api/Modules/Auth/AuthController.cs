@@ -7,22 +7,25 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using HexaBill.Api.Modules.Auth;
 using HexaBill.Api.Models;
-using HexaBill.Api.Shared.Extensions; // MULTI-TENANT
+using HexaBill.Api.Shared.Extensions;
+using HexaBill.Api.Shared.Security;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace HexaBill.Api.Modules.Auth
 {
     [ApiController]
     [Route("api/[controller]")]
-    public class AuthController : TenantScopedController // MULTI-TENANT
+    public class AuthController : TenantScopedController
     {
         private readonly IAuthService _authService;
         private readonly ILoginLockoutService _lockout;
+        private readonly IFileUploadService _fileUploadService;
 
-        public AuthController(IAuthService authService, ILoginLockoutService lockout)
+        public AuthController(IAuthService authService, ILoginLockoutService lockout, IFileUploadService fileUploadService)
         {
             _authService = authService;
             _lockout = lockout;
+            _fileUploadService = fileUploadService;
         }
 
         [HttpPost("login")]
@@ -351,7 +354,9 @@ namespace HexaBill.Api.Modules.Auth
                     Role = user.Role.ToString(),
                     tenantId = user.TenantId ?? 0,
                     DashboardPermissions = user.DashboardPermissions,
-                    CreatedAt = user.CreatedAt
+                    CreatedAt = user.CreatedAt,
+                    ProfilePhotoUrl = user.ProfilePhotoUrl,
+                    LanguagePreference = user.LanguagePreference
                 };
 
                 return Ok(new ApiResponse<UserProfileDto>
@@ -413,6 +418,49 @@ namespace HexaBill.Api.Modules.Auth
                     Message = ex.Message,
                     Errors = new List<string> { ex.Message }
                 });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<UserProfileDto>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpPost("profile/photo")]
+        [Authorize]
+        public async Task<ActionResult<ApiResponse<UserProfileDto>>> UploadProfilePhoto([FromForm] IFormFile file)
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<UserProfileDto> { Success = false, Message = "Invalid token" });
+                }
+                if (file == null || file.Length == 0)
+                {
+                    return BadRequest(new ApiResponse<UserProfileDto> { Success = false, Message = "No file uploaded" });
+                }
+                var relativePath = await _fileUploadService.UploadProfilePhotoAsync(file, userId);
+                var result = await _authService.SetProfilePhotoAsync(userId, relativePath);
+                if (result == null)
+                {
+                    return NotFound(new ApiResponse<UserProfileDto> { Success = false, Message = "User not found" });
+                }
+                return Ok(new ApiResponse<UserProfileDto>
+                {
+                    Success = true,
+                    Message = "Profile photo updated",
+                    Data = result
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ApiResponse<UserProfileDto> { Success = false, Message = ex.Message });
             }
             catch (Exception ex)
             {

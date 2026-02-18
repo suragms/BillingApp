@@ -72,6 +72,8 @@ namespace HexaBill.Api.Modules.Users
                         Role = u.Role.ToString(),
                         Phone = u.Phone,
                         CreatedAt = u.CreatedAt,
+                        LastLoginAt = u.LastLoginAt,
+                        LastActiveAt = u.LastActiveAt,
                         AssignedBranchIds = _context.BranchStaff.Where(bs => bs.UserId == u.Id).Select(bs => bs.BranchId).ToList(),
                         AssignedRouteIds = _context.RouteStaff.Where(rs => rs.UserId == u.Id).Select(rs => rs.RouteId).ToList()
                     })
@@ -99,6 +101,33 @@ namespace HexaBill.Api.Modules.Users
                     Message = "An error occurred",
                     Errors = new List<string> { ex.Message }
                 });
+            }
+        }
+
+        // PATCH: api/users/me/ping - Update current user's LastActiveAt for staff online indicator (Phase 6)
+        [HttpPatch("me/ping")]
+        public async Task<ActionResult<ApiResponse<object>>> PingMe()
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<object> { Success = false, Message = "Invalid user" });
+                }
+                var user = await _context.Users.FindAsync(userId);
+                if (user == null)
+                {
+                    // Avoid 404 when token valid but user row missing (e.g. seed mismatch); ping is best-effort
+                    return Ok(new ApiResponse<object> { Success = true, Data = new { lastActiveAt = (DateTime?)null } });
+                }
+                user.LastActiveAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                return Ok(new ApiResponse<object> { Success = true, Data = new { lastActiveAt = user.LastActiveAt } });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
             }
         }
 
@@ -156,6 +185,8 @@ namespace HexaBill.Api.Modules.Users
                         Role = u.Role.ToString(),
                         Phone = u.Phone,
                         CreatedAt = u.CreatedAt,
+                        LastLoginAt = u.LastLoginAt,
+                        LastActiveAt = u.LastActiveAt,
                         AssignedBranchIds = _context.BranchStaff.Where(bs => bs.UserId == u.Id).Select(bs => bs.BranchId).ToList(),
                         AssignedRouteIds = _context.RouteStaff.Where(rs => rs.UserId == u.Id).Select(rs => rs.RouteId).ToList()
                     })
@@ -398,8 +429,9 @@ namespace HexaBill.Api.Modules.Users
                     Email = user.Email,
                     Role = user.Role.ToString(),
                     Phone = user.Phone,
-
                     CreatedAt = user.CreatedAt,
+                    LastLoginAt = user.LastLoginAt,
+                    LastActiveAt = user.LastActiveAt,
                     AssignedBranchIds = await _context.BranchStaff.Where(bs => bs.UserId == user.Id).Select(bs => bs.BranchId).ToListAsync(),
                     AssignedRouteIds = await _context.RouteStaff.Where(rs => rs.UserId == user.Id).Select(rs => rs.RouteId).ToListAsync()
                 };

@@ -1,12 +1,19 @@
 /*
-Purpose: Backup controller for manual backup, restore, and backup management
+Purpose: Backup controller for manual backup, restore, and backup management.
 Author: AI Assistant
 Date: 2025
+
+EPHEMERAL STORAGE (Production): Backup files under ./backups are stored on the
+app server's disk. On cloud hosts (e.g. Render), the filesystem is ephemeral:
+files are lost on restart/redeploy. Use "Download to browser" or external
+storage (S3/R2) for retention. See docs/BACKUP_AND_IMPORT_STRATEGY.md.
 */
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Modules.SuperAdmin;
 using HexaBill.Api.Models;
+using HexaBill.Api.Data;
 using HexaBill.Api.Shared.Services;
 using System.Collections.Generic;
 
@@ -18,24 +25,140 @@ namespace HexaBill.Api.Modules.SuperAdmin
     public class BackupController : ControllerBase
     {
         private const long MaxRestoreFileSizeBytes = 100L * 1024 * 1024; // 100 MB
+        private const int BackupScheduleOwnerId = 0; // Platform-wide schedule
         private readonly IComprehensiveBackupService _backupService;
         private readonly IAuditService _auditService;
+        private readonly AppDbContext _context;
 
-        public BackupController(IComprehensiveBackupService backupService, IAuditService auditService)
+        public BackupController(IComprehensiveBackupService backupService, IAuditService auditService, AppDbContext context)
         {
             _backupService = backupService;
             _auditService = auditService;
+            _context = context;
+        }
+
+        [HttpGet("schedule")]
+        public async Task<ActionResult<ApiResponse<BackupScheduleDto>>> GetSchedule()
+        {
+            try
+            {
+                var settings = await _context.Settings
+                    .Where(s => s.OwnerId == BackupScheduleOwnerId && (
+                        s.Key == "BACKUP_SCHEDULE_ENABLED" ||
+                        s.Key == "BACKUP_SCHEDULE_TIME" ||
+                        s.Key == "BACKUP_SCHEDULE_FREQUENCY" ||
+                        s.Key == "BACKUP_RETENTION_DAYS"))
+                    .ToDictionaryAsync(s => s.Key, s => s.Value ?? "");
+
+                var dto = new BackupScheduleDto
+                {
+                    Enabled = settings.GetValueOrDefault("BACKUP_SCHEDULE_ENABLED", "false").Equals("true", StringComparison.OrdinalIgnoreCase),
+                    Time = settings.GetValueOrDefault("BACKUP_SCHEDULE_TIME", "21:00"),
+                    Frequency = settings.GetValueOrDefault("BACKUP_SCHEDULE_FREQUENCY", "daily"),
+                    RetentionDays = int.TryParse(settings.GetValueOrDefault("BACKUP_RETENTION_DAYS", "30"), out var rd) ? rd : 30
+                };
+                return Ok(new ApiResponse<BackupScheduleDto>
+                {
+                    Success = true,
+                    Message = "Schedule retrieved",
+                    Data = dto
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<BackupScheduleDto>
+                {
+                    Success = false,
+                    Message = "Failed to get schedule",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpPost("schedule")]
+        public async Task<ActionResult<ApiResponse<BackupScheduleDto>>> SaveSchedule([FromBody] BackupScheduleDto dto)
+        {
+            try
+            {
+                if (dto == null) dto = new BackupScheduleDto();
+                var keys = new[] { "BACKUP_SCHEDULE_ENABLED", "BACKUP_SCHEDULE_TIME", "BACKUP_SCHEDULE_FREQUENCY", "BACKUP_RETENTION_DAYS" };
+                var values = new[]
+                {
+                    dto.Enabled ? "true" : "false",
+                    string.IsNullOrWhiteSpace(dto.Time) ? "21:00" : dto.Time.Trim(),
+                    string.IsNullOrWhiteSpace(dto.Frequency) || (dto.Frequency != "weekly" && dto.Frequency != "daily") ? "daily" : dto.Frequency,
+                    (dto.RetentionDays < 1 ? 30 : dto.RetentionDays > 365 ? 365 : dto.RetentionDays).ToString()
+                };
+                for (var i = 0; i < keys.Length; i++)
+                {
+                    var existing = await _context.Settings.FindAsync(keys[i], BackupScheduleOwnerId);
+                    if (existing != null)
+                    {
+                        existing.Value = values[i];
+                        existing.UpdatedAt = DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        _context.Settings.Add(new Setting
+                        {
+                            Key = keys[i],
+                            OwnerId = BackupScheduleOwnerId,
+                            Value = values[i],
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                    }
+                }
+                await _context.SaveChangesAsync();
+                await _auditService.LogAsync("Backup schedule updated", entityType: "Backup", details: $"Enabled={dto.Enabled}, Time={dto.Time}, Retention={dto.RetentionDays}");
+                return Ok(new ApiResponse<BackupScheduleDto>
+                {
+                    Success = true,
+                    Message = "Schedule saved",
+                    Data = new BackupScheduleDto { Enabled = dto.Enabled, Time = dto.Time ?? "21:00", Frequency = dto.Frequency ?? "daily", RetentionDays = dto.RetentionDays }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<BackupScheduleDto>
+                {
+                    Success = false,
+                    Message = "Failed to save schedule",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
         }
 
         [HttpPost("create")]
-        public async Task<ActionResult<ApiResponse<BackupInfo>>> CreateBackup(
-            [FromQuery] bool exportToDesktop = true,
+        public async Task<ActionResult> CreateBackup(
+            [FromQuery] bool downloadToBrowser = false,
             [FromQuery] bool uploadToGoogleDrive = false,
             [FromQuery] bool sendEmail = false)
         {
             try
             {
-                var fileName = await _backupService.CreateFullBackupAsync(exportToDesktop, uploadToGoogleDrive, sendEmail);
+                // Note: downloadToBrowser replaces exportToDesktop - backups are always created on server
+                // If downloadToBrowser=true, return the file directly for browser download
+                var fileName = await _backupService.CreateFullBackupAsync(false, uploadToGoogleDrive, sendEmail);
+                
+                if (downloadToBrowser)
+                {
+                    // Stream from local or S3 (S3 may have been used and local file deleted)
+                    var result = await _backupService.GetBackupForDownloadAsync(fileName);
+                    if (result == null)
+                    {
+                        return NotFound(new ApiResponse<object>
+                        {
+                            Success = false,
+                            Message = "Backup file not found"
+                        });
+                    }
+                    var (stream, downloadFileName) = result.Value;
+                    return new FileStreamResult(stream, "application/zip")
+                    {
+                        FileDownloadName = downloadFileName
+                    };
+                }
                 
                 var backups = await _backupService.GetBackupListAsync();
                 var backupInfo = backups.FirstOrDefault(b => b.FileName == fileName);
@@ -314,45 +437,20 @@ namespace HexaBill.Api.Modules.SuperAdmin
         {
             try
             {
-                var backups = await _backupService.GetBackupListAsync();
-                var backup = backups.FirstOrDefault(b => b.FileName == fileName);
-                
-                if (backup == null)
+                var result = await _backupService.GetBackupForDownloadAsync(fileName);
+                if (result == null)
                 {
                     return NotFound(new ApiResponse<object>
                     {
                         Success = false,
-                        Message = "Backup file not found"
+                        Message = "Backup file not found (check Server, Desktop, or S3)"
                     });
                 }
 
-                // Determine file path based on location
-                var backupDirectory = System.IO.Path.Combine(Directory.GetCurrentDirectory(), "backups");
-                var desktopPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "HexaBill_Backups");
-                
-                string? filePath = null;
-                if (backup.Location == "Server")
+                var (stream, downloadFileName) = result.Value;
+                return new FileStreamResult(stream, "application/zip")
                 {
-                    filePath = System.IO.Path.Combine(backupDirectory, fileName);
-                }
-                else if (backup.Location == "Desktop")
-                {
-                    filePath = System.IO.Path.Combine(desktopPath, fileName);
-                }
-
-                if (filePath == null || !System.IO.File.Exists(filePath))
-                {
-                    return NotFound(new ApiResponse<object>
-                    {
-                        Success = false,
-                        Message = "Backup file not found on disk"
-                    });
-                }
-
-                var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
-                return new FileContentResult(fileBytes, "application/zip")
-                {
-                    FileDownloadName = fileName
+                    FileDownloadName = downloadFileName
                 };
             }
             catch (Exception ex)
@@ -365,6 +463,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 });
             }
         }
+    }
+
+    public class BackupScheduleDto
+    {
+        public bool Enabled { get; set; }
+        public string Time { get; set; } = "21:00";
+        public string Frequency { get; set; } = "daily";
+        public int RetentionDays { get; set; } = 30;
     }
 }
 

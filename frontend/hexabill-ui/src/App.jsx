@@ -27,11 +27,15 @@ import SuperAdminErrorLogsPage from './pages/superadmin/SuperAdminErrorLogsPage'
 import SuperAdminAuditLogsPage from './pages/superadmin/SuperAdminAuditLogsPage'
 import SuperAdminSubscriptionsPage from './pages/superadmin/SuperAdminSubscriptionsPage'
 import SuperAdminSettingsPage from './pages/superadmin/SuperAdminSettingsPage'
+import SuperAdminGlobalSearchPage from './pages/superadmin/SuperAdminGlobalSearchPage'
+import SuperAdminSqlConsolePage from './pages/superadmin/SuperAdminSqlConsolePage'
 import SubscriptionPlansPage from './pages/company/SubscriptionPlansPage'
 import BranchesPage from './pages/company/BranchesPage'
 import BranchDetailPage from './pages/company/BranchDetailPage'
 import RoutesPage from './pages/company/RoutesPage'
 import RouteDetailPage from './pages/company/RouteDetailPage'
+import CustomersPage from './pages/company/CustomersPage'
+import CustomerDetailPage from './pages/company/CustomerDetailPage'
 import SignupPage from './pages/SignupPage'
 import OnboardingWizard from './pages/OnboardingWizard'
 import ErrorPage from './pages/ErrorPage'
@@ -91,6 +95,16 @@ function App() {
     return '/dashboard'
   }
 
+  // Staff cannot access Branches or Routes (list or detail) — redirect to dashboard; no deep-link bypass
+  const path = (location.pathname || '').replace(/\/+$/, '') || '/'
+  const isStaffOnly = user?.role?.toLowerCase() === 'staff' && !userIsSystemAdmin && !impersonatedTenantId
+  const isBranchesOrRoutes =
+    path === '/branches' || path.startsWith('/branches/') ||
+    path === '/routes' || path.startsWith('/routes/')
+  if (isStaffOnly && isBranchesOrRoutes) {
+    return <Navigate to="/dashboard" replace />
+  }
+
   return (
     <ErrorBoundary>
       <MaintenanceOverlay />
@@ -112,6 +126,8 @@ function App() {
             <Route path="/superadmin/audit-logs" element={<SuperAdminAuditLogsPage />} />
             <Route path="/superadmin/subscriptions" element={<SuperAdminSubscriptionsPage />} />
             <Route path="/superadmin/settings" element={<SuperAdminSettingsPage />} />
+            <Route path="/superadmin/search" element={<SuperAdminGlobalSearchPage />} />
+            <Route path="/superadmin/sql-console" element={<SuperAdminSqlConsolePage />} />
             <Route path="/help" element={<HelpPage />} />
             <Route path="/feedback" element={<FeedbackPage />} />
           </Route>
@@ -132,10 +148,13 @@ function App() {
               <Route path="/sales-ledger" element={<SalesLedgerPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/reports/outstanding" element={<ReportsPage />} />
-              <Route path="/branches" element={<BranchesPage />} />
-              <Route path="/branches/:id" element={<BranchDetailPage />} />
-              <Route path="/routes" element={<RoutesPage />} />
-              <Route path="/routes/:id" element={<RouteDetailPage />} />
+              {/* Staff cannot access branches/routes — redirect (defense in depth with early return above) */}
+              <Route path="/branches" element={isStaffOnly ? <Navigate to="/dashboard" replace /> : <BranchesPage />} />
+              <Route path="/branches/:id" element={isStaffOnly ? <Navigate to="/dashboard" replace /> : <BranchDetailPage />} />
+              <Route path="/routes" element={isStaffOnly ? <Navigate to="/dashboard" replace /> : <RoutesPage />} />
+              <Route path="/routes/:id" element={isStaffOnly ? <Navigate to="/dashboard" replace /> : <RouteDetailPage />} />
+              <Route path="/customers" element={<CustomersPage />} />
+              <Route path="/customers/:id" element={<CustomerDetailPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/backup" element={<BackupPage />} />

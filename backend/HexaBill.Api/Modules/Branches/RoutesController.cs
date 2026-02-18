@@ -169,5 +169,25 @@ namespace HexaBill.Api.Modules.Branches
             if (!ok) return NotFound(new ApiResponse<object> { Success = false, Message = "Assignment not found." });
             return Ok(new ApiResponse<object> { Success = true, Message = "Staff unassigned." });
         }
+
+        [HttpPut("{id}/visits/{customerId}")]
+        public async Task<ActionResult<ApiResponse<CustomerVisitDto>>> UpdateCustomerVisit(int id, int customerId, [FromBody] UpdateCustomerVisitRequest request)
+        {
+            var tenantId = CurrentTenantId;
+            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+            var userId = int.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "0");
+            var visit = await _routeService.UpdateCustomerVisitAsync(id, customerId, request, userId, tenantId);
+            if (visit == null) return NotFound(new ApiResponse<CustomerVisitDto> { Success = false, Message = "Route or customer not found." });
+            return Ok(new ApiResponse<CustomerVisitDto> { Success = true, Data = visit });
+        }
+
+        [HttpGet("{id}/visits")]
+        public async Task<ActionResult<ApiResponse<List<CustomerVisitDto>>>> GetCustomerVisits(int id, [FromQuery] DateTime? date)
+        {
+            var tenantId = CurrentTenantId;
+            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+            var visits = await _routeService.GetCustomerVisitsAsync(id, tenantId, date);
+            return Ok(new ApiResponse<List<CustomerVisitDto>> { Success = true, Data = visits });
+        }
     }
 }

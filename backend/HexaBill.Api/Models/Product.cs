@@ -20,6 +20,8 @@ namespace HexaBill.Api.Models
         [Required]
         [MaxLength(50)]
         public string Sku { get; set; } = string.Empty;
+        [MaxLength(100)]
+        public string? Barcode { get; set; } // Barcode for POS scanning (EAN-13, UPC, etc.)
         [Required]
         [MaxLength(200)]
         public string NameEn { get; set; } = string.Empty;
@@ -36,9 +38,16 @@ namespace HexaBill.Api.Models
         public DateTime? ExpiryDate { get; set; } // Track product expiry date
         public string? DescriptionEn { get; set; }
         public string? DescriptionAr { get; set; }
+        public int? CategoryId { get; set; } // Optional category assignment
+        [MaxLength(500)]
+        public string? ImageUrl { get; set; } // Product image URL (stored in cloud storage or local path)
+        public bool IsActive { get; set; } = true; // Soft delete: false = deactivated, true = active
         public byte[] RowVersion { get; set; } = Array.Empty<byte>();
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
+        
+        // Navigation property
+        public virtual ProductCategory? Category { get; set; }
     }
 }
 

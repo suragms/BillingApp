@@ -91,7 +91,12 @@ const Login = ({ isSuperAdminLogin = false }) => {
         }
       }
     } catch (error) {
-      if (error.response?.status === 429) {
+      const isConnectionError = !error.response &&
+        (error.code === 'ECONNREFUSED' || error.code === 'ERR_NETWORK' ||
+         error.message?.includes('Network Error') || error.message?.includes('Failed to fetch'))
+      if (isConnectionError) {
+        showToast.error('Service temporarily unavailable. Please try again in a moment or contact support.')
+      } else if (error.response?.status === 429) {
         showToast.error('Too many attempts. Please try again later.')
       } else if (error.response?.status === 401) {
         showToast.error('Email or password incorrect.')
@@ -105,20 +110,25 @@ const Login = ({ isSuperAdminLogin = false }) => {
     }
   }
 
+  const lang = typeof localStorage !== 'undefined' ? (localStorage.getItem('hexabill_lang') || 'en') : 'en'
+  const isRtl = lang === 'ar'
+  const dir = isRtl ? 'rtl' : 'ltr'
+  const textAlign = isRtl ? 'text-right' : 'text-left'
+
   return (
-    <div className="min-h-screen bg-neutral-50 flex">
-      {/* Task 31: Split screen - left brand (desktop), right form */}
+    <div className="min-h-screen bg-neutral-50 flex" dir={dir} lang={lang}>
+      {/* Split screen: left brand (desktop), right form — works LTR/RTL */}
       <div className="hidden lg:flex lg:w-1/2 lg:flex-col lg:items-center lg:justify-center lg:bg-primary-50 lg:border-r lg:border-primary-200">
-        <div className="max-w-sm px-8 text-center">
+        <div className={`max-w-sm px-8 ${isRtl ? 'text-right' : 'text-center'}`}>
           <Logo size="large" showText={true} />
-          <p className="mt-6 text-lg text-primary-700 font-medium">Billing & inventory for Indian SMBs</p>
-          <p className="mt-2 text-sm text-primary-600">Professional invoices, POS, and reports in one place.</p>
+          <p className="mt-6 text-lg text-primary-700 font-medium">Billing & inventory for businesses worldwide</p>
+          <p className="mt-2 text-sm text-primary-600">Gulf, India & global — invoices, POS, and reports in one place.</p>
         </div>
       </div>
       <div className="flex-1 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-md w-full space-y-8">
-        <div className="text-center">
-          <div className="mx-auto flex justify-center mb-4 lg:hidden">
+      <div className={`max-w-md w-full space-y-6 ${textAlign}`}>
+        <div className={isRtl ? 'text-right' : 'text-center'}>
+          <div className={`mb-4 lg:hidden ${isRtl ? 'flex justify-end' : 'mx-auto flex justify-center'}`}>
             <Logo size="large" showText={true} />
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-900" style={{ fontFamily: "'Inter', sans-serif" }}>
@@ -167,7 +177,7 @@ const Login = ({ isSuperAdminLogin = false }) => {
               />
               <button
                 type="button"
-                className="absolute right-3 top-8 text-neutral-400 hover:text-neutral-600"
+                className={`absolute top-8 text-neutral-400 hover:text-neutral-600 ${isRtl ? 'left-3' : 'right-3'}`}
                 onClick={() => setShowPassword(!showPassword)}
               >
                 {showPassword ? (
@@ -178,8 +188,8 @@ const Login = ({ isSuperAdminLogin = false }) => {
               </button>
             </div>
 
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
+            <div className={`flex items-center justify-between ${isRtl ? 'flex-row-reverse' : ''}`}>
+              <div className={`flex items-center ${isRtl ? 'flex-row-reverse' : ''}`}>
                 <input
                   id="remember-me"
                   name="remember-me"
@@ -188,13 +198,12 @@ const Login = ({ isSuperAdminLogin = false }) => {
                   onChange={(e) => setRememberMe(e.target.checked)}
                   className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-neutral-300 rounded"
                 />
-                <label htmlFor="remember-me" className="ml-2 block text-sm text-neutral-900">
+                <label htmlFor="remember-me" className={isRtl ? 'mr-2 ml-0' : 'ml-2'} dir={dir}>
                   Remember me
                 </label>
               </div>
-
               <div className="text-sm">
-                <a href="#" className="font-medium text-primary-600 hover:text-primary-500">
+                <a href="#" className="font-medium text-primary-600 hover:text-primary-500" dir={dir}>
                   Forgot your password?
                 </a>
               </div>
@@ -213,14 +222,14 @@ const Login = ({ isSuperAdminLogin = false }) => {
 
         {/* Admin Portal: link to main app so company users don't get stuck */}
         {isSuperAdminLogin && (
-          <div className="text-center mt-4">
-            <a href="/login" className="text-sm text-primary-600 hover:text-primary-700 font-medium">
-              Company user? Sign in to your billing app here →
+          <div className={isRtl ? 'text-right mt-4' : 'text-center mt-4'}>
+            <a href="/login" className="text-sm text-primary-600 hover:text-primary-700 font-medium" dir={dir}>
+              {isRtl ? '← Company user? Sign in to your billing app here' : 'Company user? Sign in to your billing app here →'}
             </a>
           </div>
         )}
 
-        <div className="text-center text-sm text-neutral-400" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <div className={`text-sm text-neutral-400 ${isRtl ? 'text-right' : 'text-center'}`} style={{ fontFamily: "'Inter', sans-serif" }}>
           <p>© 2026 HexaBill</p>
         </div>
       </div>

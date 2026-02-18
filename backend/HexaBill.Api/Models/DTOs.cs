@@ -73,19 +73,7 @@ namespace HexaBill.Api.Models
         public string Email { get; set; } = string.Empty;
     }
 
-    public class UserDto
-    {
-        public int Id { get; set; }
-        public string Name { get; set; } = string.Empty;
-        public string Email { get; set; } = string.Empty;
-        public string Role { get; set; } = string.Empty;
-        public string? Phone { get; set; }
-        public int OwnerId { get; set; } // MULTI-TENANT: Owner identification
-        public string? DashboardPermissions { get; set; }
-        public DateTime CreatedAt { get; set; }
-        public List<int> AssignedBranchIds { get; set; } = new();
-        public List<int> AssignedRouteIds { get; set; } = new();
-    }
+    // UserDto is in UserDto.cs to avoid duplicate
 
     public class CreateUserRequest
     {
@@ -127,6 +115,7 @@ namespace HexaBill.Api.Models
     {
         public int Id { get; set; }
         public string Sku { get; set; } = string.Empty;
+        public string? Barcode { get; set; }
         public string NameEn { get; set; } = string.Empty;
         public string? NameAr { get; set; }
         public string UnitType { get; set; } = string.Empty;
@@ -135,15 +124,20 @@ namespace HexaBill.Api.Models
         public decimal SellPrice { get; set; }
         public decimal StockQty { get; set; }
         public int ReorderLevel { get; set; }
-        public DateTime? ExpiryDate { get; set; } // ADDED: Track product expiry date
+        public DateTime? ExpiryDate { get; set; }
         public string? DescriptionEn { get; set; }
         public string? DescriptionAr { get; set; }
+        public int? CategoryId { get; set; }
+        public string? CategoryName { get; set; }
+        public string? ImageUrl { get; set; }
+        public bool IsActive { get; set; } = true;
     }
 
     public class CreateProductRequest
     {
         [Required]
         public string Sku { get; set; } = string.Empty;
+        public string? Barcode { get; set; }
         [Required]
         public string NameEn { get; set; } = string.Empty;
         public string? NameAr { get; set; }
@@ -155,12 +149,13 @@ namespace HexaBill.Api.Models
         public decimal CostPrice { get; set; }
         [Required]
         public decimal SellPrice { get; set; }
-        // Stock quantity and reorder level - editable from product form
         public decimal StockQty { get; set; } = 0;
         public int ReorderLevel { get; set; } = 0;
         public DateTime? ExpiryDate { get; set; }
         public string? DescriptionEn { get; set; }
         public string? DescriptionAr { get; set; }
+        public int? CategoryId { get; set; }
+        public string? ImageUrl { get; set; }
     }
 
     public class PriceChangeLogDto
@@ -174,6 +169,48 @@ namespace HexaBill.Api.Models
         public string? ChangedByName { get; set; }
         public string? Reason { get; set; }
         public DateTime ChangedAt { get; set; }
+    }
+
+    public class ProductCategoryDto
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public string? ColorCode { get; set; }
+        public int ProductCount { get; set; }
+    }
+
+    public class CreateProductCategoryRequest
+    {
+        [Required]
+        public string Name { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public string? ColorCode { get; set; }
+    }
+
+    public class BulkPriceUpdateRequest
+    {
+        public string? UnitType { get; set; }
+        public int? CategoryId { get; set; }
+        public bool UpdateSellPrice { get; set; }
+        public bool UpdateCostPrice { get; set; }
+        public string UpdateType { get; set; } = "percentage"; // "percentage" | "fixed"
+        public decimal Value { get; set; }
+        public List<BulkPriceUpdateItem> Items { get; set; } = new();
+    }
+
+    public class BulkPriceUpdateItem
+    {
+        public int ProductId { get; set; }
+        public decimal NewPrice { get; set; }
+    }
+
+    public class BulkPriceUpdateResponse
+    {
+        public int Updated { get; set; }
+        public int ProductsUpdated { get; set; }
+        public int Failed { get; set; }
+        public List<string> Errors { get; set; } = new();
     }
 
     // Sale DTOs
@@ -272,6 +309,7 @@ namespace HexaBill.Api.Models
         public DateTime? DeletedAt { get; set; } // Deleted at (for audit trail)
         public bool CreditLimitExceeded { get; set; } = false; // True if sale exceeds customer credit limit
         public string? CreditLimitWarning { get; set; } // Warning message if credit limit exceeded
+        public string? EditReason { get; set; }
     }
 
     public class SaleItemDto
@@ -285,6 +323,23 @@ namespace HexaBill.Api.Models
         public decimal Discount { get; set; }
         public decimal VatAmount { get; set; }
         public decimal LineTotal { get; set; }
+    }
+
+    public class HoldInvoiceRequest
+    {
+        public string? Name { get; set; }
+        public string? Notes { get; set; }
+        public object? InvoiceData { get; set; }
+    }
+
+    public class HeldInvoiceDto
+    {
+        public int Id { get; set; }
+        public int SaleId { get; set; }
+        public string? Name { get; set; }
+        public string? Notes { get; set; }
+        public object? InvoiceData { get; set; }
+        public DateTime? CreatedAt { get; set; }
     }
 
     // Purchase DTOs
@@ -342,6 +397,7 @@ namespace HexaBill.Api.Models
         public decimal TotalPayments { get; set; }
         public decimal PendingBalance { get; set; }
         public DateTime? LastPaymentDate { get; set; }
+        public DateTime? LastActivity { get; set; }
         public int? BranchId { get; set; }
         public int? RouteId { get; set; }
     }
@@ -390,12 +446,21 @@ namespace HexaBill.Api.Models
         public int Id { get; set; }
         public int? BranchId { get; set; }
         public string? BranchName { get; set; }
+        public int? RouteId { get; set; }
+        public string? RouteName { get; set; }
         public int CategoryId { get; set; }
         public string CategoryName { get; set; } = string.Empty;
         public string CategoryColor { get; set; } = string.Empty;
         public decimal Amount { get; set; }
         public DateTime Date { get; set; }
         public string? Note { get; set; }
+        public string? AttachmentUrl { get; set; }
+        public string? Status { get; set; }
+        public int? RecurringExpenseId { get; set; }
+        public int? ApprovedBy { get; set; }
+        public DateTime? ApprovedAt { get; set; }
+        public string? RejectionReason { get; set; }
+        public string? CreatedByName { get; set; }
     }
 
     public class ExpenseCategoryDto
@@ -408,6 +473,7 @@ namespace HexaBill.Api.Models
     public class CreateExpenseRequest
     {
         public int? BranchId { get; set; }
+        public int? RouteId { get; set; }
         [Required]
         public int CategoryId { get; set; }
         [Required]
@@ -415,24 +481,102 @@ namespace HexaBill.Api.Models
         [Required]
         public DateTime Date { get; set; }
         public string? Note { get; set; }
+        public string? AttachmentUrl { get; set; }
+        public int? RecurringExpenseId { get; set; }
+    }
+
+    public class ApproveExpenseRequest
+    {
+        public bool Approved { get; set; }
+        public string? RejectionReason { get; set; }
+    }
+
+    public class RecurringExpenseDto
+    {
+        public int Id { get; set; }
+        public string Description { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public string Frequency { get; set; } = "Monthly";
+        public int? CategoryId { get; set; }
+        public int? BranchId { get; set; }
+        public string? BranchName { get; set; }
+        public string? CategoryName { get; set; }
+        public string? Note { get; set; }
+        public int? DayOfRecurrence { get; set; }
+        public DateTime? StartDate { get; set; }
+        public DateTime? EndDate { get; set; }
+        public bool IsActive { get; set; } = true;
+        public DateTime? CreatedAt { get; set; }
+    }
+
+    public class CreateRecurringExpenseRequest
+    {
+        public string Description { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public string Frequency { get; set; } = "Monthly";
+        public int? CategoryId { get; set; }
+        public int? BranchId { get; set; }
+        public string? Note { get; set; }
+        public int? DayOfRecurrence { get; set; }
+        public DateTime? StartDate { get; set; }
+        public DateTime? EndDate { get; set; }
     }
 
     // Report DTOs
+    public class DashboardBranchSummaryDto
+    {
+        public int BranchId { get; set; }
+        public string BranchName { get; set; } = string.Empty;
+        public decimal Sales { get; set; }
+        public decimal Expenses { get; set; }
+        public decimal Profit { get; set; }
+        public int InvoiceCount { get; set; }
+    }
+
+    public class DailySalesDto
+    {
+        public string Date { get; set; } = string.Empty;
+        public decimal Sales { get; set; }
+        public int InvoiceCount { get; set; }
+    }
+
+    public class TopCustomerDto
+    {
+        public int CustomerId { get; set; }
+        public string CustomerName { get; set; } = string.Empty;
+        public decimal TotalSales { get; set; }
+        public int InvoiceCount { get; set; }
+    }
+
+    public class TopProductDto
+    {
+        public int ProductId { get; set; }
+        public string ProductName { get; set; } = string.Empty;
+        public decimal TotalSales { get; set; }
+        public decimal TotalQty { get; set; }
+        public string UnitType { get; set; } = string.Empty;
+    }
+
     public class SummaryReportDto
     {
         public decimal SalesToday { get; set; }
         public decimal PurchasesToday { get; set; }
         public decimal ExpensesToday { get; set; }
+        public decimal CogsToday { get; set; }
         public decimal? ProfitToday { get; set; }
         public List<ProductDto> LowStockProducts { get; set; } = new();
         public List<SaleDto> PendingInvoices { get; set; } = new();
-        public int PendingBills { get; set; } // Count of pending bills
-        public decimal PendingBillsAmount { get; set; } // Total amount of pending bills
-        public int PaidBills { get; set; } // Count of paid bills
-        public decimal PaidBillsAmount { get; set; } // Total amount of paid bills
-        public int InvoicesToday { get; set; } // Count of invoices today
-        public int InvoicesWeekly { get; set; } // Count of invoices this week
-        public int InvoicesMonthly { get; set; } // Count of invoices this month
+        public int PendingBills { get; set; }
+        public decimal PendingBillsAmount { get; set; }
+        public int PaidBills { get; set; }
+        public decimal PaidBillsAmount { get; set; }
+        public int InvoicesToday { get; set; }
+        public int InvoicesWeekly { get; set; }
+        public int InvoicesMonthly { get; set; }
+        public List<DashboardBranchSummaryDto> BranchBreakdown { get; set; } = new();
+        public List<DailySalesDto> DailySalesTrend { get; set; } = new();
+        public List<TopCustomerDto> TopCustomersToday { get; set; } = new();
+        public List<TopProductDto> TopProductsToday { get; set; } = new();
     }
 
     public class AISuggestionsDto
@@ -568,6 +712,9 @@ namespace HexaBill.Api.Models
         public decimal OutstandingBalance { get; set; }
         public decimal? TodayInvoiceAmount { get; set; }
         public string? Remarks { get; set; }
+        public string? VisitStatus { get; set; }
+        public string? VisitNotes { get; set; }
+        public decimal? PaymentCollected { get; set; }
     }
 
     public class RouteCollectionSheetDto
@@ -622,6 +769,40 @@ namespace HexaBill.Api.Models
         public string? Description { get; set; }
     }
 
+    public class CustomerVisitDto
+    {
+        public int Id { get; set; }
+        public int RouteId { get; set; }
+        public int CustomerId { get; set; }
+        public string CustomerName { get; set; } = string.Empty;
+        public DateTime VisitDate { get; set; }
+        public string Status { get; set; } = "NotVisited";
+        public string? Notes { get; set; }
+        public decimal? PaymentCollected { get; set; }
+        public decimal? AmountCollected { get => PaymentCollected; set => PaymentCollected = value; }
+        public int? StaffId { get; set; }
+        public string? StaffName { get; set; }
+        public DateTime CreatedAt { get; set; }
+    }
+
+    public class UpdateCustomerVisitRequest
+    {
+        public DateTime VisitDate { get; set; }
+        public string Status { get; set; } = "NotVisited";
+        public string? Notes { get; set; }
+        public decimal? PaymentCollected { get; set; }
+    }
+
+    public class UpdateVisitStatusRequest
+    {
+        public int CustomerId { get; set; }
+        public DateTime VisitDate { get; set; }
+        public string Status { get; set; } = "NotVisited";
+        public string? Notes { get; set; }
+        public decimal? PaymentCollected { get; set; }
+        public decimal? AmountCollected { get => PaymentCollected; set => PaymentCollected = value; }
+    }
+
     public class RouteSummaryDto
     {
         public int RouteId { get; set; }
@@ -631,6 +812,10 @@ namespace HexaBill.Api.Models
         public decimal TotalExpenses { get; set; }
         public decimal CostOfGoodsSold { get; set; }
         public decimal Profit { get; set; }
+        /// <summary>Number of invoices (sales) in the date range. Used by Route Performance tab.</summary>
+        public int InvoiceCount { get; set; }
+        /// <summary>Number of customer visits recorded in the date range. Used by Route Performance tab.</summary>
+        public int VisitCount { get; set; }
     }
 
     public class BranchSummaryDto
@@ -642,11 +827,16 @@ namespace HexaBill.Api.Models
         public decimal CostOfGoodsSold { get; set; }
         public decimal Profit { get; set; }
         public List<RouteSummaryDto> Routes { get; set; } = new();
+        public decimal? GrowthPercent { get; set; }
+        public decimal? CollectionsRatio { get; set; }
+        public decimal AverageInvoiceSize { get; set; }
+        public int InvoiceCount { get; set; }
+        public decimal TotalPayments { get; set; }
     }
 
     public class BranchComparisonItemDto : BranchSummaryDto
     {
-        public decimal? GrowthPercent { get; set; }
+        public new decimal? GrowthPercent { get; set; }
     }
 
     // Common DTOs
@@ -813,6 +1003,21 @@ namespace HexaBill.Api.Models
         public decimal Sales { get; set; }
         public decimal Expenses { get; set; }
         public decimal Profit { get; set; }
+    }
+
+    /// <summary>Branch-wise profit breakdown (PRODUCTION_MASTER_TODO #57). Same formula: Net = Sales - COGS - Expenses.</summary>
+    public class BranchProfitDto
+    {
+        public int BranchId { get; set; }
+        public string BranchName { get; set; } = string.Empty;
+        public decimal Sales { get; set; }
+        public decimal CostOfGoodsSold { get; set; }
+        public decimal GrossProfit { get; set; }
+        public decimal Expenses { get; set; }
+        public decimal NetProfit { get; set; }
+        public decimal GrossProfitMarginPercent { get; set; }
+        public decimal NetProfitMarginPercent { get; set; }
+        public int InvoiceCount { get; set; }
     }
 
     // Outstanding Invoice DTO

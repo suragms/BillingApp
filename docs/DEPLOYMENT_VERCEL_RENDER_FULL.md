@@ -160,3 +160,19 @@ npx vercel deploy --prebuilt --prod
 | Render blueprint | `render.yaml` |
 | Backend env (local) | `backend/HexaBill.Api/.env` (gitignored) |
 | Frontend env example | `frontend/hexabill-ui/.env.example` |
+
+---
+
+## 10. Production errors – quick fixes
+
+Use this checklist so production (Render backend + DB, Vercel frontend) stays reliable.
+
+| Check | What to do |
+|-------|------------|
+| **CORS errors** | Backend allows `https://hexabill.vercel.app` and `https://hexabill.onrender.com` by default. If your frontend URL is different (e.g. `https://hexa-bill.vercel.app`), set **Render** env `ALLOWED_ORIGINS` = `https://hexa-bill.vercel.app,https://hexabill.onrender.com` (comma-separated, no spaces). Redeploy backend. |
+| **Frontend calls localhost** | Set **Vercel** env `VITE_API_BASE_URL` = `https://hexabill.onrender.com` (or your Render backend URL). With or without `/api` is fine; the app adds `/api` if missing. Redeploy frontend. |
+| **DB connection / DATABASE_URL** | On Render, use the **Internal Database URL** from the PostgreSQL service. If the DB password contains `:` or `@`, the backend parses it correctly (split on first `:` only). |
+| **Migrations** | The backend runs EF migrations automatically on startup (after a short delay). If the DB is new or schema changed, the first deploy may take a bit longer; avoid hitting the API in the first ~30 seconds. |
+| **Cold start (Render free tier)** | The service may sleep after idle. The first request can take 30–60 seconds. Show a “Service is starting…” style message if the first request times out; the next request usually succeeds. |
+| **401 / JWT** | Ensure **Render** env `JwtSettings__SecretKey` is set (64+ chars, e.g. `openssl rand -base64 48`). All clients must re-login after a secret change. |
+| **Client-reported errors** | Super Admin → Error Logs shows both server and client-reported errors (e.g. connection refused). Use that to confirm production issues. |

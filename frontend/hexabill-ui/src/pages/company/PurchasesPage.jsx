@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Plus, Edit, Trash2, Eye, Save, Search, X, Filter, Calendar, TrendingUp, TrendingDown, BarChart3 } from 'lucide-react'
-import { purchasesAPI, productsAPI } from '../../services'
+import { purchasesAPI, productsAPI, settingsAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
 import toast from 'react-hot-toast'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
@@ -38,6 +38,7 @@ const PurchasesPage = () => {
   const [showProductSearch, setShowProductSearch] = useState(false)
   const searchInputRef = useRef(null)
   const formRef = useRef(null) // CRITICAL: Ref for scrolling to form
+  const [vatPercent, setVatPercent] = useState(5) // From company settings; fallback when settings unavailable (TODO #5)
   const [dangerModal, setDangerModal] = useState({
     isOpen: false,
     title: '',
@@ -62,6 +63,20 @@ const PurchasesPage = () => {
       searchInputRef.current.focus()
     }
   }, [showProductSearch])
+
+  // Fetch VAT from company settings (no hardcoded 5% — TODO #5)
+  useEffect(() => {
+    const fetchVat = async () => {
+      try {
+        const res = await settingsAPI.getCompanySettings()
+        if (res?.success && res?.data?.vatPercent != null) {
+          const v = parseFloat(res.data.vatPercent)
+          if (!Number.isNaN(v) && v >= 0) setVatPercent(v)
+        }
+      } catch (_) { /* keep default */ }
+    }
+    fetchVat()
+  }, [])
 
   const loadPurchases = async () => {
     try {
@@ -1048,7 +1063,7 @@ const PurchasesPage = () => {
                       const qty = typeof item.qty === 'number' ? item.qty : parseFloat(item.qty) || 0
                       const cost = typeof item.unitCost === 'number' ? item.unitCost : parseFloat(item.unitCost) || 0
                       const subtotal = qty * cost
-                      const vat = subtotal * 0.05
+                      const vat = subtotal * (vatPercent / 100)
                       const total = subtotal + vat
                       return (
                         <div key={index} className="bg-lime-50 rounded-lg border border-lime-300 p-3">
@@ -1098,12 +1113,12 @@ const PurchasesPage = () => {
                         <span className="font-medium">AED {calculateTotal().toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between text-sm">
-                        <span className="text-orange-600">VAT (5%)</span>
-                        <span className="font-medium text-orange-600">AED {(calculateTotal() * 0.05).toFixed(2)}</span>
+                        <span className="text-orange-600">VAT ({vatPercent}%)</span>
+                        <span className="font-medium text-orange-600">AED {(calculateTotal() * (vatPercent / 100)).toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between text-base font-bold text-green-700 mt-1">
                         <span>Total</span>
-                        <span>AED {(calculateTotal() * 1.05).toFixed(2)}</span>
+                        <span>AED {(calculateTotal() * (1 + vatPercent / 100)).toFixed(2)}</span>
                       </div>
                     </div>
                   )}
@@ -1120,7 +1135,7 @@ const PurchasesPage = () => {
                         <th className="px-2 py-2 border-r border-lime-300 text-left">Qty</th>
                         <th className="px-2 py-2 border-r border-lime-300 text-left">Unit Cost</th>
                         <th className="px-2 py-2 border-r border-lime-300 text-left">Subtotal</th>
-                        <th className="px-2 py-2 border-r border-lime-300 text-left">VAT (5%)</th>
+                        <th className="px-2 py-2 border-r border-lime-300 text-left">VAT ({vatPercent}%)</th>
                         <th className="px-2 py-2 text-left">Total</th>
                         <th className="px-2 py-2 text-center">Action</th>
                       </tr>
@@ -1195,7 +1210,7 @@ const PurchasesPage = () => {
                                 const qty = typeof item.qty === 'number' ? item.qty : 0
                                 const cost = typeof item.unitCost === 'number' ? item.unitCost : 0
                                 const subtotal = qty * cost
-                                const vat = subtotal * 0.05
+                                const vat = subtotal * (vatPercent / 100)
                                 return vat.toFixed(2)
                               })()}
                             </td>
@@ -1204,7 +1219,7 @@ const PurchasesPage = () => {
                                 const qty = typeof item.qty === 'number' ? item.qty : 0
                                 const cost = typeof item.unitCost === 'number' ? item.unitCost : 0
                                 const subtotal = qty * cost
-                                const vat = subtotal * 0.05
+                                const vat = subtotal * (vatPercent / 100)
                                 const total = subtotal + vat
                                 return total.toFixed(2)
                               })()}
@@ -1229,10 +1244,10 @@ const PurchasesPage = () => {
                           AED {calculateTotal().toFixed(2)}
                         </td>
                         <td className="px-2 py-2 font-bold text-orange-600 border-r border-lime-300">
-                          AED {(calculateTotal() * 0.05).toFixed(2)}
+                          AED {(calculateTotal() * (vatPercent / 100)).toFixed(2)}
                         </td>
                         <td className="px-2 py-2 font-bold text-green-700">
-                          AED {(calculateTotal() * 1.05).toFixed(2)}
+                          AED {(calculateTotal() * (1 + vatPercent / 100)).toFixed(2)}
                         </td>
                         <td></td>
                       </tr>
@@ -1281,7 +1296,7 @@ const PurchasesPage = () => {
                       <th className="px-3 py-2 border-r border-lime-300 text-left">Supplier</th>
                       <th className="px-3 py-2 border-r border-lime-300 text-left">Date</th>
                       <th className="px-3 py-2 border-r border-lime-300 text-right">Subtotal</th>
-                      <th className="px-3 py-2 border-r border-lime-300 text-right">VAT (5%)</th>
+                      <th className="px-3 py-2 border-r border-lime-300 text-right">VAT ({vatPercent}%)</th>
                       <th className="px-3 py-2 border-r border-lime-300 text-right">Total</th>
                       <th className="px-3 py-2 border-r border-lime-300 text-center">Items</th>
                       <th className="px-3 py-2 text-center">Actions</th>
@@ -1406,7 +1421,7 @@ const PurchasesPage = () => {
                             <p className="text-xs font-medium text-primary-700">{formatCurrency(purchase.subtotal)}</p>
                           </div>
                           <div>
-                            <p className="text-xs text-primary-500">VAT (5%)</p>
+                            <p className="text-xs text-primary-500">VAT ({vatPercent}%)</p>
                             <p className="text-xs font-medium text-orange-600">{formatCurrency(purchase.vatTotal)}</p>
                           </div>
                         </div>

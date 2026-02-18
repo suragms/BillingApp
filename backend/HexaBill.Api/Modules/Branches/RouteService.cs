@@ -4,6 +4,7 @@
 using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
+using System.Security.Claims;
 
 namespace HexaBill.Api.Modules.Branches
 {
@@ -24,6 +25,8 @@ namespace HexaBill.Api.Modules.Branches
         Task<bool> DeleteRouteExpenseAsync(int id, int tenantId);
         Task<RouteSummaryDto?> GetRouteSummaryAsync(int routeId, int tenantId, DateTime? fromDate, DateTime? toDate);
         Task<RouteCollectionSheetDto?> GetRouteCollectionSheetAsync(int routeId, int tenantId, DateTime date);
+        Task<CustomerVisitDto?> UpdateCustomerVisitAsync(int routeId, int customerId, UpdateCustomerVisitRequest request, int userId, int tenantId);
+        Task<List<CustomerVisitDto>> GetCustomerVisitsAsync(int routeId, int tenantId, DateTime? date);
     }
 
     public class RouteService : IRouteService
@@ -326,13 +329,17 @@ namespace HexaBill.Api.Modules.Branches
                 .Where(s => s.RouteId == routeId && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
                 .Select(s => s.Id)
                 .ToListAsync();
-            var costOfGoodsSold = saleIds.Count > 0
+            var invoiceCount = saleIds.Count;
+            var costOfGoodsSold = invoiceCount > 0
                 ? await (from si in _context.SaleItems
                     join p in _context.Products on si.ProductId equals p.Id
                     where saleIds.Contains(si.SaleId)
                     select si.Qty * p.CostPrice)
                     .SumAsync()
                 : 0m;
+            var visitCount = await _context.CustomerVisits
+                .Where(v => v.RouteId == routeId && v.VisitDate >= from && v.VisitDate <= to && (tenantId <= 0 || v.TenantId == tenantId))
+                .CountAsync();
             return new RouteSummaryDto
             {
                 RouteId = route.Id,
@@ -341,7 +348,9 @@ namespace HexaBill.Api.Modules.Branches
                 TotalSales = totalSales,
                 TotalExpenses = totalExpenses,
                 CostOfGoodsSold = costOfGoodsSold,
-                Profit = totalSales - costOfGoodsSold - totalExpenses
+                Profit = totalSales - costOfGoodsSold - totalExpenses,
+                InvoiceCount = invoiceCount,
+                VisitCount = visitCount
             };
         }
 
@@ -368,6 +377,11 @@ namespace HexaBill.Api.Modules.Branches
                 .GroupBy(x => x.CustomerId!.Value)
                 .ToDictionary(g => g.Key, g => g.Sum(x => x.GrandTotal));
 
+            // Get visit statuses for this route and date
+            var visits = await _context.CustomerVisits
+                .Where(v => v.RouteId == routeId && v.VisitDate >= dateStart && v.VisitDate < dateEnd && (tenantId <= 0 || v.TenantId == tenantId))
+                .ToDictionaryAsync(v => v.CustomerId, v => v);
+
             var entries = new List<RouteCollectionSheetEntryDto>();
             decimal totalOutstanding = 0;
             foreach (var rc in route.RouteCustomers.OrderBy(rc => rc.Customer.Name))
@@ -375,6 +389,7 @@ namespace HexaBill.Api.Modules.Branches
                 var c = rc.Customer;
                 var balance = c.Balance > 0.01m ? c.Balance : 0m;
                 var todayAmount = todayByCustomer.ContainsKey(c.Id) ? (decimal?)todayByCustomer[c.Id] : null;
+                var visit = visits.ContainsKey(c.Id) ? visits[c.Id] : null;
                 totalOutstanding += balance;
                 entries.Add(new RouteCollectionSheetEntryDto
                 {
@@ -382,7 +397,10 @@ namespace HexaBill.Api.Modules.Branches
                     CustomerName = c.Name ?? "",
                     Phone = c.Phone,
                     OutstandingBalance = balance,
-                    TodayInvoiceAmount = todayAmount
+                    TodayInvoiceAmount = todayAmount,
+                    VisitStatus = visit?.Status.ToString() ?? "NotVisited",
+                    VisitNotes = visit?.Notes,
+                    PaymentCollected = visit?.PaymentCollected
                 });
             }
 
@@ -395,6 +413,102 @@ namespace HexaBill.Api.Modules.Branches
                 Customers = entries,
                 TotalOutstanding = totalOutstanding
             };
+        }
+
+        public async Task<CustomerVisitDto?> UpdateCustomerVisitAsync(int routeId, int customerId, UpdateCustomerVisitRequest request, int userId, int tenantId)
+        {
+            // Verify route exists and belongs to tenant
+            var route = await _context.Routes
+                .FirstOrDefaultAsync(r => r.Id == routeId && (tenantId <= 0 || r.TenantId == tenantId));
+            if (route == null) return null;
+
+            // Verify customer exists and belongs to tenant
+            var customer = await _context.Customers
+                .FirstOrDefaultAsync(c => c.Id == customerId && (tenantId <= 0 || c.TenantId == tenantId));
+            if (customer == null) return null;
+
+            var visitDate = request.VisitDate.Date;
+
+            // Find or create visit record
+            var visit = await _context.CustomerVisits
+                .FirstOrDefaultAsync(v => v.RouteId == routeId && 
+                                         v.CustomerId == customerId && 
+                                         v.VisitDate.Date == visitDate &&
+                                         (tenantId <= 0 || v.TenantId == tenantId));
+
+            if (visit == null)
+            {
+                visit = new CustomerVisit
+                {
+                    RouteId = routeId,
+                    CustomerId = customerId,
+                    TenantId = tenantId,
+                    StaffId = userId,
+                    VisitDate = visitDate,
+                    Status = Enum.Parse<VisitStatus>(request.Status),
+                    Notes = request.Notes,
+                    PaymentCollected = request.PaymentCollected,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _context.CustomerVisits.Add(visit);
+            }
+            else
+            {
+                visit.Status = Enum.Parse<VisitStatus>(request.Status);
+                visit.Notes = request.Notes;
+                visit.PaymentCollected = request.PaymentCollected;
+                visit.StaffId = userId;
+                visit.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _context.SaveChangesAsync();
+
+            return new CustomerVisitDto
+            {
+                Id = visit.Id,
+                RouteId = visit.RouteId,
+                CustomerId = visit.CustomerId,
+                CustomerName = customer.Name ?? "",
+                VisitDate = visit.VisitDate,
+                Status = visit.Status.ToString(),
+                Notes = visit.Notes,
+                PaymentCollected = visit.PaymentCollected,
+                StaffId = visit.StaffId,
+                CreatedAt = visit.CreatedAt
+            };
+        }
+
+        public async Task<List<CustomerVisitDto>> GetCustomerVisitsAsync(int routeId, int tenantId, DateTime? date)
+        {
+            var query = _context.CustomerVisits
+                .Include(v => v.Customer)
+                .Include(v => v.Staff)
+                .Where(v => v.RouteId == routeId && (tenantId <= 0 || v.TenantId == tenantId))
+                .AsQueryable();
+
+            if (date.HasValue)
+            {
+                var dateStart = date.Value.Date;
+                var dateEnd = dateStart.AddDays(1);
+                query = query.Where(v => v.VisitDate >= dateStart && v.VisitDate < dateEnd);
+            }
+
+            var visits = await query.ToListAsync();
+
+            return visits.Select(v => new CustomerVisitDto
+            {
+                Id = v.Id,
+                RouteId = v.RouteId,
+                CustomerId = v.CustomerId,
+                CustomerName = v.Customer.Name ?? "",
+                VisitDate = v.VisitDate,
+                Status = v.Status.ToString(),
+                Notes = v.Notes,
+                PaymentCollected = v.PaymentCollected,
+                StaffId = v.StaffId,
+                StaffName = v.Staff?.Name,
+                CreatedAt = v.CreatedAt
+            }).ToList();
         }
     }
 }

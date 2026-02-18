@@ -1,5 +1,35 @@
 # Backup, Restore & Import Strategy
 
+## Production (e.g. Render): Ephemeral storage and Postgres
+
+- **Ephemeral disk:** Backups saved under the app’s `backups` folder (e.g. `Directory.GetCurrentDirectory()/backups`) are **lost on restart or redeploy**. On Render (and similar hosts), the filesystem is ephemeral; do not rely on “Server” backups for retention.
+- **What to do:** Use **Download** (create backup with “Download to browser” or download an existing backup) to keep a copy locally, or use **external storage** (e.g. S3/R2) so backups are not stored only on the app server. See also: “Move backup storage to S3/R2” in the production TODO.
+- **PostgreSQL backup (pg_dump):** For a full, consistent Postgres dump the app uses `pg_dump` when available. On Render’s web service, the app container usually does **not** have `pg_dump` installed; the app then falls back to an EF Core–based export (slower but works). To use `pg_dump`:
+  - **Option A:** Set `Backup:PostgresPgDumpPath` in appsettings (or environment) to the full path to `pg_dump` if you install the Postgres client tools in the same environment.
+  - **Option B:** Use **Render Dashboard → Postgres → Backups** for native, scheduled Postgres backups (recommended for production).
+  - **Option C:** Run `pg_dump` from a one-off shell or worker that has the Postgres client (e.g. `pg_dump $DATABASE_URL -Fc -f backup.dump`).
+
+### S3/R2 backup storage (production)
+
+When **BackupSettings:S3** is configured, backups are uploaded to S3 or an S3-compatible store (e.g. Cloudflare R2). List, download, delete, and restore all work against both local and S3 backups.
+
+**Config (appsettings or environment):**
+
+| Key | Description |
+|-----|-------------|
+| `BackupSettings:S3:Enabled` | `true` to upload and list/delete from S3 |
+| `BackupSettings:S3:Bucket` | Bucket name |
+| `BackupSettings:S3:Prefix` | Optional key prefix (e.g. `hexabill/backups`) |
+| `BackupSettings:S3:Region` | AWS region (default `us-east-1`); ignored when ServiceUrl is set |
+| `BackupSettings:S3:AwsAccessKeyId` | Access key (required for R2) |
+| `BackupSettings:S3:AwsSecretAccessKey` | Secret key (required for R2) |
+| `BackupSettings:S3:ServiceUrl` | **R2:** set to `https://<account_id>.r2.cloudflarestorage.com` for Cloudflare R2 |
+| `BackupSettings:S3:DeleteLocalAfterUpload` | If `true` (default), delete local zip after successful S3 upload to avoid ephemeral disk use |
+
+**R2 example:** Set `ServiceUrl` to your R2 endpoint and use R2 API token as AccessKeyId/SecretAccessKey. List, download, restore, and delete will use S3 when the file is not found locally.
+
+---
+
 ## Why backup/restore and CSV import fail (not an AI issue)
 
 - **Schema mismatch:** Backup from SQLite or old schema vs restore into PostgreSQL / new schema.

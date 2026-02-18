@@ -9,7 +9,10 @@ using HexaBill.Api.Modules.Expenses;
 using HexaBill.Api.Models;
 using HexaBill.Api.Data;
 using HexaBill.Api.Shared.Extensions;
+using HexaBill.Api.Shared.Services;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
+using System.IO;
 
 namespace HexaBill.Api.Modules.Expenses
 {
@@ -20,11 +23,13 @@ namespace HexaBill.Api.Modules.Expenses
     {
         private readonly IExpenseService _expenseService;
         private readonly AppDbContext _context;
+        private readonly IRouteScopeService _routeScopeService;
 
-        public ExpensesController(IExpenseService expenseService, AppDbContext context)
+        public ExpensesController(IExpenseService expenseService, AppDbContext context, IRouteScopeService routeScopeService)
         {
             _expenseService = expenseService;
             _context = context;
+            _routeScopeService = routeScopeService;
         }
 
         [HttpGet]
@@ -155,11 +160,15 @@ namespace HexaBill.Api.Modules.Expenses
 
                 var tenantId = CurrentTenantId; // CRITICAL: Multi-tenant data isolation
                 IReadOnlyList<int>? staffBranchIds = null;
+                IReadOnlyList<int>? staffRouteIds = null;
                 if (IsStaff)
                 {
                     staffBranchIds = await _context.BranchStaff.Where(bs => bs.UserId == userId).Select(bs => bs.BranchId).ToListAsync();
+                    var role = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+                    var routeIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userId, tenantId, role);
+                    staffRouteIds = routeIds;
                 }
-                var result = await _expenseService.CreateExpenseAsync(request, userId, tenantId, staffBranchIds);
+                var result = await _expenseService.CreateExpenseAsync(request, userId, tenantId, staffBranchIds, staffRouteIds);
                 return CreatedAtAction(nameof(GetExpense), new { id = result.Id }, new ApiResponse<ExpenseDto>
                 {
                     Success = true,
@@ -195,11 +204,15 @@ namespace HexaBill.Api.Modules.Expenses
 
                 var tenantId = CurrentTenantId; // CRITICAL: Multi-tenant data isolation
                 IReadOnlyList<int>? staffBranchIds = null;
+                IReadOnlyList<int>? staffRouteIds = null;
                 if (IsStaff)
                 {
                     staffBranchIds = await _context.BranchStaff.Where(bs => bs.UserId == userId).Select(bs => bs.BranchId).ToListAsync();
+                    var role = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+                    var routeIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userId, tenantId, role);
+                    staffRouteIds = routeIds;
                 }
-                var result = await _expenseService.UpdateExpenseAsync(id, request, userId, tenantId, staffBranchIds);
+                var result = await _expenseService.UpdateExpenseAsync(id, request, userId, tenantId, staffBranchIds, staffRouteIds);
                 if (result == null)
                 {
                     return NotFound(new ApiResponse<ExpenseDto>
@@ -374,6 +387,332 @@ namespace HexaBill.Api.Modules.Expenses
                 {
                     Success = false,
                     Message = "An error occurred while creating the category",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpPost("{id}/attachment")]
+        [RequestSizeLimit(10 * 1024 * 1024)] // 10 MB
+        public async Task<ActionResult<ApiResponse<string>>> UploadAttachment(int id, IFormFile file)
+        {
+            try
+            {
+                if (file == null || file.Length == 0)
+                {
+                    return BadRequest(new ApiResponse<string>
+                    {
+                        Success = false,
+                        Message = "No file uploaded"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var expense = await _context.Expenses
+                    .FirstOrDefaultAsync(e => e.Id == id && e.TenantId == tenantId);
+                
+                if (expense == null)
+                {
+                    return NotFound(new ApiResponse<string>
+                    {
+                        Success = false,
+                        Message = "Expense not found"
+                    });
+                }
+
+                // Validate file type
+                var allowedExtensions = new[] { ".pdf", ".jpg", ".jpeg", ".png", ".gif" };
+                var fileExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
+                if (!allowedExtensions.Contains(fileExtension))
+                {
+                    return BadRequest(new ApiResponse<string>
+                    {
+                        Success = false,
+                        Message = "Invalid file type. Allowed: PDF, JPG, PNG, GIF"
+                    });
+                }
+
+                // Create uploads directory if it doesn't exist
+                var uploadsDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads", "expenses");
+                if (!Directory.Exists(uploadsDir))
+                {
+                    Directory.CreateDirectory(uploadsDir);
+                }
+
+                // Generate unique filename
+                var fileName = $"expense_{id}_{Guid.NewGuid()}{fileExtension}";
+                var filePath = Path.Combine(uploadsDir, fileName);
+
+                // Save file
+                using (var stream = new FileStream(filePath, FileMode.Create))
+                {
+                    await file.CopyToAsync(stream);
+                }
+
+                // Update expense with attachment URL
+                expense.AttachmentUrl = $"expenses/{fileName}";
+                await _context.SaveChangesAsync();
+
+                return Ok(new ApiResponse<string>
+                {
+                    Success = true,
+                    Message = "Attachment uploaded successfully",
+                    Data = expense.AttachmentUrl
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<string>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpPost("{id}/approve")]
+        [Authorize(Roles = "Admin,Owner")]
+        public async Task<ActionResult<ApiResponse<object>>> ApproveExpense(int id)
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Invalid user"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var expense = await _context.Expenses
+                    .FirstOrDefaultAsync(e => e.Id == id && e.TenantId == tenantId);
+                
+                if (expense == null)
+                {
+                    return NotFound(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Expense not found"
+                    });
+                }
+
+                expense.Status = ExpenseStatus.Approved;
+                expense.ApprovedBy = userId;
+                expense.ApprovedAt = DateTime.UtcNow;
+                expense.RejectionReason = null;
+                await _context.SaveChangesAsync();
+
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Message = "Expense approved successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpPost("{id}/reject")]
+        [Authorize(Roles = "Admin,Owner")]
+        public async Task<ActionResult<ApiResponse<object>>> RejectExpense(int id, [FromBody] ApproveExpenseRequest request)
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Invalid user"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var expense = await _context.Expenses
+                    .FirstOrDefaultAsync(e => e.Id == id && e.TenantId == tenantId);
+                
+                if (expense == null)
+                {
+                    return NotFound(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Expense not found"
+                    });
+                }
+
+                expense.Status = ExpenseStatus.Rejected;
+                expense.ApprovedBy = userId;
+                expense.ApprovedAt = DateTime.UtcNow;
+                expense.RejectionReason = request.RejectionReason;
+                await _context.SaveChangesAsync();
+
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Message = "Expense rejected successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpGet("recurring")]
+        [Authorize(Roles = "Admin,Owner")]
+        public async Task<ActionResult<ApiResponse<List<RecurringExpenseDto>>>> GetRecurringExpenses()
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                var recurring = await _context.RecurringExpenses
+                    .Where(r => r.TenantId == tenantId)
+                    .Include(r => r.Category)
+                    .Include(r => r.Branch)
+                    .Select(r => new RecurringExpenseDto
+                    {
+                        Id = r.Id,
+                        BranchId = r.BranchId,
+                        BranchName = r.Branch != null ? r.Branch.Name : null,
+                        CategoryId = r.CategoryId,
+                        CategoryName = r.Category != null ? r.Category.Name : "",
+                        Amount = r.Amount,
+                        Note = r.Note,
+                        Frequency = r.Frequency.ToString(),
+                        DayOfRecurrence = r.DayOfRecurrence,
+                        StartDate = r.StartDate,
+                        EndDate = r.EndDate,
+                        IsActive = r.IsActive,
+                        CreatedAt = r.CreatedAt
+                    })
+                    .OrderByDescending(r => r.CreatedAt)
+                    .ToListAsync();
+
+                return Ok(new ApiResponse<List<RecurringExpenseDto>>
+                {
+                    Success = true,
+                    Message = "Recurring expenses retrieved successfully",
+                    Data = recurring
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<List<RecurringExpenseDto>>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpPost("recurring")]
+        [Authorize(Roles = "Admin,Owner")]
+        public async Task<ActionResult<ApiResponse<RecurringExpenseDto>>> CreateRecurringExpense([FromBody] CreateRecurringExpenseRequest request)
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<RecurringExpenseDto>
+                    {
+                        Success = false,
+                        Message = "Invalid user"
+                    });
+                }
+
+                if (!Enum.TryParse<RecurrenceFrequency>(request.Frequency, out var frequency))
+                {
+                    return BadRequest(new ApiResponse<RecurringExpenseDto>
+                    {
+                        Success = false,
+                        Message = "Invalid frequency. Must be Daily, Weekly, Monthly, or Yearly"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var category = await _context.ExpenseCategories.FindAsync(request.CategoryId);
+                if (category == null)
+                {
+                    return BadRequest(new ApiResponse<RecurringExpenseDto>
+                    {
+                        Success = false,
+                        Message = "Category not found"
+                    });
+                }
+
+                var recurring = new RecurringExpense
+                {
+                    OwnerId = tenantId,
+                    TenantId = tenantId,
+                    BranchId = request.BranchId,
+                    CategoryId = request.CategoryId ?? 0,
+                    Amount = request.Amount,
+                    Note = request.Note,
+                    Frequency = frequency,
+                    DayOfRecurrence = request.DayOfRecurrence,
+                    StartDate = request.StartDate.HasValue ? request.StartDate.Value.ToUtcKind() : DateTime.UtcNow,
+                    EndDate = request.EndDate.HasValue ? request.EndDate.Value.ToUtcKind() : (DateTime?)null,
+                    IsActive = true,
+                    CreatedBy = userId,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+
+                _context.RecurringExpenses.Add(recurring);
+                await _context.SaveChangesAsync();
+
+                await _context.Entry(recurring).Reference(r => r.Category).LoadAsync();
+                await _context.Entry(recurring).Reference(r => r.Branch).LoadAsync();
+
+                var dto = new RecurringExpenseDto
+                {
+                    Id = recurring.Id,
+                    BranchId = recurring.BranchId,
+                    BranchName = recurring.Branch?.Name,
+                    CategoryId = recurring.CategoryId,
+                    CategoryName = recurring.Category.Name,
+                    Amount = recurring.Amount,
+                    Note = recurring.Note,
+                    Frequency = recurring.Frequency.ToString(),
+                    DayOfRecurrence = recurring.DayOfRecurrence,
+                    StartDate = recurring.StartDate,
+                    EndDate = recurring.EndDate,
+                    IsActive = recurring.IsActive,
+                    CreatedAt = recurring.CreatedAt
+                };
+
+                return Ok(new ApiResponse<RecurringExpenseDto>
+                {
+                    Success = true,
+                    Message = "Recurring expense created successfully",
+                    Data = dto
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<RecurringExpenseDto>
+                {
+                    Success = false,
+                    Message = "An error occurred",
                     Errors = new List<string> { ex.Message }
                 });
             }

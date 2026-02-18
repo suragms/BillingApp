@@ -42,7 +42,7 @@ const BranchesPage = () => {
       if (res?.success && res?.data) setBranches(res.data)
       else setBranches([])
     } catch (err) {
-      console.error('Fetch branches error:', err)
+      if (!err?.isConnectionBlocked) console.error('Fetch branches error:', err)
       if (activeTab === 'branches') {
         toast.error(err.response?.data?.message || 'Failed to load branches')
       }
@@ -57,7 +57,7 @@ const BranchesPage = () => {
       if (res?.success && res?.data) setRoutes(res.data)
       else setRoutes([])
     } catch (err) {
-      console.error('Fetch routes error:', err)
+      if (!err?.isConnectionBlocked) console.error('Fetch routes error:', err)
       if (activeTab === 'routes') {
         toast.error(err.response?.data?.message || 'Failed to load routes')
       }
@@ -77,7 +77,7 @@ const BranchesPage = () => {
         setStaffUsers(staff)
       }
     } catch (err) {
-      console.error('Fetch staff error:', err)
+      if (!err?.isConnectionBlocked) console.error('Fetch staff error:', err)
     }
   }
 

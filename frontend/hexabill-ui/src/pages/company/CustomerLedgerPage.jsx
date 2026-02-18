@@ -223,21 +223,48 @@ const CustomerLedgerPage = () => {
     }
   }
 
-  // Apply staged ledger filters (reduces API calls while user is selecting); refetch customer list and search so count is correct
-  const applyLedgerFilters = () => {
-    setDateRange({ from: filterDraft.from, to: filterDraft.to })
-    setLedgerBranchId(filterDraft.branchId)
-    setLedgerRouteId(filterDraft.routeId)
-    setLedgerStaffId(filterDraft.staffId)
-    const branchId = filterDraft.branchId || undefined
-    const routeId = filterDraft.routeId || undefined
-    if (branchId) {
-      fetchCustomers({ branchId, routeId })
-    } else if (isAdminOrOwner(user)) {
-      fetchCustomers()
+  // Auto-apply filters with debounce (reduces API calls while user is selecting)
+  const filterApplyTimeoutRef = useRef(null)
+  const applyLedgerFilters = (immediate = false) => {
+    if (filterApplyTimeoutRef.current) {
+      clearTimeout(filterApplyTimeoutRef.current)
+      filterApplyTimeoutRef.current = null
     }
-    fetchCustomerSearch(searchTerm || '', 1, false)
+    
+    const applyFilters = () => {
+      setDateRange({ from: filterDraft.from, to: filterDraft.to })
+      setLedgerBranchId(filterDraft.branchId)
+      setLedgerRouteId(filterDraft.routeId)
+      setLedgerStaffId(filterDraft.staffId)
+      const branchId = filterDraft.branchId || undefined
+      const routeId = filterDraft.routeId || undefined
+      if (branchId) {
+        fetchCustomers({ branchId, routeId })
+      } else if (isAdminOrOwner(user)) {
+        fetchCustomers()
+      }
+      fetchCustomerSearch(searchTerm || '', 1, false)
+    }
+    
+    if (immediate) {
+      applyFilters()
+    } else {
+      // Debounce: auto-apply after 800ms of no changes
+      filterApplyTimeoutRef.current = setTimeout(applyFilters, 800)
+    }
   }
+
+  // Auto-apply filters when filterDraft changes (debounced)
+  useEffect(() => {
+    if (selectedCustomer) {
+      applyLedgerFilters(false)
+    }
+    return () => {
+      if (filterApplyTimeoutRef.current) {
+        clearTimeout(filterApplyTimeoutRef.current)
+      }
+    }
+  }, [filterDraft.from, filterDraft.to, filterDraft.branchId, filterDraft.routeId, filterDraft.staffId])
 
   // Initial customer load: Owner/Admin get all; Staff get scoped list after default filter is set
   useEffect(() => {
@@ -1561,14 +1588,37 @@ const CustomerLedgerPage = () => {
     handleExportPDF()
   }
 
-  // WhatsApp Sharing Handler
-  const handleShareWhatsApp = () => {
+  // WhatsApp Sharing Handler - Downloads PDF first, then opens WhatsApp
+  const handleShareWhatsApp = async () => {
     if (!selectedCustomer || customerLedger.length === 0) {
       toast.error('No data to share')
       return
     }
 
     try {
+      // First, download the PDF statement
+      const fromDate = new Date(dateRange.from)
+      const toDate = new Date(dateRange.to)
+      let pdfBlob
+      try {
+        pdfBlob = await customersAPI.getCustomerStatement(selectedCustomer.id, fromDate.toISOString().split('T')[0], toDate.toISOString().split('T')[0])
+      } catch (pdfError) {
+        console.error('Failed to generate PDF:', pdfError)
+        toast.error('Failed to generate PDF statement')
+        return
+      }
+
+      // Create download link for PDF
+      const pdfUrl = window.URL.createObjectURL(pdfBlob)
+      const pdfLink = document.createElement('a')
+      pdfLink.href = pdfUrl
+      pdfLink.download = `statement_${selectedCustomer.name}_${new Date().toISOString().split('T')[0]}.pdf`
+      document.body.appendChild(pdfLink)
+      pdfLink.click()
+      document.body.removeChild(pdfLink)
+      window.URL.revokeObjectURL(pdfUrl)
+
+      // Prepare WhatsApp message
       const filteredEntries = customerLedger.filter(entry => {
         const entryDate = new Date(entry.date)
         const fromDate = new Date(dateRange.from)
@@ -1592,17 +1642,21 @@ const CustomerLedgerPage = () => {
         `Payments Received: ${formatCurrency(totalCredit)}\n` +
         `Outstanding: ${formatCurrency(totalDebit - totalCredit)}\n` +
         `Closing Balance: ${formatBalance(closingBalance)}\n\n` +
+        `📎 PDF statement has been downloaded. Please attach it to this message.\n\n` +
         `_Generated on ${new Date().toLocaleString()}_`
 
       const phoneNumber = selectedCustomer.phone?.replace(/\D/g, '') || ''
       if (phoneNumber) {
-        const url = `https://wa.me/${phoneNumber}?text=${encodeURIComponent(message)}`
-        window.open(url, '_blank')
-        toast.success('Opening WhatsApp...', { id: 'statement-share', duration: 3000 })
+        // Small delay to ensure PDF download starts
+        setTimeout(() => {
+          const url = `https://wa.me/${phoneNumber}?text=${encodeURIComponent(message)}`
+          window.open(url, '_blank')
+          toast.success('PDF downloaded. Opening WhatsApp... Please attach the PDF file.', { id: 'statement-share', duration: 5000 })
+        }, 500)
       } else {
         // Copy to clipboard if no phone
         navigator.clipboard.writeText(message)
-        toast.success('Statement copied to clipboard!', { id: 'statement-copy', duration: 3000 })
+        toast.success('PDF downloaded. Statement summary copied to clipboard!', { id: 'statement-copy', duration: 3000 })
       }
     } catch (error) {
       console.error('Share error:', error)
@@ -2244,12 +2298,16 @@ const CustomerLedgerPage = () => {
 
                 <button
                   type="button"
-                  onClick={applyLedgerFilters}
+                  onClick={() => applyLedgerFilters(true)}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary-600 text-white text-sm font-medium rounded hover:bg-primary-700"
+                  title="Filters auto-apply after 0.8s. Click to apply immediately."
                 >
                   <Filter className="h-3.5 w-3.5" />
-                  Apply Filter
+                  Apply Now
                 </button>
+                <span className="text-xs text-neutral-500 italic">
+                  (Auto-applies in 0.8s)
+                </span>
               </div>
 
               {/* TAB SECTIONS - Full Width */}
@@ -3173,7 +3231,21 @@ const CustomerLedgerPage = () => {
 
 // Ledger Statement Tab Component - Tally Style Redesign
 const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters, onFilterChange }) => {
-  const lastEntryBalance = ledgerEntries.length > 0 ? ledgerEntries[ledgerEntries.length - 1].balance : 0
+  const [displayLimit, setDisplayLimit] = React.useState(100) // Show first 100 entries by default
+  const INITIAL_DISPLAY_LIMIT = 100
+  const LOAD_MORE_INCREMENT = 100
+
+  // Paginated entries
+  const displayedEntries = React.useMemo(() => {
+    return ledgerEntries.slice(0, displayLimit)
+  }, [ledgerEntries, displayLimit])
+
+  const hasMore = ledgerEntries.length > displayLimit
+  const handleLoadMore = () => {
+    setDisplayLimit(prev => prev + LOAD_MORE_INCREMENT)
+  }
+
+  const lastEntryBalance = displayedEntries.length > 0 ? displayedEntries[displayedEntries.length - 1].balance : (ledgerEntries.length > 0 ? ledgerEntries[ledgerEntries.length - 1].balance : 0)
   const closingBalance = Number(lastEntryBalance) || 0
   const totalDebit = ledgerEntries.reduce((sum, e) => sum + (Number(e.debit) || 0), 0)
   const totalCredit = ledgerEntries.reduce((sum, e) => sum + (Number(e.credit) || 0), 0)
@@ -3280,14 +3352,14 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-neutral-200">
-              {ledgerEntries.length === 0 ? (
+              {displayedEntries.length === 0 ? (
                 <tr>
                   <td colSpan="8" className="px-4 py-8 text-center text-neutral-500">
                     No transactions found
                   </td>
                 </tr>
               ) : (
-                ledgerEntries.map((entry, idx) => {
+                displayedEntries.map((entry, idx) => {
                   // Format date - show time only for payments
                   const showTime = entry.type === 'Payment'
                   const dateStr = showTime
@@ -3352,6 +3424,23 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                 })
               )}
             </tbody>
+            {hasMore && (
+              <tfoot className="bg-neutral-50 border-t border-neutral-200">
+                <tr>
+                  <td colSpan="8" className="px-4 py-3 text-center">
+                    <button
+                      onClick={handleLoadMore}
+                      className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 transition-colors"
+                    >
+                      Load More ({ledgerEntries.length - displayLimit} remaining)
+                    </button>
+                    <p className="text-xs text-neutral-500 mt-2">
+                      Showing {displayLimit} of {ledgerEntries.length} entries
+                    </p>
+                  </td>
+                </tr>
+              </tfoot>
+            )}
             <tfoot className="bg-neutral-100 sticky bottom-0 border-t-2 border-neutral-300">
               <tr>
                 <td colSpan="4" className="px-3 py-2.5 text-right text-sm font-bold text-neutral-900 border-r border-neutral-300">
@@ -3378,12 +3467,13 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
 
       {/* Ledger Cards - Mobile */}
       <div className="md:hidden flex-1 overflow-y-auto space-y-3 pb-4">
-        {ledgerEntries.length === 0 ? (
+        {displayedEntries.length === 0 ? (
           <div className="bg-white rounded-lg border border-neutral-200 p-6 text-center text-neutral-500 text-sm">
             No transactions found
           </div>
         ) : (
-          ledgerEntries.map((entry, idx) => {
+          <>
+            {displayedEntries.map((entry, idx) => {
             const dateStr = entry.type === 'Payment'
               ? new Date(entry.date).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
               : new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -3408,7 +3498,21 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                 </div>
               </div>
             )
-          })
+          })}
+          {hasMore && (
+            <div className="bg-white rounded-lg border border-neutral-200 p-4 text-center">
+              <button
+                onClick={handleLoadMore}
+                className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 transition-colors"
+              >
+                Load More ({ledgerEntries.length - displayLimit} remaining)
+              </button>
+              <p className="text-xs text-neutral-500 mt-2">
+                Showing {displayLimit} of {ledgerEntries.length} entries
+              </p>
+            </div>
+          )}
+        </>
         )}
       </div>
     </div>
@@ -3446,6 +3550,39 @@ const InvoicesTab = ({ invoices, outstandingInvoices, user, onViewInvoice, onVie
       case 'pending': return <XCircle className="h-3.5 w-3.5 text-red-600 inline-block mr-1" aria-hidden />
       default: return <Clock className="h-3.5 w-3.5 text-neutral-500 inline-block mr-1" aria-hidden />
     }
+  }
+
+  // Calculate days overdue for unpaid invoices
+  const getDaysOverdue = (invoice) => {
+    if (!invoice || invoice.paymentStatus === 'Paid') return null
+    const paidAmount = invoice.paidAmount ?? 0
+    const grandTotal = invoice.grandTotal || invoice.total || 0
+    if (paidAmount >= grandTotal) return null // Fully paid
+    
+    const invoiceDate = new Date(invoice.invoiceDate || invoice.date || invoice.dueDate)
+    const dueDate = invoice.dueDate ? new Date(invoice.dueDate) : new Date(invoiceDate.getTime() + (30 * 24 * 60 * 60 * 1000)) // Default 30 days
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    dueDate.setHours(0, 0, 0, 0)
+    const daysDiff = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24))
+    return daysDiff > 0 ? daysDiff : null
+  }
+
+  const getAgingBadge = (daysOverdue) => {
+    if (!daysOverdue || daysOverdue <= 0) return null
+    let color = 'bg-yellow-100 text-yellow-800'
+    let text = `${daysOverdue} days overdue`
+    if (daysOverdue >= 90) {
+      color = 'bg-red-100 text-red-800'
+      text = `${daysOverdue} days overdue (Critical)`
+    } else if (daysOverdue >= 60) {
+      color = 'bg-orange-100 text-orange-800'
+      text = `${daysOverdue} days overdue`
+    } else if (daysOverdue >= 30) {
+      color = 'bg-yellow-100 text-yellow-800'
+      text = `${daysOverdue} days overdue`
+    }
+    return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color} ml-2`} title={text}>{text}</span>
   }
 
   const totalInvoices = sortedInvoices.length
@@ -3519,9 +3656,12 @@ const InvoicesTab = ({ invoices, outstandingInvoices, user, onViewInvoice, onVie
                         {formatCurrency(balance)}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-center">
-                        <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
-                          {getStatusIcon(status)} {status}
-                        </span>
+                        <div className="flex items-center justify-center flex-wrap gap-1">
+                          <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
+                            {getStatusIcon(status)} {status}
+                          </span>
+                          {getAgingBadge(getDaysOverdue(invoice))}
+                        </div>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-center text-sm">
                         <div className="flex items-center justify-center gap-1.5 sm:gap-2">
@@ -3628,6 +3768,7 @@ const InvoicesTab = ({ invoices, outstandingInvoices, user, onViewInvoice, onVie
                         <Lock className="h-3 w-3 mr-0.5" /> Locked
                       </span>
                     )}
+                    {getAgingBadge(getDaysOverdue(invoice))}
                   </div>
                   <span className={`text-sm font-bold ${getStatusColor(status)} px-2 py-0.5 rounded`}>
                     {status}

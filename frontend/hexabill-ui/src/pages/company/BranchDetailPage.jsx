@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { Building2, ArrowLeft, Plus, Pencil, MapPin, Filter, DollarSign, Trash2, Edit, Users, UserPlus, BarChart3 } from 'lucide-react'
+import { Building2, ArrowLeft, Plus, Pencil, MapPin, Filter, DollarSign, Trash2, Edit, Users, UserPlus, BarChart3, TrendingUp, ArrowRightLeft } from 'lucide-react'
 import { formatCurrency } from '../../utils/currency'
 import toast from 'react-hot-toast'
 import { branchesAPI, routesAPI, expensesAPI, customersAPI, adminAPI } from '../../services'
@@ -9,7 +9,7 @@ import { Input, TextArea } from '../../components/Form'
 import { isAdminOrOwner } from '../../utils/roles'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
 
-const TABS = ['overview', 'routes', 'staff', 'customers', 'expenses', 'report']
+const TABS = ['overview', 'routes', 'staff', 'customers', 'expenses', 'performance', 'report']
 
 const BranchDetailPage = () => {
   const { id } = useParams()
@@ -51,6 +51,13 @@ const BranchDetailPage = () => {
   const [staffToAssignList, setStaffToAssignList] = useState([])
   const [assignStaffSaving, setAssignStaffSaving] = useState(false)
   const [removeStaffSavingId, setRemoveStaffSavingId] = useState(null)
+  const [showTransferCustomerModal, setShowTransferCustomerModal] = useState(false)
+  const [selectedCustomerForTransfer, setSelectedCustomerForTransfer] = useState(null)
+  const [transferTargetBranchId, setTransferTargetBranchId] = useState('')
+  const [transferTargetRouteId, setTransferTargetRouteId] = useState('')
+  const [transferSaving, setTransferSaving] = useState(false)
+  const [allBranches, setAllBranches] = useState([])
+  const [allRoutes, setAllRoutes] = useState([])
   const fetchBranchExpenses = useCallback(async () => {
     if (!id) return
     try {
@@ -149,6 +156,26 @@ const BranchDetailPage = () => {
         .catch(() => setBranchStaff([]))
     }
   }, [activeTab, id])
+
+  useEffect(() => {
+    if (showTransferCustomerModal) {
+      // Load all branches and routes for transfer
+      Promise.all([
+        branchesAPI.getBranches(),
+        routesAPI.getRoutes()
+      ]).then(([branchesRes, routesRes]) => {
+        if (branchesRes?.success && branchesRes?.data) {
+          setAllBranches(branchesRes.data.filter(b => b.id !== parseInt(id, 10))) // Exclude current branch
+        }
+        if (routesRes?.success && routesRes?.data) {
+          setAllRoutes(routesRes.data)
+        }
+      }).catch(() => {
+        setAllBranches([])
+        setAllRoutes([])
+      })
+    }
+  }, [showTransferCustomerModal, id])
 
   const applyDateRange = () => {
     setFromDate(dateDraft.from)
@@ -349,6 +376,58 @@ const BranchDetailPage = () => {
     fetchExpenseCategories()
     setShowAddExpenseModal(true)
   }
+  const handleTransferCustomer = async (e) => {
+    e?.preventDefault()
+    if (!selectedCustomerForTransfer) return
+    const targetBranchId = transferTargetBranchId ? parseInt(transferTargetBranchId, 10) : null
+    const targetRouteId = transferTargetRouteId ? parseInt(transferTargetRouteId, 10) : null
+    
+    if (!targetBranchId) {
+      toast.error('Please select a target branch')
+      return
+    }
+    
+    try {
+      setTransferSaving(true)
+      const res = await customersAPI.updateCustomer(selectedCustomerForTransfer.id, {
+        name: selectedCustomerForTransfer.name,
+        phone: selectedCustomerForTransfer.phone || '',
+        email: selectedCustomerForTransfer.email || '',
+        trn: selectedCustomerForTransfer.trn || '',
+        address: selectedCustomerForTransfer.address || '',
+        creditLimit: selectedCustomerForTransfer.creditLimit || 0,
+        paymentTerms: selectedCustomerForTransfer.paymentTerms || '',
+        customerType: selectedCustomerForTransfer.customerType || 'Credit',
+        branchId: targetBranchId,
+        routeId: targetRouteId
+      })
+      if (res?.success) {
+        toast.success(`Customer transferred to ${allBranches.find(b => b.id === targetBranchId)?.name || 'branch'}`)
+        setShowTransferCustomerModal(false)
+        setSelectedCustomerForTransfer(null)
+        setTransferTargetBranchId('')
+        setTransferTargetRouteId('')
+        // Refresh customers list
+        if (activeTab === 'customers') {
+          setBranchCustomersLoading(true)
+          customersAPI.getCustomers({ branchId: parseInt(id, 10), pageSize: 200 })
+            .then(res => {
+              if (res?.success && res?.data?.items) setBranchCustomers(res.data.items)
+              else setBranchCustomers([])
+            })
+            .catch(() => setBranchCustomers([]))
+            .finally(() => setBranchCustomersLoading(false))
+        }
+      } else {
+        toast.error(res?.message || 'Failed to transfer customer')
+      }
+    } catch (e) {
+      if (!e?._handledByInterceptor) toast.error(e?.message || 'Failed to transfer customer')
+    } finally {
+      setTransferSaving(false)
+    }
+  }
+
   const handleDeleteExpense = (exp) => {
     setExpenseDangerModal({
       isOpen: true,
@@ -639,7 +718,7 @@ const BranchDetailPage = () => {
                     <th className="px-4 py-2 text-left text-xs font-medium text-neutral-600 uppercase">Customer</th>
                     <th className="px-4 py-2 text-left text-xs font-medium text-neutral-600 uppercase">Phone</th>
                     <th className="px-4 py-2 text-right text-xs font-medium text-neutral-600 uppercase">Balance</th>
-                    <th className="px-4 py-2 text-right text-xs font-medium text-neutral-600 uppercase">Actions</th>
+                    {canManage && <th className="px-4 py-2 text-right text-xs font-medium text-neutral-600 uppercase">Actions</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-200 bg-white">
@@ -648,7 +727,27 @@ const BranchDetailPage = () => {
                       <td className="px-4 py-2 font-medium">{c.name}</td>
                       <td className="px-4 py-2 text-sm">{c.phone || '—'}</td>
                       <td className="px-4 py-2 text-sm text-right">{formatCurrency(c.balance ?? c.pendingBalance ?? 0)}</td>
-                      <td className="px-4 py-2 text-right"><button type="button" onClick={() => navigate(`/ledger?customerId=${c.id}`)} className="text-primary-600 hover:underline text-sm">Ledger</button></td>
+                      {canManage && (
+                        <td className="px-4 py-2 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <button type="button" onClick={() => navigate(`/ledger?customerId=${c.id}`)} className="text-primary-600 hover:underline text-sm">Ledger</button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedCustomerForTransfer(c)
+                                setTransferTargetBranchId('')
+                                setTransferTargetRouteId('')
+                                setShowTransferCustomerModal(true)
+                              }}
+                              className="inline-flex items-center gap-1 text-sm text-neutral-600 hover:text-primary-600"
+                              title="Transfer to another branch"
+                            >
+                              <ArrowRightLeft className="h-3.5 w-3.5" />
+                              Transfer
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -735,6 +834,102 @@ const BranchDetailPage = () => {
           </div>
         )}
       </div>
+      )}
+
+      {activeTab === 'performance' && (
+        <div>
+          <p className="text-sm text-neutral-500 mb-2">Date range: {fromDate} to {toDate}</p>
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <input type="date" value={dateDraft.from} onChange={(e) => setDateDraft(prev => ({ ...prev, from: e.target.value }))} className="border border-neutral-300 rounded px-2 py-1 text-sm" />
+            <span className="text-neutral-500">to</span>
+            <input type="date" value={dateDraft.to} onChange={(e) => setDateDraft(prev => ({ ...prev, to: e.target.value }))} className="border border-neutral-300 rounded px-2 py-1 text-sm" />
+            <button type="button" onClick={applyDateRange} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary-600 text-white text-sm font-medium rounded hover:bg-primary-700"><Filter className="h-3.5 w-3.5" />Apply</button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <TrendingUp className="h-4 w-4 text-primary-600" />
+                <p className="text-sm text-neutral-500">Growth %</p>
+              </div>
+              {loading ? (
+                <div className="h-7 flex items-center"><div className="animate-spin rounded-full h-4 w-4 border-2 border-primary-600 border-t-transparent" /></div>
+              ) : (
+                <p className={`text-lg font-semibold ${(summary?.growthPercent ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {summary?.growthPercent != null ? `${summary.growthPercent >= 0 ? '+' : ''}${summary.growthPercent.toFixed(1)}%` : '—'}
+                </p>
+              )}
+            </div>
+            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <DollarSign className="h-4 w-4 text-primary-600" />
+                <p className="text-sm text-neutral-500">Collections Ratio</p>
+              </div>
+              {loading ? (
+                <div className="h-7 flex items-center"><div className="animate-spin rounded-full h-4 w-4 border-2 border-primary-600 border-t-transparent" /></div>
+              ) : (
+                <p className="text-lg font-semibold text-neutral-900">
+                  {summary?.collectionsRatio != null ? `${summary.collectionsRatio.toFixed(1)}%` : '—'}
+                </p>
+              )}
+              {summary?.collectionsRatio != null && (
+                <p className="text-xs text-neutral-500 mt-1">
+                  {formatCurrency(summary.totalPayments ?? 0)} / {formatCurrency(summary.totalSales ?? 0)}
+                </p>
+              )}
+            </div>
+            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <BarChart3 className="h-4 w-4 text-primary-600" />
+                <p className="text-sm text-neutral-500">Avg Invoice Size</p>
+              </div>
+              {loading ? (
+                <div className="h-7 flex items-center"><div className="animate-spin rounded-full h-4 w-4 border-2 border-primary-600 border-t-transparent" /></div>
+              ) : (
+                <p className="text-lg font-semibold text-neutral-900">
+                  {summary?.averageInvoiceSize != null ? formatCurrency(summary.averageInvoiceSize) : '—'}
+                </p>
+              )}
+              {summary?.invoiceCount != null && (
+                <p className="text-xs text-neutral-500 mt-1">{summary.invoiceCount} invoice{summary.invoiceCount !== 1 ? 's' : ''}</p>
+              )}
+            </div>
+            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Users className="h-4 w-4 text-primary-600" />
+                <p className="text-sm text-neutral-500">Total Customers</p>
+              </div>
+              <p className="text-lg font-semibold text-neutral-900">{branchCustomers.length}</p>
+            </div>
+          </div>
+          <div className="bg-white rounded-lg border border-neutral-200 p-4">
+            <h3 className="text-md font-medium text-neutral-800 mb-3 flex items-center gap-2">
+              <BarChart3 className="h-4 w-4" />
+              Performance Summary
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <p className="text-sm text-neutral-500">Total Sales</p>
+                <p className="text-xl font-semibold text-neutral-900">{formatCurrency(summary?.totalSales ?? 0)}</p>
+              </div>
+              <div>
+                <p className="text-sm text-neutral-500">Total Payments Collected</p>
+                <p className="text-xl font-semibold text-emerald-600">{formatCurrency(summary?.totalPayments ?? 0)}</p>
+              </div>
+              <div>
+                <p className="text-sm text-neutral-500">Profit Margin</p>
+                <p className={`text-xl font-semibold ${(summary?.totalSales ?? 0) > 0 && ((summary?.profit ?? 0) / (summary?.totalSales ?? 1) * 100) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {(summary?.totalSales ?? 0) > 0 ? `${((summary?.profit ?? 0) / summary.totalSales * 100).toFixed(1)}%` : '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-neutral-500">Profit</p>
+                <p className={`text-xl font-semibold ${(summary?.profit ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {formatCurrency(summary?.profit ?? 0)}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {activeTab === 'report' && (
@@ -880,6 +1075,77 @@ const BranchDetailPage = () => {
         onConfirm={expenseDangerModal.onConfirm}
         confirmLabel="Delete"
       />
+
+      {showTransferCustomerModal && selectedCustomerForTransfer && (
+        <Modal
+          isOpen
+          title="Transfer Customer to Another Branch"
+          onClose={() => !transferSaving && setShowTransferCustomerModal(false)}
+        >
+          <form onSubmit={handleTransferCustomer} className="space-y-4">
+            <div className="bg-neutral-50 p-3 rounded-lg">
+              <p className="text-sm font-medium text-neutral-900">Customer: {selectedCustomerForTransfer.name}</p>
+              <p className="text-xs text-neutral-500">Current Branch: {displayBranch.name}</p>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">Target Branch <span className="text-red-500">*</span></label>
+              <select
+                value={transferTargetBranchId}
+                onChange={(e) => {
+                  setTransferTargetBranchId(e.target.value)
+                  setTransferTargetRouteId('') // Reset route when branch changes
+                }}
+                required
+                className="block w-full px-3 py-2 bg-white border border-neutral-300 rounded-lg shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
+              >
+                <option value="">Select branch</option>
+                {allBranches.map(b => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">Target Route (optional)</label>
+              <select
+                value={transferTargetRouteId}
+                onChange={(e) => setTransferTargetRouteId(e.target.value)}
+                disabled={!transferTargetBranchId}
+                className="block w-full px-3 py-2 bg-white border border-neutral-300 rounded-lg shadow-sm focus:ring-primary-500 focus:border-primary-500 sm:text-sm disabled:bg-neutral-100 disabled:cursor-not-allowed"
+              >
+                <option value="">No route assignment</option>
+                {allRoutes
+                  .filter(r => transferTargetBranchId && r.branchId === parseInt(transferTargetBranchId, 10))
+                  .map(r => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+              </select>
+              {!transferTargetBranchId && (
+                <p className="text-xs text-neutral-500 mt-1">Select a branch first to see available routes</p>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowTransferCustomerModal(false)}
+                disabled={transferSaving}
+                className="px-4 py-2 border border-neutral-300 rounded-lg text-sm text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={transferSaving}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm hover:bg-primary-700 disabled:opacity-50"
+              >
+                {transferSaving ? 'Transferring...' : 'Transfer Customer'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   )
 }

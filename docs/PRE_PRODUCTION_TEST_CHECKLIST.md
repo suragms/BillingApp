@@ -103,6 +103,8 @@ curl -X POST "http://localhost:5000/api/seed/load-test?customers=1000&products=1
 
 ## 4. API Failure & Error Handling
 
+**Error matrix:** See `ERROR_MATRIX.md` in this folder for the full mapping of status codes (400, 401, 403, 404, 500, 502, 503) to user messages and retry.
+
 ### 4.1 API Down / Network Error
 
 | Scenario | Expected |

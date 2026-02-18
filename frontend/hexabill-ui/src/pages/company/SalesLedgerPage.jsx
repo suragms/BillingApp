@@ -1,14 +1,17 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   Download,
   Filter,
-  FileText
+  FileText,
+  MessageCircle
 } from 'lucide-react'
 import { formatCurrency, formatBalance } from '../../utils/currency'
 import toast from 'react-hot-toast'
 import { LoadingCard } from '../../components/Loading'
 import { Input, Select } from '../../components/Form'
-import { reportsAPI, branchesAPI, routesAPI, adminAPI } from '../../services'
+import { reportsAPI, branchesAPI, routesAPI, adminAPI, salesAPI, customersAPI } from '../../services'
+import { getWhatsAppShareUrl } from '../../utils/whatsapp'
+import { getApiBaseUrl } from '../../services/apiConfig'
 import { useAuth } from '../../hooks/useAuth'
 import { isAdminOrOwner } from '../../utils/roles'
 
@@ -17,10 +20,16 @@ const SHOW_FILTERS_KEY = 'hexabill_sales_ledger_show_filters'
 const SalesLedgerPage = () => {
   const { user } = useAuth()
   const [loading, setLoading] = useState(true)
-  const [dateRange, setDateRange] = useState({
-    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-    to: new Date().toISOString().split('T')[0]
-  })
+  // Default to current month (first day of month to today)
+  const getDefaultDateRange = () => {
+    const today = new Date()
+    const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
+    return {
+      from: firstDayOfMonth.toISOString().split('T')[0],
+      to: today.toISOString().split('T')[0]
+    }
+  }
+  const [dateRange, setDateRange] = useState(getDefaultDateRange())
   const [filters, setFilters] = useState({
     date: '',
     name: '',
@@ -49,6 +58,7 @@ const SalesLedgerPage = () => {
       return v === null ? true : v === 'true'
     } catch { return true }
   })
+  const [sharingSaleId, setSharingSaleId] = useState(null)
 
   useEffect(() => {
     const load = async () => {
@@ -304,11 +314,83 @@ const SalesLedgerPage = () => {
   const filteredLedger = getFilteredLedger()
   const hasActiveFilters = Object.values(filters).some(v => v !== '')
 
-  // Calculate filtered summary - REAL CALCULATIONS (CORRECTED & SIMPLIFIED)
+  // Pagination state
+  const [displayLimit, setDisplayLimit] = useState(100) // Show first 100 entries by default
+  const INITIAL_DISPLAY_LIMIT = 100
+  const LOAD_MORE_INCREMENT = 100
+
+  // Group entries by customer for subtotals
+  const customerGroups = React.useMemo(() => {
+    const groups = new Map()
+    filteredLedger.forEach(entry => {
+      const customerName = entry.customerName || 'Cash Customer'
+      if (!groups.has(customerName)) {
+        groups.set(customerName, [])
+      }
+      groups.get(customerName).push(entry)
+    })
+    return Array.from(groups.entries()).map(([customerName, entries]) => {
+      // Sort entries by date to get the last balance
+      const sortedEntries = [...entries].sort((a, b) => new Date(a.date) - new Date(b.date))
+      const lastEntry = sortedEntries[sortedEntries.length - 1]
+      
+      // Calculate totals correctly
+      const salesEntries = entries.filter(e => e.type === 'Sale')
+      const paymentEntries = entries.filter(e => e.type === 'Payment')
+      
+      // Total sales = sum of all invoice amounts
+      const totalSales = salesEntries.reduce((sum, e) => sum + (e.grandTotal || 0), 0)
+      
+      // Total payments = sum of payment entries only
+      // Note: sales.paidAmount already includes payments, but payment entries are separate transactions
+      // For accuracy, use payment entries' realGotPayment (actual payment amounts)
+      const totalPayments = paymentEntries.reduce((sum, e) => sum + (e.realGotPayment || 0), 0)
+      
+      // Total pending = sum of unpaid amounts from sales (realPending field)
+      const totalPending = salesEntries.reduce((sum, e) => sum + (e.realPending || 0), 0)
+      
+      // Balance = use the last entry's customerBalance from backend (most accurate, already calculated correctly)
+      // This ensures consistency with backend balance calculation
+      const balance = lastEntry?.customerBalance ?? (totalSales - totalPayments)
+      
+      return {
+        customerName,
+        entries,
+        subtotal: {
+          totalSales,
+          totalPayments,
+          totalPending,
+          totalInvoices: salesEntries.length,
+          balance // Use backend-calculated balance
+        }
+      }
+    })
+  }, [filteredLedger])
+
+  // Check if customer filter is active (showing single customer)
+  const isCustomerFiltered = filters.name && customerGroups.length === 1
+
+  // Paginated entries with customer grouping
+  const displayedLedger = React.useMemo(() => {
+    return filteredLedger.slice(0, displayLimit)
+  }, [filteredLedger, displayLimit])
+
+  const hasMore = filteredLedger.length > displayLimit
+  const handleLoadMore = () => {
+    setDisplayLimit(prev => prev + LOAD_MORE_INCREMENT)
+  }
+
+  // Reset pagination when filters change
+  React.useEffect(() => {
+    setDisplayLimit(INITIAL_DISPLAY_LIMIT)
+  }, [dateRange.from, dateRange.to, filters.branchId, filters.routeId, filters.staffId, filters.type, filters.status, filters.name, filters.invoiceNo])
+
+  // Summary from filtered data only (PRODUCTION_MASTER_TODO #8): totals must match the displayed list.
+  // Do not use reportData.salesLedgerSummary for UI totals — it is server summary for initial query only.
   const salesEntries = filteredLedger.filter(e => e.type === 'Sale')
   const paymentEntries = filteredLedger.filter(e => e.type === 'Payment')
 
-  // CRITICAL CORRECTIONS - REAL DATA CALCULATIONS:
+  // CRITICAL CORRECTIONS - REAL DATA CALCULATIONS (from filteredLedger):
   // 1. Total Sales = Sum of GrandTotal from all sales (invoice amounts) - REAL BILL AMOUNTS
   const totalSales = salesEntries.reduce((sum, e) => sum + (e.grandTotal || 0), 0)
 
@@ -350,10 +432,45 @@ const SalesLedgerPage = () => {
     totalInvoices         // Count of invoices
   }
 
+  const handleShareInvoiceWhatsApp = async (entry) => {
+    if (entry.type !== 'Sale' || !entry.saleId) return
+    setSharingSaleId(entry.saleId)
+    try {
+      let phone = null
+      if (entry.customerId) {
+        try {
+          const custRes = await customersAPI.getCustomer(entry.customerId)
+          const cust = custRes?.data ?? custRes
+          phone = cust?.phone ?? null
+        } catch (_) { /* ignore */ }
+      }
+      const blob = await salesAPI.getInvoicePdf(entry.saleId)
+      if (blob) {
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `Invoice_${entry.invoiceNo || entry.saleId}.pdf`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.URL.revokeObjectURL(url)
+      }
+      const dateStr = new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      const message = `Invoice ${entry.invoiceNo || entry.saleId}\nCustomer: ${entry.customerName || 'N/A'}\nDate: ${dateStr}\nTotal: ${formatCurrency(entry.grandTotal || 0)}\n\nPlease find the invoice attached.`
+      const whatsappUrl = getWhatsAppShareUrl(message, phone)
+      window.open(whatsappUrl, '_blank')
+    } catch (err) {
+      console.error('Share invoice WhatsApp:', err)
+      if (!err?._handledByInterceptor) toast.error('Failed to prepare invoice for WhatsApp')
+    } finally {
+      setSharingSaleId(null)
+    }
+  }
+
   const handleExport = async () => {
     try {
       toast.loading('Generating PDF...')
-      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
+      const API_BASE_URL = getApiBaseUrl()
 
       // Build query params with filters
       const params = new URLSearchParams({
@@ -733,8 +850,11 @@ const SalesLedgerPage = () => {
                   <th className="px-2 lg:px-3 py-2 text-center text-xs lg:text-xs font-bold text-gray-700 uppercase whitespace-nowrap border-r border-gray-300">
                     Status
                   </th>
-                  <th className="px-2 lg:px-3 py-2 text-right text-xs lg:text-xs font-bold text-gray-700 uppercase whitespace-nowrap">
+                  <th className="px-2 lg:px-3 py-2 text-right text-xs lg:text-xs font-bold text-gray-700 uppercase whitespace-nowrap border-r border-gray-300">
                     Balance
+                  </th>
+                  <th className="px-2 lg:px-3 py-2 text-center text-xs lg:text-xs font-bold text-gray-700 uppercase whitespace-nowrap">
+                    Actions
                   </th>
                 </tr>
               </thead>
@@ -747,42 +867,85 @@ const SalesLedgerPage = () => {
                     </td>
                   </tr>
                 ) : (
-                  filteredLedger.map((entry, idx) => {
-                    // Single date column - show date only (no time, no plan date)
-                    const dateStr = new Date(entry.date).toLocaleDateString('en-GB', {
-                      day: '2-digit',
-                      month: '2-digit',
-                      year: 'numeric'
-                    })
+                  (() => {
+                    const rows = []
+                    let prevCustomer = null
+                    let currentCustomerEntries = []
 
-                    const rowBgColor = entry.type === 'Payment'
-                      ? 'bg-green-50 hover:bg-green-100'
-                      : 'hover:bg-gray-50'
+                    displayedLedger.forEach((entry, idx) => {
+                      const customerName = entry.customerName || 'Cash Customer'
+                      const isNewCustomer = prevCustomer !== null && prevCustomer !== customerName
+                      
+                      // If we're starting a new customer, add subtotal for previous customer
+                      if (isNewCustomer && currentCustomerEntries.length > 0 && (customerGroups.length > 1 || isCustomerFiltered)) {
+                        const prevCustomerGroup = customerGroups.find(g => g.customerName === prevCustomer)
+                        if (prevCustomerGroup) {
+                          // Use full customer totals from customerGroups, not just displayed entries
+                          rows.push(
+                            <tr key={`subtotal-${prevCustomer}-${idx}`} className="bg-indigo-50 border-t-2 border-indigo-300">
+                              <td colSpan="5" className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-indigo-900 border-r border-gray-300">
+                                Subtotal for {prevCustomer}:
+                              </td>
+                              <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-blue-700 border-r border-gray-300">
+                                {formatCurrency(prevCustomerGroup.subtotal.totalSales)}
+                              </td>
+                              <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-green-700 border-r border-gray-300">
+                                {formatCurrency(prevCustomerGroup.subtotal.totalPayments)}
+                              </td>
+                              <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-red-700 border-r border-gray-300">
+                                {formatCurrency(prevCustomerGroup.subtotal.totalPending)}
+                              </td>
+                              <td className="px-2 lg:px-3 py-2 text-center text-xs lg:text-sm font-bold text-gray-700 border-r border-gray-300">
+                                {prevCustomerGroup.subtotal.totalInvoices} invoices
+                              </td>
+                              <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-indigo-700 border-r border-gray-300">
+                                {formatBalance(prevCustomerGroup.subtotal.totalSales - prevCustomerGroup.subtotal.totalPayments)}
+                              </td>
+                              <td className="px-2 lg:px-3 py-2" />
+                            </tr>
+                          )
+                        }
+                        currentCustomerEntries = []
+                      }
+                      
+                      prevCustomer = customerName
+                      currentCustomerEntries.push(entry)
 
-                    const normalizeStatusForDisplay = (status) => {
-                      if (!status || status === '-') return 'Unpaid'
-                      const statusUpper = (status || '').toUpperCase()
-                      if (statusUpper === 'PAID' || statusUpper === 'CLEARED') return 'Paid'
-                      if (statusUpper === 'PARTIAL') return 'Partial'
-                      if (statusUpper === 'UNPAID' || statusUpper === 'PENDING' || statusUpper === 'DUE') return 'Unpaid'
-                      return status
-                    }
+                      // Single date column - show date only (no time, no plan date)
+                      const dateStr = new Date(entry.date).toLocaleDateString('en-GB', {
+                        day: '2-digit',
+                        month: '2-digit',
+                        year: 'numeric'
+                      })
 
-                    const displayStatus = normalizeStatusForDisplay(entry.status)
+                      const rowBgColor = entry.type === 'Payment'
+                        ? 'bg-green-50 hover:bg-green-100'
+                        : 'hover:bg-gray-50'
 
-                    const statusColor =
-                      displayStatus === 'Paid'
-                        ? 'bg-green-100 text-green-800 border-green-300'
-                        : displayStatus === 'Partial'
-                          ? 'bg-yellow-100 text-yellow-800 border-yellow-300'
-                          : displayStatus === 'Unpaid'
-                            ? 'bg-red-100 text-red-800 border-red-300'
-                            : 'bg-gray-100 text-gray-800 border-gray-300'
+                      const normalizeStatusForDisplay = (status) => {
+                        if (!status || status === '-') return 'Unpaid'
+                        const statusUpper = (status || '').toUpperCase()
+                        if (statusUpper === 'PAID' || statusUpper === 'CLEARED') return 'Paid'
+                        if (statusUpper === 'PARTIAL') return 'Partial'
+                        if (statusUpper === 'UNPAID' || statusUpper === 'PENDING' || statusUpper === 'DUE') return 'Unpaid'
+                        return status
+                      }
 
-                    const customerBalance = entry.customerBalance || 0
+                      const displayStatus = normalizeStatusForDisplay(entry.status)
 
-                    return (
-                      <tr key={idx} className={rowBgColor}>
+                      const statusColor =
+                        displayStatus === 'Paid'
+                          ? 'bg-green-100 text-green-800 border-green-300'
+                          : displayStatus === 'Partial'
+                            ? 'bg-yellow-100 text-yellow-800 border-yellow-300'
+                            : displayStatus === 'Unpaid'
+                              ? 'bg-red-100 text-red-800 border-red-300'
+                              : 'bg-gray-100 text-gray-800 border-gray-300'
+
+                      const customerBalance = entry.customerBalance || 0
+
+                      rows.push(
+                        <tr key={idx} className={rowBgColor}>
                         <td className="px-2 lg:px-3 py-1.5 lg:py-2 whitespace-nowrap text-xs lg:text-sm text-gray-900 border-r border-gray-200">
                           {dateStr}
                         </td>
@@ -844,9 +1007,73 @@ const SalesLedgerPage = () => {
                         >
                           {formatBalance(customerBalance)}
                         </td>
+                        <td className="px-2 lg:px-3 py-1.5 lg:py-2 whitespace-nowrap text-center border-gray-200">
+                          {entry.type === 'Sale' && entry.saleId ? (
+                            <button
+                              type="button"
+                              onClick={() => handleShareInvoiceWhatsApp(entry)}
+                              disabled={sharingSaleId === entry.saleId}
+                              className="inline-flex items-center justify-center p-1.5 rounded-md text-green-600 hover:bg-green-50 hover:text-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="Share via WhatsApp"
+                            >
+                              <MessageCircle className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span className="text-gray-300">-</span>
+                          )}
+                        </td>
                       </tr>
-                    )
-                  })
+                      )
+                    })
+
+                    // Add subtotal for last customer if multiple customers or customer filtered
+                    if (currentCustomerEntries.length > 0 && (customerGroups.length > 1 || isCustomerFiltered)) {
+                      const lastCustomerGroup = customerGroups.find(g => g.customerName === prevCustomer)
+                      if (lastCustomerGroup) {
+                        // Use full customer totals from customerGroups, not just displayed entries
+                        rows.push(
+                          <tr key={`subtotal-${prevCustomer}-final`} className="bg-indigo-50 border-t-2 border-indigo-300">
+                            <td colSpan="5" className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-indigo-900 border-r border-gray-300">
+                              Subtotal for {prevCustomer}:
+                            </td>
+                            <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-blue-700 border-r border-gray-300">
+                              {formatCurrency(lastCustomerGroup.subtotal.totalSales)}
+                            </td>
+                            <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-green-700 border-r border-gray-300">
+                              {formatCurrency(lastCustomerGroup.subtotal.totalPayments)}
+                            </td>
+                            <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-red-700 border-r border-gray-300">
+                              {formatCurrency(lastCustomerGroup.subtotal.totalPending)}
+                            </td>
+                            <td className="px-2 lg:px-3 py-2 text-center text-xs lg:text-sm font-bold text-gray-700 border-r border-gray-300">
+                              {lastCustomerGroup.subtotal.totalInvoices} invoices
+                            </td>
+                            <td className="px-2 lg:px-3 py-2 text-right text-xs lg:text-sm font-bold text-indigo-700 border-r border-gray-300">
+                              {formatBalance(lastCustomerGroup.subtotal.balance)}
+                            </td>
+                            <td className="px-2 lg:px-3 py-2" />
+                          </tr>
+                        )
+                      }
+                    }
+
+                    return rows
+                  })()
+                )}
+                {hasMore && (
+                  <tr>
+                    <td colSpan="10" className="px-4 py-3 text-center bg-gray-50">
+                      <button
+                        onClick={handleLoadMore}
+                        className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 transition-colors"
+                      >
+                        Load More ({filteredLedger.length - displayLimit} remaining)
+                      </button>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Showing {displayLimit} of {filteredLedger.length} entries
+                      </p>
+                    </td>
+                  </tr>
                 )}
               </tbody>
               <tfoot className="bg-gray-200 sticky bottom-0 border-t-4 border-gray-400">
@@ -911,13 +1138,19 @@ const SalesLedgerPage = () => {
 
           {/* Mobile Card View - Shown only on mobile */}
           <div className="md:hidden h-full overflow-auto px-2 py-2 space-y-2">
-            {filteredLedger.length === 0 ? (
+            {displayedLedger.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-gray-500">
                 <FileText className="w-12 h-12 mb-2 text-gray-300" />
                 <p className="text-sm">No transactions found</p>
               </div>
             ) : (
-              filteredLedger.map((entry, idx) => {
+              <>
+                {displayedLedger.map((entry, idx) => {
+                  const customerName = entry.customerName || 'Cash Customer'
+                  const isNewCustomer = idx === 0 || displayedLedger[idx - 1].customerName !== customerName
+                  const isLastEntry = idx === displayedLedger.length - 1
+                  const isLastOfCustomer = isLastEntry || displayedLedger[idx + 1].customerName !== customerName
+                  const customerGroup = customerGroups.find(g => g.customerName === customerName)
                 const dateStr = new Date(entry.date).toLocaleDateString('en-GB', {
                   day: '2-digit',
                   month: '2-digit',
@@ -942,13 +1175,44 @@ const SalesLedgerPage = () => {
                         : 'bg-gray-100 text-gray-800'
 
                 return (
-                  <div
-                    key={idx}
-                    className={`rounded-lg border p-2.5 ${entry.type === 'Payment'
-                      ? 'bg-green-50 border-green-200'
-                      : 'bg-white border-gray-200'
-                      }`}
-                  >
+                  <React.Fragment key={idx}>
+                    {isNewCustomer && idx > 0 && (customerGroups.length > 1 || isCustomerFiltered) && (() => {
+                      const prevCustomerName = displayedLedger[idx - 1].customerName || 'Cash Customer'
+                      const prevCustomerGroup = customerGroups.find(g => g.customerName === prevCustomerName)
+                      return prevCustomerGroup ? (
+                        <div className="bg-indigo-50 border-2 border-indigo-300 rounded-lg p-3 mb-2">
+                          <div className="text-xs font-bold text-indigo-900 mb-1">
+                            Subtotal for {prevCustomerName}:
+                          </div>
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div>
+                                <div className="text-gray-600">Sales:</div>
+                                <div className="font-bold text-blue-700">{formatCurrency(prevCustomerGroup.subtotal.totalSales)}</div>
+                              </div>
+                              <div>
+                                <div className="text-gray-600">Paid:</div>
+                                <div className="font-bold text-green-700">{formatCurrency(prevCustomerGroup.subtotal.totalPayments)}</div>
+                              </div>
+                              <div>
+                                <div className="text-gray-600">Pending:</div>
+                                <div className="font-bold text-red-700">{formatCurrency(prevCustomerGroup.subtotal.totalPending)}</div>
+                              </div>
+                              <div>
+                                <div className="text-gray-600">Balance:</div>
+                                <div className={`font-bold ${prevCustomerGroup.subtotal.balance < 0 ? 'text-green-600' : prevCustomerGroup.subtotal.balance > 0 ? 'text-red-600' : 'text-gray-700'}`}>
+                                  {formatBalance(prevCustomerGroup.subtotal.balance)}
+                                </div>
+                              </div>
+                            </div>
+                        </div>
+                      ) : null
+                    })()}
+                    <div
+                      className={`rounded-lg border p-2.5 ${entry.type === 'Payment'
+                        ? 'bg-green-50 border-green-200'
+                        : 'bg-white border-gray-200'
+                        }`}
+                    >
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex-1">
                         <div className="flex items-center gap-1.5 mb-1">
@@ -1012,9 +1276,54 @@ const SalesLedgerPage = () => {
                         <span className="text-xs font-medium text-gray-700">{entry.paymentMode}</span>
                       </div>
                     )}
-                  </div>
+                    </div>
+                    {isLastOfCustomer && (customerGroups.length > 1 || isCustomerFiltered) && (() => {
+                      const customerGroup = customerGroups.find(g => g.customerName === customerName)
+                      return customerGroup ? (
+                        <div className="bg-indigo-50 border-2 border-indigo-300 rounded-lg p-3 mt-2">
+                          <div className="text-xs font-bold text-indigo-900 mb-1">
+                            Subtotal for {customerName}:
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <div className="text-gray-600">Sales:</div>
+                              <div className="font-bold text-blue-700">{formatCurrency(customerGroup.subtotal.totalSales)}</div>
+                            </div>
+                            <div>
+                              <div className="text-gray-600">Paid:</div>
+                              <div className="font-bold text-green-700">{formatCurrency(customerGroup.subtotal.totalPayments)}</div>
+                            </div>
+                            <div>
+                              <div className="text-gray-600">Pending:</div>
+                              <div className="font-bold text-red-700">{formatCurrency(customerGroup.subtotal.totalPending)}</div>
+                            </div>
+                            <div>
+                              <div className="text-gray-600">Balance:</div>
+                              <div className={`font-bold ${customerGroup.subtotal.balance < 0 ? 'text-green-600' : customerGroup.subtotal.balance > 0 ? 'text-red-600' : 'text-gray-700'}`}>
+                                {formatBalance(customerGroup.subtotal.balance)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null
+                    })()}
+                  </React.Fragment>
                 )
-              })
+              })}
+              {hasMore && (
+                <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
+                  <button
+                    onClick={handleLoadMore}
+                    className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 transition-colors"
+                  >
+                    Load More ({filteredLedger.length - displayLimit} remaining)
+                  </button>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Showing {displayLimit} of {filteredLedger.length} entries
+                  </p>
+                </div>
+              )}
+              </>
             )}
           </div>
         </div>

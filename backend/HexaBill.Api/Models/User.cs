@@ -34,6 +34,16 @@ namespace HexaBill.Api.Models
         public DateTime CreatedAt { get; set; }
         /// <summary>Incremented when Force Logout is triggered. JWT session_version must match or 401.</summary>
         public int SessionVersion { get; set; }
+        /// <summary>Last successful login (UTC).</summary>
+        public DateTime? LastLoginAt { get; set; }
+        /// <summary>Last activity ping (UTC). Used for staff online indicator (green/red).</summary>
+        public DateTime? LastActiveAt { get; set; }
+        /// <summary>Profile/avatar image path (e.g. profiles/xxx.jpg).</summary>
+        [MaxLength(500)]
+        public string? ProfilePhotoUrl { get; set; }
+        /// <summary>UI language preference: "en" (English) or "ar" (Arabic).</summary>
+        [MaxLength(10)]
+        public string? LanguagePreference { get; set; }
     }
 
     public enum UserRole

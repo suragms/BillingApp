@@ -20,6 +20,30 @@ export const authAPI = {
     const response = await api.get('/auth/validate')
     return response.data
   },
+
+  getProfile: async () => {
+    const response = await api.get('/auth/profile')
+    return response.data
+  },
+
+  updateProfile: async (data) => {
+    const response = await api.put('/auth/profile', data)
+    return response.data
+  },
+
+  uploadProfilePhoto: async (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post('/auth/profile/photo', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    return response.data
+  },
+
+  changePassword: async (payload) => {
+    const response = await api.put('/auth/profile/password', payload)
+    return response.data
+  },
 }
 
 export const productsAPI = {
@@ -45,6 +69,11 @@ export const productsAPI = {
 
   deleteProduct: async (id) => {
     const response = await api.delete(`/products/${id}`)
+    return response.data
+  },
+
+  activateProduct: async (id) => {
+    const response = await api.post(`/products/${id}/activate`)
     return response.data
   },
 
@@ -76,6 +105,44 @@ export const productsAPI = {
 
   resetAllStock: async () => {
     const response = await api.post('/products/reset-all-stock')
+    return response.data
+  },
+
+  bulkUpdatePrices: async (request) => {
+    const response = await api.post('/products/bulk-update-prices', request)
+    return response.data
+  },
+
+  uploadProductImage: async (productId, file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post(`/products/${productId}/upload-image`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+    return response.data
+  },
+}
+
+export const productCategoriesAPI = {
+  getCategories: async () => {
+    const response = await api.get('/productcategories')
+    return response.data
+  },
+
+  createCategory: async (category) => {
+    const response = await api.post('/productcategories', category)
+    return response.data
+  },
+
+  updateCategory: async (id, category) => {
+    const response = await api.put(`/productcategories/${id}`, category)
+    return response.data
+  },
+
+  deleteCategory: async (id) => {
+    const response = await api.delete(`/productcategories/${id}`)
     return response.data
   },
 }
@@ -243,6 +310,28 @@ export const salesAPI = {
 
   getNextInvoiceNumber: async () => {
     const response = await api.get('/sales/next-invoice-number')
+    return response.data
+  },
+
+  // Held Invoice APIs
+  holdInvoice: async (name, invoiceData) => {
+    const response = await api.post('/sales/held', { name, invoiceData })
+    return response.data
+  },
+
+  getHeldInvoices: async () => {
+    const response = await api.get('/sales/held')
+    return response.data
+  },
+
+  deleteHeldInvoice: async (id) => {
+    const response = await api.delete(`/sales/held/${id}`)
+    return response.data
+  },
+
+  // Repeat Last Invoice
+  getLastInvoice: async () => {
+    const response = await api.get('/sales/last')
     return response.data
   },
 
@@ -488,6 +577,47 @@ export const expensesAPI = {
     const response = await api.post('/expenses/categories', categoryData)
     return response.data
   },
+
+  uploadAttachment: async (expenseId, file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post(`/expenses/${expenseId}/attachment`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+    return response.data
+  },
+
+  approveExpense: async (expenseId) => {
+    const response = await api.post(`/expenses/${expenseId}/approve`)
+    return response.data
+  },
+
+  rejectExpense: async (expenseId, reason) => {
+    const response = await api.post(`/expenses/${expenseId}/reject`, { rejectionReason: reason || '' })
+    return response.data
+  },
+
+  getRecurringExpenses: async () => {
+    const response = await api.get('/expenses/recurring')
+    return response.data
+  },
+
+  createRecurringExpense: async (data) => {
+    const response = await api.post('/expenses/recurring', data)
+    return response.data
+  },
+
+  updateRecurringExpense: async (id, data) => {
+    const response = await api.put(`/expenses/recurring/${id}`, data)
+    return response.data
+  },
+
+  deleteRecurringExpense: async (id) => {
+    const response = await api.delete(`/expenses/recurring/${id}`)
+    return response.data
+  },
 }
 
 export const reportsAPI = {
@@ -538,12 +668,13 @@ export const reportsAPI = {
     return response.data
   },
   getStaffPerformance: async (params = {}) => {
+    // FIX: Include routeId filter if provided
     const response = await api.get('/reports/staff-performance', { params })
     return response.data
   },
 
-  getChequeReport: async () => {
-    const response = await api.get('/reports/cheque')
+  getChequeReport: async (params = {}) => {
+    const response = await api.get('/reports/cheque', { params })
     return response.data
   },
 
@@ -594,8 +725,16 @@ export const settingsAPI = {
     const response = await api.get('/settings')
     return response.data
   },
+  getCompanySettings: async () => {
+    const response = await api.get('/settings/company')
+    return response.data
+  },
   updateSettings: async (settings) => {
     const response = await api.put('/settings', settings)
+    return response.data
+  },
+  getCompanySettings: async () => {
+    const response = await api.get('/settings/company')
     return response.data
   },
   clearData: async () => {
@@ -607,6 +746,10 @@ export const settingsAPI = {
 export const usersAPI = {
   getMyAssignedRoutes: async () => {
     const response = await api.get('/users/me/assigned-routes')
+    return response.data
+  },
+  pingMe: async () => {
+    const response = await api.patch('/users/me/ping')
     return response.data
   }
 }
@@ -709,6 +852,16 @@ export const adminAPI = {
 
   resetPassword: async (id, passwordData) => {
     const response = await api.post(`/admin/users/${id}/reset-password`, passwordData)
+    return response.data
+  },
+
+  getUserActivity: async (userId, limit = 50) => {
+    const response = await api.get(`/admin/users/${userId}/activity`, { params: { limit } })
+    return response.data
+  },
+
+  getSessions: async (limit = 100) => {
+    const response = await api.get('/admin/sessions', { params: { limit } })
     return response.data
   },
 }
@@ -826,6 +979,20 @@ export const profitAPI = {
       params: { date }
     })
     return response.data
+  },
+  getBranchProfit: async (fromDate, toDate) => {
+    const response = await api.get('/profit/branch-breakdown', {
+      params: { fromDate, toDate }
+    })
+    return response.data
+  },
+  /** Export P&L as PDF for accountant (#58). Returns blob; caller creates download. */
+  exportProfitLossPdf: async (fromDate, toDate) => {
+    const response = await api.get('/profit/export/pdf', {
+      params: { fromDate, toDate },
+      responseType: 'blob'
+    })
+    return response.data
   }
 }
 
@@ -866,20 +1033,54 @@ export const suppliersAPI = {
 
 // Backup API
 export const backupAPI = {
-  createBackup: async (exportToDesktop = true, uploadToGoogleDrive = false, sendEmail = false) => {
+  createBackup: async (downloadToBrowser = false, uploadToGoogleDrive = false, sendEmail = false) => {
     const response = await api.post('/backup/create', null, {
-      params: { exportToDesktop, uploadToGoogleDrive, sendEmail }
+      params: { downloadToBrowser, uploadToGoogleDrive, sendEmail },
+      responseType: downloadToBrowser ? 'blob' : 'json'
     })
+    if (downloadToBrowser && response.data instanceof Blob) {
+      // Handle blob download
+      const url = window.URL.createObjectURL(response.data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `HexaBill_Backup_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+      return { success: true, message: 'Backup downloaded' }
+    }
     return response.data
   },
-  createFullBackup: async (exportToDesktop = false) => {
+  createFullBackup: async (downloadToBrowser = false) => {
     const response = await api.post('/backup/create', null, {
-      params: { exportToDesktop, uploadToGoogleDrive: false, sendEmail: false }
+      params: { downloadToBrowser, uploadToGoogleDrive: false, sendEmail: false },
+      responseType: downloadToBrowser ? 'blob' : 'json'
     })
+    if (downloadToBrowser && response.data instanceof Blob) {
+      // Handle blob download
+      const url = window.URL.createObjectURL(response.data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `HexaBill_FullBackup_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+      return { success: true, message: 'Full backup downloaded' }
+    }
     return response.data
   },
   getBackups: async () => {
     const response = await api.get('/backup/list')  // FIXED: Use backup endpoint not admin
+    return response.data
+  },
+  getSchedule: async () => {
+    const response = await api.get('/backup/schedule')
+    return response.data
+  },
+  saveSchedule: async (dto) => {
+    const response = await api.post('/backup/schedule', dto)
     return response.data
   },
   restoreBackup: async (fileName, uploadedFilePath = null) => {
@@ -908,6 +1109,14 @@ export const backupAPI = {
       responseType: 'blob'
     })
     return response.data
+  },
+  getSchedule: async () => {
+    const response = await api.get('/backup/schedule')
+    return response.data
+  },
+  saveSchedule: async (schedule) => {
+    const response = await api.post('/backup/schedule', schedule)
+    return response.data
   }
 }
 
@@ -933,6 +1142,17 @@ export const subscriptionAPI = {
 
   getCurrentSubscription: async () => {
     const response = await api.get('/subscription/current')
+    return response.data
+  },
+
+  /** Create Stripe Checkout Session; returns { url, sessionId }. If gateway not configured, use createSubscription for trial. */
+  createCheckoutSession: async (planId, billingCycle = 'Monthly', successUrl, cancelUrl) => {
+    const response = await api.post('/subscription/checkout-session', {
+      planId,
+      billingCycle,
+      successUrl: successUrl || `${window.location.origin}/subscription-plans?success=1`,
+      cancelUrl: cancelUrl || `${window.location.origin}/subscription-plans?cancel=1`
+    })
     return response.data
   },
 
@@ -1016,6 +1236,12 @@ export const superAdminAPI = {
     return response.data
   },
 
+  /** Global search across all tenants (invoices + customers). SystemAdmin only. #44 */
+  globalSearch: async (q, limit = 25) => {
+    const response = await api.get('/superadmin/globalsearch', { params: { q: q || undefined, limit } })
+    return response.data
+  },
+
   getTenants: async (params = {}) => {
     const response = await api.get('/superadmin/tenant', { params })
     return response.data
@@ -1024,6 +1250,24 @@ export const superAdminAPI = {
   getTenant: async (id) => {
     const response = await api.get(`/superadmin/tenant/${id}`)
     return response.data
+  },
+
+  /** Tenant invoices (read-only, no impersonation). #50 */
+  getTenantInvoices: async (tenantId, page = 1, pageSize = 20) => {
+    const response = await api.get(`/superadmin/tenant/${tenantId}/invoices`, { params: { page, pageSize } })
+    return response.data
+  },
+
+  /** Tenant subscription/payment history. #51 */
+  getTenantPaymentHistory: async (tenantId) => {
+    const response = await api.get(`/superadmin/tenant/${tenantId}/payment-history`)
+    return response.data
+  },
+
+  /** Export tenant data (invoices, customers, products) as ZIP. #52. Returns blob; use downloadTenantExport for download. */
+  getTenantExport: async (tenantId) => {
+    const response = await api.get(`/superadmin/tenant/${tenantId}/export`, { responseType: 'blob' })
+    return response
   },
 
   createTenant: async (tenantData) => {
@@ -1058,6 +1302,30 @@ export const superAdminAPI = {
 
   getSubscriptionPlans: async () => {
     const response = await api.get('/subscription/plans')
+    return response.data
+  },
+
+  /** Platform revenue report: MRR trend, new signups, churn. SystemAdmin only. #45 */
+  getRevenueReport: async () => {
+    const response = await api.get('/subscription/revenue-report')
+    return response.data
+  },
+
+  /** Tenant onboarding tracker: completion steps per tenant; optional incomplete-only. SystemAdmin only. #46 */
+  getOnboardingReport: async (incompleteOnly = false) => {
+    const response = await api.get('/superadmin/onboarding-report', { params: { incompleteOnly } })
+    return response.data
+  },
+
+  /** Read-only SQL console. SELECT only; 30s timeout, 1000 row limit. SystemAdmin only. #47 */
+  executeSql: async (query) => {
+    const response = await api.post('/superadmin/sql-console', { query })
+    return response.data
+  },
+
+  /** Bulk tenant actions: extend_trial (days), send_announcement (title, message). SystemAdmin only. #48 */
+  bulkAction: async (payload) => {
+    const response = await api.post('/superadmin/tenant/bulk-actions', payload)
     return response.data
   },
 
@@ -1111,6 +1379,12 @@ export const superAdminAPI = {
     return response.data
   },
 
+  getDuplicateDataPreview: async (targetTenantId, sourceTenantId, dataTypes) => {
+    const types = Array.isArray(dataTypes) ? dataTypes.join(',') : (dataTypes || 'Products,Settings')
+    const response = await api.get(`/superadmin/tenant/${targetTenantId}/duplicate-data/preview`, { params: { sourceTenantId, dataTypes: types } })
+    return response.data
+  },
+
   duplicateDataToTenant: async (targetTenantId, sourceTenantId, dataTypes) => {
     const response = await api.post(`/superadmin/tenant/${targetTenantId}/duplicate-data`, { sourceTenantId, dataTypes })
     return response.data
@@ -1121,8 +1395,19 @@ export const superAdminAPI = {
     return response.data
   },
 
-  getErrorLogs: async (limit = 100) => {
-    const response = await api.get('/error-logs', { params: { limit } })
+  getErrorLogs: async (limit = 100, includeResolved = false) => {
+    const response = await api.get('/error-logs', { params: { limit, includeResolved } })
+    return response.data
+  },
+
+  /** Alert summary for Super Admin bell: unresolved count, last 24h/1h, recent items. #49 */
+  getAlertSummary: async () => {
+    const response = await api.get('/superadmin/alert-summary')
+    return response.data
+  },
+
+  resolveErrorLog: async (id) => {
+    const response = await api.patch(`/error-logs/${id}/resolve`)
     return response.data
   },
 
@@ -1258,6 +1543,15 @@ export const routesAPI = {
   },
   deleteRouteExpense: async (routeId, expenseId) => {
     const response = await api.delete(`/routes/${routeId}/expenses/${expenseId}`)
+    return response.data
+  },
+  updateCustomerVisit: async (routeId, customerId, visitData) => {
+    const response = await api.put(`/routes/${routeId}/visits/${customerId}`, visitData)
+    return response.data
+  },
+  getCustomerVisits: async (routeId, date = null) => {
+    const params = date ? { date } : {}
+    const response = await api.get(`/routes/${routeId}/visits`, { params })
     return response.data
   },
 }

@@ -155,6 +155,24 @@ namespace HexaBill.Api.Modules.SuperAdmin
         }
 
         /// <summary>
+        /// Tenant onboarding tracker: completion steps per tenant; optional filter to incomplete only. SystemAdmin only. (PRODUCTION_MASTER_TODO #46)
+        /// </summary>
+        [HttpGet("/api/superadmin/onboarding-report")]
+        public async Task<ActionResult<ApiResponse<OnboardingReportDto>>> GetOnboardingReport([FromQuery] bool incompleteOnly = false)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var report = await _tenantService.GetOnboardingReportAsync(incompleteOnly);
+                return Ok(new ApiResponse<OnboardingReportDto> { Success = true, Data = report });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<OnboardingReportDto> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
         /// Log SuperAdmin impersonation start (audit trail). Call before redirecting to tenant workspace.
         /// </summary>
         [HttpPost("impersonate/enter")]
@@ -390,6 +408,79 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     Message = "An error occurred",
                     Errors = new List<string> { ex.Message }
                 });
+            }
+        }
+
+        /// <summary>
+        /// List tenant invoices (read-only, no impersonation). SystemAdmin only. (PRODUCTION_MASTER_TODO #50)
+        /// </summary>
+        [HttpGet("{id}/invoices")]
+        public async Task<ActionResult<ApiResponse<PagedResponse<TenantInvoiceListItemDto>>>> GetTenantInvoices(int id, [FromQuery] int page = 1, [FromQuery] int pageSize = 20)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var result = await _tenantService.GetTenantInvoicesAsync(id, page, pageSize);
+                return Ok(new ApiResponse<PagedResponse<TenantInvoiceListItemDto>> { Success = true, Data = result });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<PagedResponse<TenantInvoiceListItemDto>> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Subscription/payment history for tenant (when paid, renewals, payment method). SystemAdmin only. (PRODUCTION_MASTER_TODO #51)
+        /// </summary>
+        [HttpGet("{id}/payment-history")]
+        public async Task<ActionResult<ApiResponse<List<TenantPaymentHistoryItemDto>>>> GetTenantPaymentHistory(int id)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var result = await _tenantService.GetTenantPaymentHistoryAsync(id);
+                return Ok(new ApiResponse<List<TenantPaymentHistoryItemDto>> { Success = true, Data = result });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<List<TenantPaymentHistoryItemDto>> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Export tenant key data (invoices, customers, products) as ZIP of CSVs for offboarding/compliance. SystemAdmin only. (PRODUCTION_MASTER_TODO #52)
+        /// </summary>
+        [HttpGet("{id}/export")]
+        public async Task<IActionResult> ExportTenantData(int id)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var (stream, fileName) = await _tenantService.ExportTenantDataAsync(id);
+                return File(stream, "application/zip", fileName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Export tenant data failed for tenant {TenantId}", id);
+                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Bulk tenant actions: extend trial, send announcement. SystemAdmin only. (PRODUCTION_MASTER_TODO #48)
+        /// </summary>
+        [HttpPost("bulk-actions")]
+        public async Task<ActionResult<ApiResponse<BulkActionResultDto>>> ExecuteBulkAction([FromBody] BulkActionRequest request)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var result = await _tenantService.ExecuteBulkActionAsync(request ?? new BulkActionRequest());
+                return Ok(new ApiResponse<BulkActionResultDto> { Success = true, Data = result });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<BulkActionResultDto> { Success = false, Message = ex.Message });
             }
         }
 
@@ -751,6 +842,30 @@ namespace HexaBill.Api.Modules.SuperAdmin
             catch (Exception ex)
             {
                 return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// <summary>Preview what would be copied (product/settings counts) and what target already has. SystemAdmin only.</summary>
+        [HttpGet("{id}/duplicate-data/preview")]
+        public async Task<ActionResult<ApiResponse<DuplicateDataPreviewDto>>> GetDuplicateDataPreview(int id, [FromQuery] int sourceTenantId, [FromQuery] string? dataTypes = null)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            if (sourceTenantId <= 0)
+            {
+                return BadRequest(new ApiResponse<DuplicateDataPreviewDto> { Success = false, Message = "sourceTenantId is required." });
+            }
+            var types = string.IsNullOrEmpty(dataTypes)
+                ? new List<string>()
+                : dataTypes.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()).ToList();
+            if (types.Count == 0) types = new List<string> { "Products", "Settings" };
+            try
+            {
+                var preview = await _tenantService.GetDuplicateDataPreviewAsync(id, sourceTenantId, types);
+                return Ok(new ApiResponse<DuplicateDataPreviewDto> { Success = true, Data = preview });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<DuplicateDataPreviewDto> { Success = false, Message = ex.Message });
             }
         }
 

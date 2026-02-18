@@ -1,7 +1,13 @@
 /*
-Purpose: Comprehensive backup service with database + all files + export to desktop
+Purpose: Comprehensive backup service with database + all files + export to desktop.
 Author: AI Assistant
 Date: 2024
+
+EPHEMERAL STORAGE (Production): _backupDirectory is under Directory.GetCurrentDirectory()/backups.
+On Render (and similar hosts), this disk is ephemeral; backups are lost on restart/redeploy.
+Use "Download to browser" when creating a backup, or move backup storage to S3/R2.
+PostgreSQL: Prefer pg_dump when available (set Backup:PostgresPgDumpPath if needed).
+See docs/BACKUP_AND_IMPORT_STRATEGY.md.
 */
 using System.IO.Compression;
 using System.Text;
@@ -10,6 +16,9 @@ using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using HexaBill.Api.Modules.Reports;
 using HexaBill.Api.Modules.Billing;
+using Amazon.S3;
+using Amazon.S3.Model;
+using Amazon;
 
 namespace HexaBill.Api.Modules.SuperAdmin
 {
@@ -18,6 +27,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
         Task<string> CreateFullBackupAsync(bool exportToDesktop = false, bool uploadToGoogleDrive = false, bool sendEmail = false);
         Task<bool> RestoreFromBackupAsync(string backupFilePath, string? uploadedFilePath = null);
         Task<List<BackupInfo>> GetBackupListAsync();
+        /// <summary>Returns a stream and filename for download. Caller must dispose the stream. For S3, stream is a temp-file stream that deletes on dispose.</summary>
+        Task<(Stream stream, string fileName)?> GetBackupForDownloadAsync(string fileName);
         Task<bool> DeleteBackupAsync(string fileName);
         Task ScheduleDailyBackupAsync();
         Task<ImportPreview> PreviewImportAsync(string backupFilePath, string? uploadedFilePath = null);
@@ -219,6 +230,16 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
                 }
 
+                // Upload to S3 if configured (recommended for production; survives server restarts)
+                try
+                {
+                    await UploadToS3Async(zipPath, zipFileName);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ S3 upload failed: {ex.Message}");
+                }
+
                 // Send email if requested
                 if (sendEmail)
                 {
@@ -270,52 +291,269 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 throw new InvalidOperationException("Database connection string not found");
             }
 
-            // CRITICAL: Skip database file backup for PostgreSQL (file-based backup only works for SQLite)
-            if (connectionString.Contains("Host=") || connectionString.Contains("Server="))
+            // Check if PostgreSQL
+            bool isPostgreSQL = connectionString.Contains("Host=") || connectionString.Contains("Server=");
+            
+            if (isPostgreSQL)
             {
-                Console.WriteLine("⚠️ PostgreSQL detected - skipping database file backup (use pg_dump for PostgreSQL backups)");
-                return;
+                // PostgreSQL: Use pg_dump to create SQL dump
+                await BackupPostgreSQLDatabaseAsync(zipArchive, timestamp, connectionString);
             }
-
-            var dbPath = ExtractValue(connectionString.Split(';'), "Data Source");
-            if (string.IsNullOrEmpty(dbPath))
+            else
             {
-                Console.WriteLine("⚠️ No Data Source found in connection string - skipping database file backup");
-                return;
+                // SQLite: Copy database file
+                var dbPath = ExtractValue(connectionString.Split(';'), "Data Source");
+                if (string.IsNullOrEmpty(dbPath))
+                {
+                    Console.WriteLine("⚠️ No Data Source found in connection string - skipping database file backup");
+                    return;
+                }
+
+                var fullDbPath = Path.IsPathRooted(dbPath)
+                    ? dbPath
+                    : Path.Combine(Directory.GetCurrentDirectory(), dbPath);
+
+                fullDbPath = Path.GetFullPath(fullDbPath);
+
+                if (!File.Exists(fullDbPath))
+                {
+                    Console.WriteLine($"⚠️ Database file not found at: {fullDbPath}");
+                    Console.WriteLine($"   Current directory: {Directory.GetCurrentDirectory()}");
+                    Console.WriteLine("   Skipping database file backup");
+                    return;
+                }
+
+                try
+                {
+                    var dbFileName = $"database_{timestamp}.db";
+                    var entry = zipArchive.CreateEntry($"data/{dbFileName}");
+                    using (var entryStream = entry.Open())
+                    using (var fileStream = new FileStream(fullDbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        await fileStream.CopyToAsync(entryStream);
+                    }
+                    Console.WriteLine($"   Database file backed up: {dbFileName}");
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    throw new UnauthorizedAccessException($"Cannot access database file: {fullDbPath}. Permission denied.", ex);
+                }
+                catch (IOException ex)
+                {
+                    throw new IOException($"Database file is locked or cannot be accessed: {fullDbPath}. Make sure no other process is using the database.", ex);
+                }
             }
+        }
 
-            var fullDbPath = Path.IsPathRooted(dbPath)
-                ? dbPath
-                : Path.Combine(Directory.GetCurrentDirectory(), dbPath);
-
-            fullDbPath = Path.GetFullPath(fullDbPath);
-
-            if (!File.Exists(fullDbPath))
-            {
-                Console.WriteLine($"⚠️ Database file not found at: {fullDbPath}");
-                Console.WriteLine($"   Current directory: {Directory.GetCurrentDirectory()}");
-                Console.WriteLine("   Skipping database file backup (may be using PostgreSQL or remote database)");
-                return;
-            }
-
+        private async Task BackupPostgreSQLDatabaseAsync(ZipArchive zipArchive, string timestamp, string connectionString)
+        {
             try
             {
-                var dbFileName = $"database_{timestamp}.db";
-                var entry = zipArchive.CreateEntry($"data/{dbFileName}");
-                using (var entryStream = entry.Open())
-                using (var fileStream = new FileStream(fullDbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                Console.WriteLine("📦 Creating PostgreSQL database dump...");
+                
+                // Parse connection string to extract connection details
+                var connectionParts = connectionString.Split(';');
+                var host = ExtractValue(connectionParts, "Host") ?? ExtractValue(connectionParts, "Server") ?? "localhost";
+                var port = ExtractValue(connectionParts, "Port") ?? "5432";
+                var database = ExtractValue(connectionParts, "Database") ?? ExtractValue(connectionParts, "Initial Catalog");
+                var username = ExtractValue(connectionParts, "Username") ?? ExtractValue(connectionParts, "User ID") ?? ExtractValue(connectionParts, "User");
+                var password = ExtractValue(connectionParts, "Password") ?? ExtractValue(connectionParts, "Pwd");
+                
+                if (string.IsNullOrEmpty(database))
                 {
-                    await fileStream.CopyToAsync(entryStream);
+                    throw new InvalidOperationException("PostgreSQL database name not found in connection string");
                 }
-                Console.WriteLine($"   Database file backed up: {dbFileName}");
+
+                // Create temporary SQL dump file
+                var tempDumpPath = Path.Combine(Path.GetTempPath(), $"pg_dump_{timestamp}.sql");
+                
+                // Try to use pg_dump command-line tool if available
+                var pgDumpPath = FindPgDumpExecutable();
+                if (!string.IsNullOrEmpty(pgDumpPath))
+                {
+                    // Use pg_dump command-line tool
+                    var processStartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = pgDumpPath,
+                        Arguments = $"--host={host} --port={port} --username={username} --dbname={database} --no-password --format=plain --file=\"{tempDumpPath}\"",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    
+                    // Set password via environment variable (pg_dump reads PGPASSWORD)
+                    processStartInfo.Environment["PGPASSWORD"] = password ?? "";
+                    
+                    using (var process = System.Diagnostics.Process.Start(processStartInfo))
+                    {
+                        if (process == null)
+                        {
+                            throw new InvalidOperationException("Failed to start pg_dump process");
+                        }
+                        
+                        await process.WaitForExitAsync();
+                        
+                        if (process.ExitCode != 0)
+                        {
+                            var error = await process.StandardError.ReadToEndAsync();
+                            throw new InvalidOperationException($"pg_dump failed: {error}");
+                        }
+                    }
+                }
+                else
+                {
+                    // Fallback: Use Npgsql to export data via EF Core
+                    Console.WriteLine("⚠️ pg_dump not found, using EF Core export (slower but works)");
+                    await ExportPostgreSQLViaEfCoreAsync(tempDumpPath);
+                }
+
+                // Add SQL dump to ZIP
+                if (File.Exists(tempDumpPath))
+                {
+                    var entry = zipArchive.CreateEntry($"data/db_dump.sql");
+                    using (var entryStream = entry.Open())
+                    using (var fileStream = File.OpenRead(tempDumpPath))
+                    {
+                        await fileStream.CopyToAsync(entryStream);
+                    }
+                    Console.WriteLine($"   PostgreSQL dump backed up: db_dump.sql");
+                    
+                    // Clean up temp file
+                    File.Delete(tempDumpPath);
+                }
             }
-            catch (UnauthorizedAccessException ex)
+            catch (Exception ex)
             {
-                throw new UnauthorizedAccessException($"Cannot access database file: {fullDbPath}. Permission denied.", ex);
+                Console.WriteLine($"⚠️ PostgreSQL backup failed: {ex.Message}");
+                // Try fallback: export via EF Core
+                try
+                {
+                    var tempDumpPath = Path.Combine(Path.GetTempPath(), $"pg_dump_{timestamp}.sql");
+                    await ExportPostgreSQLViaEfCoreAsync(tempDumpPath);
+                    
+                    var entry = zipArchive.CreateEntry($"data/db_dump.sql");
+                    using (var entryStream = entry.Open())
+                    using (var fileStream = File.OpenRead(tempDumpPath))
+                    {
+                        await fileStream.CopyToAsync(entryStream);
+                    }
+                    Console.WriteLine($"   PostgreSQL dump backed up via EF Core: db_dump.sql");
+                    File.Delete(tempDumpPath);
+                }
+                catch (Exception fallbackEx)
+                {
+                    Console.WriteLine($"❌ PostgreSQL backup fallback also failed: {fallbackEx.Message}");
+                    throw new Exception($"PostgreSQL backup failed: {ex.Message}. Fallback also failed: {fallbackEx.Message}", ex);
+                }
             }
-            catch (IOException ex)
+        }
+
+        private string? FindPgDumpExecutable()
+        {
+            // Optional configured path (e.g. on Render: set Backup:PostgresPgDumpPath if pg_dump is installed)
+            var configuredPath = _configuration["Backup:PostgresPgDumpPath"]?.Trim();
+            if (!string.IsNullOrEmpty(configuredPath) && (configuredPath == "pg_dump" || File.Exists(configuredPath)))
+                return configuredPath;
+
+            // Common paths for pg_dump
+            var possiblePaths = new[]
             {
-                throw new IOException($"Database file is locked or cannot be accessed: {fullDbPath}. Make sure no other process is using the database.", ex);
+                "pg_dump", // In PATH
+                "/usr/bin/pg_dump", // Linux
+                "/usr/local/bin/pg_dump", // macOS
+                "C:\\Program Files\\PostgreSQL\\15\\bin\\pg_dump.exe", // Windows PostgreSQL 15
+                "C:\\Program Files\\PostgreSQL\\14\\bin\\pg_dump.exe", // Windows PostgreSQL 14
+                "C:\\Program Files\\PostgreSQL\\13\\bin\\pg_dump.exe", // Windows PostgreSQL 13
+            };
+
+            foreach (var path in possiblePaths)
+            {
+                try
+                {
+                    if (path == "pg_dump")
+                    {
+                        // Check if pg_dump is in PATH
+                        var processStartInfo = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "pg_dump",
+                            Arguments = "--version",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        
+                        using (var process = System.Diagnostics.Process.Start(processStartInfo))
+                        {
+                            if (process != null)
+                            {
+                                process.WaitForExit(1000);
+                                if (process.ExitCode == 0)
+                                {
+                                    return "pg_dump";
+                                }
+                            }
+                        }
+                    }
+                    else if (File.Exists(path))
+                    {
+                        return path;
+                    }
+                }
+                catch
+                {
+                    // Continue searching
+                }
+            }
+
+            return null;
+        }
+
+        private async Task ExportPostgreSQLViaEfCoreAsync(string outputPath)
+        {
+            // Export all tables using EF Core
+            using var writer = new StreamWriter(outputPath);
+            
+            await writer.WriteLineAsync("-- HexaBill PostgreSQL Backup SQL Dump");
+            await writer.WriteLineAsync($"-- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+            await writer.WriteLineAsync($"-- Database: {_context.Database.GetConnectionString()}");
+            await writer.WriteLineAsync();
+            await writer.WriteLineAsync("BEGIN;");
+            await writer.WriteLineAsync();
+
+            // Export all tables
+            await ExportTableAsync(writer, "Products", async () => await _context.Products.ToListAsync());
+            await ExportTableAsync(writer, "Customers", async () => await _context.Customers.ToListAsync());
+            await ExportTableAsync(writer, "Sales", async () => await _context.Sales.ToListAsync());
+            await ExportTableAsync(writer, "SaleItems", async () => await _context.SaleItems.ToListAsync());
+            await ExportTableAsync(writer, "Purchases", async () => await _context.Purchases.ToListAsync());
+            await ExportTableAsync(writer, "PurchaseItems", async () => await _context.PurchaseItems.ToListAsync());
+            await ExportTableAsync(writer, "Payments", async () => await _context.Payments.ToListAsync());
+            await ExportTableAsync(writer, "Expenses", async () => await _context.Expenses.ToListAsync());
+            await ExportTableAsync(writer, "Users", async () => await _context.Users.ToListAsync());
+            await ExportTableAsync(writer, "Settings", async () => await _context.Settings.ToListAsync());
+            await ExportTableAsync(writer, "Branches", async () => await _context.Branches.ToListAsync());
+            await ExportTableAsync(writer, "Routes", async () => await _context.Routes.ToListAsync());
+            await ExportTableAsync(writer, "BranchStaff", async () => await _context.BranchStaff.ToListAsync());
+            await ExportTableAsync(writer, "RouteCustomers", async () => await _context.RouteCustomers.ToListAsync());
+            await ExportTableAsync(writer, "RouteExpenses", async () => await _context.RouteExpenses.ToListAsync());
+            await ExportTableAsync(writer, "CustomerVisits", async () => await _context.CustomerVisits.ToListAsync());
+            
+            await writer.WriteLineAsync();
+            await writer.WriteLineAsync("COMMIT;");
+            await writer.FlushAsync();
+        }
+
+        private async Task ExportTableAsync<T>(StreamWriter writer, string tableName, Func<Task<List<T>>> getData)
+        {
+            var data = await getData();
+            if (data.Any())
+            {
+                await writer.WriteLineAsync($"\n-- Table: {tableName}");
+                await writer.WriteLineAsync($"-- Records: {data.Count}");
+                var json = System.Text.Json.JsonSerializer.Serialize(data, new System.Text.Json.JsonSerializerOptions { WriteIndented = false });
+                await writer.WriteLineAsync($"-- DATA:{tableName}:{json}");
             }
         }
 
@@ -627,14 +865,16 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             try
             {
-                var sourcePath = !string.IsNullOrEmpty(uploadedFilePath) ? uploadedFilePath : Path.Combine(_backupDirectory, backupFilePath);
-                
-                if (!File.Exists(sourcePath))
+                var sourcePath = await ResolveBackupPathAsync(backupFilePath ?? "", uploadedFilePath);
+                if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath))
                 {
-                    preview.CompatibilityMessage = "Backup file not found";
+                    preview.CompatibilityMessage = "Backup file not found (local or S3)";
                     return preview;
                 }
 
+                var isTempFromS3 = sourcePath.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
+                try
+                {
                 // Extract manifest
                 using var zipArchive = ZipFile.OpenRead(sourcePath);
                 var manifestEntry = zipArchive.GetEntry("manifest.json");
@@ -689,6 +929,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 }
 
                 return preview;
+                }
+                finally
+                {
+                    if (isTempFromS3 && !string.IsNullOrEmpty(sourcePath) && File.Exists(sourcePath))
+                    {
+                        try { File.Delete(sourcePath); } catch { }
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -707,15 +955,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
             };
 
             using var transaction = await _context.Database.BeginTransactionAsync();
+            string? sourcePath = null;
+            var isTempFromS3 = false;
             try
             {
-                var sourcePath = !string.IsNullOrEmpty(uploadedFilePath) ? uploadedFilePath : Path.Combine(_backupDirectory, backupFilePath);
-                
-                if (!File.Exists(sourcePath))
+                sourcePath = await ResolveBackupPathAsync(backupFilePath ?? "", uploadedFilePath);
+                if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath))
                 {
-                    result.ErrorMessages.Add("Backup file not found");
+                    result.ErrorMessages.Add("Backup file not found (local or S3)");
                     return result;
                 }
+                isTempFromS3 = sourcePath.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
 
                 // Extract to temp directory
                 var tempExtractPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
@@ -788,6 +1038,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     {
                         Directory.Delete(tempExtractPath, true);
                     }
+                    if (isTempFromS3 && !string.IsNullOrEmpty(sourcePath) && File.Exists(sourcePath))
+                    {
+                        try { File.Delete(sourcePath); } catch { }
+                    }
                 }
             }
             catch (Exception ex)
@@ -841,15 +1095,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
         public async Task<bool> RestoreFromBackupAsync(string backupFilePath, string? uploadedFilePath = null)
         {
+            string? sourcePath = null;
+            var isTempFromS3 = false;
             try
             {
-                var sourcePath = !string.IsNullOrEmpty(uploadedFilePath) ? uploadedFilePath : Path.Combine(_backupDirectory, backupFilePath);
-                
-                if (!File.Exists(sourcePath))
+                sourcePath = await ResolveBackupPathAsync(backupFilePath ?? "", uploadedFilePath);
+                if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath))
                 {
-                    Console.WriteLine($"❌ Backup file not found: {sourcePath}");
+                    Console.WriteLine($"❌ Backup file not found: {backupFilePath}");
                     return false;
                 }
+
+                isTempFromS3 = sourcePath.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
 
                 // Extract to temp directory
                 var tempExtractPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
@@ -859,26 +1116,41 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 {
                     ZipFile.ExtractToDirectory(sourcePath, tempExtractPath);
 
-                    // Find database file
+                    // Find database file or SQL dump
                     var dataDir = Path.Combine(tempExtractPath, "data");
                     if (Directory.Exists(dataDir))
                     {
-                        var dbFiles = Directory.GetFiles(dataDir, "*.db");
-
-                        var dbFile = dbFiles.FirstOrDefault();
-                        if (dbFile != null)
+                        // Check for PostgreSQL SQL dump first
+                        var sqlDumpPath = Path.Combine(dataDir, "db_dump.sql");
+                        if (File.Exists(sqlDumpPath))
                         {
-                            // CRITICAL: Dispose current DB connection before replacing database file
-                            Console.WriteLine("🔄 Closing database connections...");
-                            await _context.Database.CloseConnectionAsync();
-                            
-                            // Restore database
-                            Console.WriteLine("📥 Restoring database file...");
-                            await RestoreDatabaseAsync(dbFile);
-                            
-                            // CRITICAL: Recreate context to use the new database file
-                            Console.WriteLine("🔄 Reinitializing database context...");
-                            await _context.Database.EnsureCreatedAsync();
+                            // PostgreSQL restore from SQL dump
+                            Console.WriteLine("📥 Restoring PostgreSQL database from SQL dump...");
+                            await RestorePostgreSQLDatabaseAsync(sqlDumpPath);
+                        }
+                        else
+                        {
+                            // SQLite restore from .db file
+                            var dbFiles = Directory.GetFiles(dataDir, "*.db");
+                            var dbFile = dbFiles.FirstOrDefault();
+                            if (dbFile != null)
+                            {
+                                // CRITICAL: Dispose current DB connection before replacing database file
+                                Console.WriteLine("🔄 Closing database connections...");
+                                await _context.Database.CloseConnectionAsync();
+                                
+                                // Restore database
+                                Console.WriteLine("📥 Restoring SQLite database file...");
+                                await RestoreDatabaseAsync(dbFile);
+                                
+                                // CRITICAL: Recreate context to use the new database file
+                                Console.WriteLine("🔄 Reinitializing database context...");
+                                await _context.Database.EnsureCreatedAsync();
+                            }
+                            else
+                            {
+                                Console.WriteLine("⚠️ No database file (.db) or SQL dump (db_dump.sql) found in backup");
+                            }
                         }
                     }
 
@@ -924,6 +1196,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 await LogBackupActionAsync("Backup Restore Failed", $"{backupFilePath}: {ex.Message}");
                 return false;
             }
+            finally
+            {
+                if (isTempFromS3 && !string.IsNullOrEmpty(sourcePath) && File.Exists(sourcePath))
+                {
+                    try { File.Delete(sourcePath); } catch { /* best effort */ }
+                }
+            }
         }
 
         private Task RestoreDatabaseAsync(string dbFilePath)
@@ -953,6 +1232,335 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             File.Copy(dbFilePath, fullDbPath, overwrite: true);
             return Task.CompletedTask;
+        }
+
+        private async Task RestorePostgreSQLDatabaseAsync(string sqlDumpPath)
+        {
+            try
+            {
+                var connectionString = _configuration.GetConnectionString("DefaultConnection");
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    throw new InvalidOperationException("Database connection string not found");
+                }
+
+                // Parse connection string
+                var connectionParts = connectionString.Split(';');
+                var host = ExtractValue(connectionParts, "Host") ?? ExtractValue(connectionParts, "Server") ?? "localhost";
+                var port = ExtractValue(connectionParts, "Port") ?? "5432";
+                var database = ExtractValue(connectionParts, "Database") ?? ExtractValue(connectionParts, "Initial Catalog");
+                var username = ExtractValue(connectionParts, "Username") ?? ExtractValue(connectionParts, "User ID") ?? ExtractValue(connectionParts, "User");
+                var password = ExtractValue(connectionParts, "Password") ?? ExtractValue(connectionParts, "Pwd");
+                
+                if (string.IsNullOrEmpty(database))
+                {
+                    throw new InvalidOperationException("PostgreSQL database name not found in connection string");
+                }
+
+                // Try to use psql command-line tool if available
+                var psqlPath = FindPsqlExecutable();
+                if (!string.IsNullOrEmpty(psqlPath))
+                {
+                    // Use psql command-line tool
+                    var processStartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = psqlPath,
+                        Arguments = $"--host={host} --port={port} --username={username} --dbname={database} --no-password --file=\"{sqlDumpPath}\"",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    
+                    // Set password via environment variable
+                    processStartInfo.Environment["PGPASSWORD"] = password ?? "";
+                    
+                    using (var process = System.Diagnostics.Process.Start(processStartInfo))
+                    {
+                        if (process == null)
+                        {
+                            throw new InvalidOperationException("Failed to start psql process");
+                        }
+                        
+                        await process.WaitForExitAsync();
+                        
+                        if (process.ExitCode != 0)
+                        {
+                            var error = await process.StandardError.ReadToEndAsync();
+                            throw new InvalidOperationException($"psql restore failed: {error}");
+                        }
+                    }
+                    
+                    Console.WriteLine("✅ PostgreSQL database restored via psql");
+                }
+                else
+                {
+                    // Fallback: Parse SQL dump and execute via EF Core
+                    Console.WriteLine("⚠️ psql not found, using EF Core restore (slower but works)");
+                    await RestorePostgreSQLViaEfCoreAsync(sqlDumpPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ PostgreSQL restore failed: {ex.Message}");
+                // Try fallback
+                try
+                {
+                    Console.WriteLine("🔄 Trying EF Core fallback restore...");
+                    await RestorePostgreSQLViaEfCoreAsync(sqlDumpPath);
+                }
+                catch (Exception fallbackEx)
+                {
+                    throw new Exception($"PostgreSQL restore failed: {ex.Message}. Fallback also failed: {fallbackEx.Message}", ex);
+                }
+            }
+        }
+
+        private string? FindPsqlExecutable()
+        {
+            // Common paths for psql
+            var possiblePaths = new[]
+            {
+                "psql", // In PATH
+                "/usr/bin/psql", // Linux
+                "/usr/local/bin/psql", // macOS
+                "C:\\Program Files\\PostgreSQL\\15\\bin\\psql.exe", // Windows PostgreSQL 15
+                "C:\\Program Files\\PostgreSQL\\14\\bin\\psql.exe", // Windows PostgreSQL 14
+                "C:\\Program Files\\PostgreSQL\\13\\bin\\psql.exe", // Windows PostgreSQL 13
+            };
+
+            foreach (var path in possiblePaths)
+            {
+                try
+                {
+                    if (path == "psql")
+                    {
+                        // Check if psql is in PATH
+                        var processStartInfo = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "psql",
+                            Arguments = "--version",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        
+                        using (var process = System.Diagnostics.Process.Start(processStartInfo))
+                        {
+                            if (process != null)
+                            {
+                                process.WaitForExit(1000);
+                                if (process.ExitCode == 0)
+                                {
+                                    return "psql";
+                                }
+                            }
+                        }
+                    }
+                    else if (File.Exists(path))
+                    {
+                        return path;
+                    }
+                }
+                catch
+                {
+                    // Continue searching
+                }
+            }
+
+            return null;
+        }
+
+        private async Task RestorePostgreSQLViaEfCoreAsync(string sqlDumpPath)
+        {
+            // Read SQL dump and parse DATA lines
+            var sqlContent = await File.ReadAllTextAsync(sqlDumpPath);
+            var lines = sqlContent.Split('\n');
+
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("-- DATA:"))
+                {
+                    var parts = line.Substring(8).Split(':', 2);
+                    if (parts.Length == 2)
+                    {
+                        var tableName = parts[0];
+                        var jsonData = parts[1];
+                        await UpsertTableDataAsync(tableName, jsonData);
+                    }
+                }
+            }
+        }
+
+        private async Task UpsertTableDataAsync(string tableName, string jsonData)
+        {
+            try
+            {
+                switch (tableName)
+                {
+                    case "Products":
+                        var products = System.Text.Json.JsonSerializer.Deserialize<List<Product>>(jsonData);
+                        if (products != null)
+                        {
+                            foreach (var item in products)
+                            {
+                                var existing = await _context.Products.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.Products.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    case "Customers":
+                        var customers = System.Text.Json.JsonSerializer.Deserialize<List<Customer>>(jsonData);
+                        if (customers != null)
+                        {
+                            foreach (var item in customers)
+                            {
+                                var existing = await _context.Customers.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.Customers.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    case "Sales":
+                        var sales = System.Text.Json.JsonSerializer.Deserialize<List<Sale>>(jsonData);
+                        if (sales != null)
+                        {
+                            foreach (var item in sales)
+                            {
+                                var existing = await _context.Sales.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.Sales.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    // Add more cases for other tables as needed...
+                    case "SaleItems":
+                        var saleItems = System.Text.Json.JsonSerializer.Deserialize<List<SaleItem>>(jsonData);
+                        if (saleItems != null)
+                        {
+                            foreach (var item in saleItems)
+                            {
+                                var existing = await _context.SaleItems.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.SaleItems.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    case "Payments":
+                        var payments = System.Text.Json.JsonSerializer.Deserialize<List<Payment>>(jsonData);
+                        if (payments != null)
+                        {
+                            foreach (var item in payments)
+                            {
+                                var existing = await _context.Payments.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.Payments.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    case "Expenses":
+                        var expenses = System.Text.Json.JsonSerializer.Deserialize<List<Expense>>(jsonData);
+                        if (expenses != null)
+                        {
+                            foreach (var item in expenses)
+                            {
+                                var existing = await _context.Expenses.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.Expenses.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    case "Users":
+                        var users = System.Text.Json.JsonSerializer.Deserialize<List<User>>(jsonData);
+                        if (users != null)
+                        {
+                            foreach (var item in users)
+                            {
+                                var existing = await _context.Users.FindAsync(item.Id);
+                                if (existing != null)
+                                {
+                                    _context.Entry(existing).CurrentValues.SetValues(item);
+                                }
+                                else
+                                {
+                                    _context.Users.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                    
+                    case "Settings":
+                        var settings = System.Text.Json.JsonSerializer.Deserialize<List<Setting>>(jsonData);
+                        if (settings != null)
+                        {
+                            foreach (var item in settings)
+                            {
+                                var existing = await _context.Settings.FindAsync(item.Key);
+                                if (existing != null)
+                                {
+                                    existing.Value = item.Value;
+                                    existing.UpdatedAt = DateTime.UtcNow;
+                                }
+                                else
+                                {
+                                    _context.Settings.Add(item);
+                                }
+                            }
+                        }
+                        break;
+                }
+
+                await _context.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Error upserting {tableName}: {ex.Message}");
+                // Continue with other tables
+            }
         }
 
         private async Task RestoreSettingsAsync(string settingsFilePath)
@@ -1011,20 +1619,16 @@ namespace HexaBill.Api.Modules.SuperAdmin
             return Task.CompletedTask;
         }
 
-        public Task<List<BackupInfo>> GetBackupListAsync()
+        public async Task<List<BackupInfo>> GetBackupListAsync()
         {
             var backups = new List<BackupInfo>();
 
-            // Server backups
+            // Server backups (ephemeral on cloud)
             try
             {
                 if (Directory.Exists(_backupDirectory))
                 {
-                    var zipFiles = Directory.GetFiles(_backupDirectory, "*.zip")
-                        .Select(f => new FileInfo(f))
-                        .OrderByDescending(f => f.CreationTime);
-
-                    foreach (var file in zipFiles)
+                    foreach (var file in Directory.GetFiles(_backupDirectory, "*.zip").Select(f => new FileInfo(f)).OrderByDescending(f => f.CreationTime))
                     {
                         backups.Add(new BackupInfo
                         {
@@ -1036,21 +1640,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
                 }
             }
-            catch
-            {
-                // Ignore errors reading backup directory
-            }
+            catch { /* ignore */ }
 
-            // Desktop backups
+            // Desktop backups (local dev only)
             try
             {
                 if (Directory.Exists(_desktopPath))
                 {
-                    var desktopFiles = Directory.GetFiles(_desktopPath, "*.zip")
-                        .Select(f => new FileInfo(f))
-                        .OrderByDescending(f => f.CreationTime);
-
-                    foreach (var file in desktopFiles)
+                    foreach (var file in Directory.GetFiles(_desktopPath, "*.zip").Select(f => new FileInfo(f)).OrderByDescending(f => f.CreationTime))
                     {
                         backups.Add(new BackupInfo
                         {
@@ -1062,19 +1659,104 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
                 }
             }
-            catch
+            catch { /* ignore */ }
+
+            // S3/R2 backups (persistent; recommended for production)
+            try
             {
-                // Ignore errors reading desktop backup directory
+                var s3List = await ListBackupsFromS3Async();
+                foreach (var b in s3List)
+                    backups.Add(b);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ S3 list backups failed: {ex.Message}");
             }
 
-            return Task.FromResult(backups);
+            return backups.OrderByDescending(b => b.CreatedDate).ToList();
+        }
+
+        private async Task<List<BackupInfo>> ListBackupsFromS3Async()
+        {
+            var (client, bucket, prefix) = GetS3ClientAndBucket();
+            if (client == null || string.IsNullOrEmpty(bucket)) return new List<BackupInfo>();
+
+            try
+            {
+                var request = new ListObjectsV2Request { BucketName = bucket };
+                if (!string.IsNullOrEmpty(prefix)) request.Prefix = prefix + "/";
+
+                var list = new List<BackupInfo>();
+                ListObjectsV2Response response;
+                do
+                {
+                    response = await client.ListObjectsV2Async(request);
+                    foreach (var o in response.S3Objects.Where(x => x.Key != null && x.Key.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var fileName = Path.GetFileName(o.Key);
+                        if (string.IsNullOrEmpty(fileName)) continue;
+                        list.Add(new BackupInfo
+                        {
+                            FileName = fileName,
+                            FileSize = o.Size,
+                            CreatedDate = o.LastModified.ToLocalTime(),
+                            Location = "S3"
+                        });
+                    }
+                    request.ContinuationToken = response.NextContinuationToken;
+                } while (response.IsTruncated);
+
+                return list;
+            }
+            finally
+            {
+                client.Dispose();
+            }
+        }
+
+        public async Task<(Stream stream, string fileName)?> GetBackupForDownloadAsync(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return null;
+
+            var serverPath = Path.Combine(_backupDirectory, fileName);
+            var desktopPath = Path.Combine(_desktopPath, fileName);
+
+            if (File.Exists(serverPath))
+                return (File.OpenRead(serverPath), fileName);
+            if (File.Exists(desktopPath))
+                return (File.OpenRead(desktopPath), fileName);
+
+            // Try S3/R2
+            var (client, bucket, prefix) = GetS3ClientAndBucket();
+            if (client != null && !string.IsNullOrEmpty(bucket))
+            {
+                try
+                {
+                    var key = string.IsNullOrEmpty(prefix) ? fileName : $"{prefix}/{fileName}";
+                    using (var response = await client.GetObjectAsync(bucket, key))
+                    {
+                        var tempPath = Path.Combine(Path.GetTempPath(), $"hexabill_backup_{Guid.NewGuid():N}.zip");
+                        await response.WriteResponseStreamToFileAsync(tempPath, false, CancellationToken.None);
+                        return (new TempFileStream(tempPath), fileName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ S3 download failed: {ex.Message}");
+                }
+                finally
+                {
+                    client.Dispose();
+                }
+            }
+
+            return null;
         }
 
         public async Task<bool> DeleteBackupAsync(string fileName)
         {
             try
             {
-                // Try server location first
                 var serverPath = Path.Combine(_backupDirectory, fileName);
                 if (File.Exists(serverPath))
                 {
@@ -1083,7 +1765,6 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     return true;
                 }
 
-                // Try desktop location
                 var desktopPath = Path.Combine(_desktopPath, fileName);
                 if (File.Exists(desktopPath))
                 {
@@ -1092,11 +1773,69 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     return true;
                 }
 
+                // Try S3/R2
+                var (client, bucket, prefix) = GetS3ClientAndBucket();
+                if (client != null && !string.IsNullOrEmpty(bucket))
+                {
+                    try
+                    {
+                        var key = string.IsNullOrEmpty(prefix) ? fileName : $"{prefix}/{fileName}";
+                        await client.DeleteObjectAsync(bucket, key);
+                        await LogBackupActionAsync("Backup Deleted (S3)", fileName);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"⚠️ S3 delete failed: {ex.Message}");
+                    }
+                    finally
+                    {
+                        client.Dispose();
+                    }
+                }
+
                 return false;
             }
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>Returns path to backup zip (local or temp after downloading from S3). Caller does not need to delete temp.</summary>
+        private async Task<string?> ResolveBackupPathAsync(string backupFilePath, string? uploadedFilePath)
+        {
+            if (!string.IsNullOrEmpty(uploadedFilePath) && File.Exists(uploadedFilePath))
+                return uploadedFilePath;
+
+            var localPath = Path.Combine(_backupDirectory, backupFilePath);
+            if (File.Exists(localPath))
+                return localPath;
+
+            var desktopPath = Path.Combine(_desktopPath, backupFilePath);
+            if (File.Exists(desktopPath))
+                return desktopPath;
+
+            // Download from S3 to temp
+            var (client, bucket, prefix) = GetS3ClientAndBucket();
+            if (client == null || string.IsNullOrEmpty(bucket)) return null;
+
+            try
+            {
+                var key = string.IsNullOrEmpty(prefix) ? backupFilePath : $"{prefix}/{backupFilePath}";
+                using var response = await client.GetObjectAsync(bucket, key);
+                var tempPath = Path.Combine(Path.GetTempPath(), $"hexabill_restore_{Guid.NewGuid():N}.zip");
+                await response.WriteResponseStreamToFileAsync(tempPath, false, CancellationToken.None);
+                return tempPath;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ S3 resolve backup failed: {ex.Message}");
+                return null;
+            }
+            finally
+            {
+                client.Dispose();
             }
         }
 
@@ -1207,6 +1946,75 @@ namespace HexaBill.Api.Modules.SuperAdmin
             {
                 Console.WriteLine($"⚠️ Google Drive upload failed: {ex.Message}");
                 // Don't throw - backup should succeed even if cloud upload fails
+            }
+        }
+
+        /// <summary>Creates S3/R2 client when BackupSettings:S3 is configured. Supports custom ServiceURL for R2.</summary>
+        private (AmazonS3Client? client, string? bucket, string? prefix) GetS3ClientAndBucket()
+        {
+            var enabled = _configuration.GetValue<bool>("BackupSettings:S3:Enabled", false);
+            if (!enabled) return (null, null, null);
+
+            var bucket = _configuration["BackupSettings:S3:Bucket"]?.Trim();
+            if (string.IsNullOrEmpty(bucket)) return (null, null, null);
+
+            var prefix = _configuration["BackupSettings:S3:Prefix"]?.Trim().TrimEnd('/');
+            var serviceUrl = _configuration["BackupSettings:S3:ServiceUrl"]?.Trim();
+            var regionStr = _configuration["BackupSettings:S3:Region"] ?? "us-east-1";
+            var accessKey = _configuration["BackupSettings:S3:AwsAccessKeyId"];
+            var secretKey = _configuration["BackupSettings:S3:AwsSecretAccessKey"];
+
+            AmazonS3Client client;
+            if (!string.IsNullOrEmpty(serviceUrl))
+            {
+                // R2 or S3-compatible custom endpoint
+                var config = new AmazonS3Config { ServiceURL = serviceUrl, ForcePathStyle = true };
+                if (!string.IsNullOrEmpty(accessKey) && !string.IsNullOrEmpty(secretKey))
+                    client = new AmazonS3Client(accessKey, secretKey, config);
+                else
+                    client = new AmazonS3Client(config);
+            }
+            else if (!string.IsNullOrEmpty(accessKey) && !string.IsNullOrEmpty(secretKey))
+            {
+                var region = RegionEndpoint.GetBySystemName(regionStr);
+                client = new AmazonS3Client(accessKey, secretKey, region);
+            }
+            else
+            {
+                client = new AmazonS3Client(RegionEndpoint.GetBySystemName(regionStr));
+            }
+
+            return (client, bucket, prefix);
+        }
+
+        private async Task UploadToS3Async(string zipPath, string zipFileName)
+        {
+            var (client, bucket, prefix) = GetS3ClientAndBucket();
+            if (client == null || string.IsNullOrEmpty(bucket)) return;
+
+            try
+            {
+                var key = string.IsNullOrEmpty(prefix) ? zipFileName : $"{prefix}/{zipFileName}";
+                using var fs = File.OpenRead(zipPath);
+                var request = new PutObjectRequest
+                {
+                    BucketName = bucket,
+                    Key = key,
+                    InputStream = fs,
+                    ContentType = "application/zip"
+                };
+                await client.PutObjectAsync(request);
+                Console.WriteLine($"✅ Backup uploaded to S3/R2: {bucket}/{key}");
+
+                var deleteLocalAfterUpload = _configuration.GetValue<bool>("BackupSettings:S3:DeleteLocalAfterUpload", true);
+                if (deleteLocalAfterUpload && File.Exists(zipPath))
+                {
+                    try { File.Delete(zipPath); } catch { /* best effort */ }
+                }
+            }
+            finally
+            {
+                client.Dispose();
             }
         }
 
@@ -1398,6 +2206,46 @@ namespace HexaBill.Api.Modules.SuperAdmin
         private string? ExtractValue(string[] parts, string key)
         {
             return parts.FirstOrDefault(p => p.StartsWith($"{key}="))?.Split('=')[1];
+        }
+    }
+
+    /// <summary>File stream that deletes the file when disposed (for S3 download temp files).</summary>
+    internal sealed class TempFileStream : Stream
+    {
+        private readonly string _path;
+        private readonly FileStream _inner;
+
+        public TempFileStream(string path)
+        {
+            _path = path;
+            _inner = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.DeleteOnClose);
+        }
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => _inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask DisposeAsync()
+        {
+            await _inner.DisposeAsync();
+            try { if (File.Exists(_path)) File.Delete(_path); } catch { /* best effort */ }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+                try { if (File.Exists(_path)) File.Delete(_path); } catch { /* best effort */ }
+            }
         }
     }
 

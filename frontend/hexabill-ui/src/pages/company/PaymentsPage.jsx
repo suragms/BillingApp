@@ -48,6 +48,8 @@ const PaymentsPage = () => {
   const [receiptPayment, setReceiptPayment] = useState(null)
   const [outstandingInvoices, setOutstandingInvoices] = useState([])
   const [loadingInvoices, setLoadingInvoices] = useState(false)
+  const [showBulkPaymentModal, setShowBulkPaymentModal] = useState(false)
+  const [bulkPayments, setBulkPayments] = useState([{ customerId: '', amount: '', method: 'Cash', paymentDate: new Date().toISOString().split('T')[0] }])
 
   const debouncedSearchTerm = useDebounce(searchTerm, 300)
 
@@ -116,11 +118,12 @@ const PaymentsPage = () => {
       try {
         setLoading(true)
         
-        // Fetch all data in parallel
-        const [paymentsRes, customersRes, salesRes] = await Promise.all([
+        // PERFORMANCE FIX: Remove unnecessary salesAPI.getSales() call
+        // Invoices load dynamically when customer is selected via getOutstandingInvoices()
+        // This saves loading 100 sales on every page load
+        const [paymentsRes, customersRes] = await Promise.all([
           paymentsAPI.getPayments({ page: 1, pageSize: 100 }),
-          customersAPI.getCustomers({ page: 1, pageSize: 100 }),
-          salesAPI.getSales({ page: 1, pageSize: 100 })
+          customersAPI.getCustomers({ page: 1, pageSize: 100 })
         ])
         
         if (!isMounted) return
@@ -137,11 +140,8 @@ const PaymentsPage = () => {
           setCustomers([])
         }
         
-        if (salesRes.success && salesRes.data) {
-          setSales(salesRes.data.items || salesRes.data || [])
-        } else {
-          setSales([])
-        }
+        // Sales are no longer loaded on page load - they load dynamically when customer is selected
+        setSales([])
       } catch (error) {
         if (!isMounted) return
         console.error('Failed to load payments data:', error)
@@ -197,11 +197,11 @@ const PaymentsPage = () => {
     try {
       setLoading(true)
       
-      // Fetch all data in parallel
-      const [paymentsRes, customersRes, salesRes] = await Promise.all([
+      // PERFORMANCE FIX: Remove unnecessary salesAPI.getSales() call
+      // Invoices load dynamically when customer is selected
+      const [paymentsRes, customersRes] = await Promise.all([
         paymentsAPI.getPayments({ page: 1, pageSize: 100 }),
-        customersAPI.getCustomers({ page: 1, pageSize: 100 }),
-        salesAPI.getSales({ page: 1, pageSize: 100 })
+        customersAPI.getCustomers({ page: 1, pageSize: 100 })
       ])
       
       if (paymentsRes.success && paymentsRes.data) {
@@ -218,12 +218,8 @@ const PaymentsPage = () => {
         setCustomers([])
       }
       
-      if (salesRes.success && salesRes.data) {
-        setSales(salesRes.data.items || salesRes.data || [])
-      } else {
-        console.warn('Sales response:', salesRes)
-        setSales([])
-      }
+      // Sales are no longer loaded - they load dynamically when customer is selected
+      setSales([])
     } catch (error) {
       console.error('Failed to load payments data:', error)
       console.error('Error details:', error.response?.data || error.message)
@@ -244,38 +240,40 @@ const PaymentsPage = () => {
       filtered = filtered.filter(payment =>
         (payment.invoiceNo || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
         (payment.customerName || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-        (payment.ref || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase())
+        (payment.ref || payment.reference || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase())
       )
     }
 
-    // Apply method filter
+    // Apply method filter (use normalized method)
     if (filterMethod) {
-      filtered = filtered.filter(payment => 
-        (payment.method || '').toLowerCase() === filterMethod.toLowerCase()
+      filtered = filtered.filter(payment =>
+        getPaymentMethod(payment).toLowerCase() === filterMethod.toLowerCase()
       )
     }
 
-    // Apply status filter
+    // Apply status filter (use normalized method/chequeStatus)
     if (filterStatus) {
       if (filterStatus === 'completed') {
-        // Completed: Cash/Online payments or Cheques that are Cleared
         filtered = filtered.filter(payment => {
-          if (payment.method === 'Cash' || payment.method === 'Online') return true
-          if (payment.method === 'Cheque' && payment.chequeStatus === 'Cleared') return true
+          const method = getPaymentMethod(payment)
+          const cs = getChequeStatus(payment)
+          if (method === 'Cash' || method === 'Online') return true
+          if (method === 'Cheque' && cs === 'Cleared') return true
           return false
         })
       } else if (filterStatus === 'pending') {
-        // Pending: Payment method is Pending, or Cheques that are Pending/Returned
         filtered = filtered.filter(payment => {
-          if (payment.method === 'Pending') return true
-          if (payment.method === 'Cheque' && (payment.chequeStatus === 'Pending' || payment.chequeStatus === 'Returned')) return true
+          const method = getPaymentMethod(payment)
+          const cs = getChequeStatus(payment)
+          if (method === 'Pending') return true
+          if (method === 'Cheque' && (cs === 'Pending' || cs === 'Returned')) return true
           return false
         })
       } else if (filterStatus === 'credit') {
-        // Credit: Sales with no payment or partial payment
         filtered = filtered.filter(payment => {
-          // Filter payments that are for credit sales (no payment or partial)
-          return payment.method === 'Pending' || (payment.method === 'Cheque' && payment.chequeStatus === 'Pending')
+          const method = getPaymentMethod(payment)
+          const cs = getChequeStatus(payment)
+          return method === 'Pending' || (method === 'Cheque' && cs === 'Pending')
         })
       }
     }
@@ -299,6 +297,24 @@ const PaymentsPage = () => {
     if (!data.amount || parseFloat(data.amount) <= 0) {
       toast.error('Please enter a valid payment amount')
       return
+    }
+    
+    // VALIDATION FIX: Check payment amount ≤ outstanding balance
+    const paymentAmount = parseFloat(data.amount)
+    if (data.saleId) {
+      // If invoice is selected, validate against invoice outstanding balance
+      const selectedInvoice = outstandingInvoices.find(inv => inv.id === parseInt(data.saleId, 10))
+      if (selectedInvoice && paymentAmount > selectedInvoice.balanceAmount + 0.01) {
+        toast.error(`Payment amount (${paymentAmount.toFixed(2)} AED) exceeds outstanding balance (${selectedInvoice.balanceAmount.toFixed(2)} AED). Maximum allowed: ${selectedInvoice.balanceAmount.toFixed(2)} AED`)
+        return
+      }
+    } else if (data.customerId && selectedCustomerDetails) {
+      // If only customer is selected (no invoice), validate against customer balance
+      const customerBalance = Math.abs(selectedCustomerDetails.balance || 0)
+      if (customerBalance > 0 && paymentAmount > customerBalance + 0.01) {
+        toast.error(`Payment amount (${paymentAmount.toFixed(2)} AED) exceeds customer outstanding balance (${customerBalance.toFixed(2)} AED). Maximum allowed: ${customerBalance.toFixed(2)} AED`)
+        return
+      }
     }
     
     try {
@@ -388,42 +404,47 @@ const PaymentsPage = () => {
 
   const handleDownloadReceipt = async (payment) => {
     try {
-      // If payment has an invoice, download invoice PDF
+      // IMPROVEMENT: One-click receipt download from payments list
       if (payment.saleId) {
+        // If payment has an invoice, download invoice PDF
         const response = await salesAPI.getInvoicePdf(payment.saleId)
         const blob = response instanceof Blob ? response : new Blob([response], { type: 'application/pdf' })
         const url = window.URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `payment_receipt_${payment.invoiceNo || payment.id}.pdf`
+        a.download = `payment_receipt_${payment.invoiceNo || payment.id}_${new Date().toISOString().split('T')[0]}.pdf`
         document.body.appendChild(a)
         a.click()
         window.URL.revokeObjectURL(url)
         document.body.removeChild(a)
         toast.success('Receipt downloaded successfully')
       } else {
-        // Generate payment receipt
-        toast.info('Generating payment receipt...')
-        // TODO: Implement payment receipt generation endpoint
+        // For payments without invoices, show receipt modal instead
+        toast.info('Opening receipt preview...')
+        setReceiptPayment(payment)
+        setShowReceiptModal(true)
       }
     } catch (error) {
       console.error('Failed to download receipt:', error)
-      toast.error('Failed to download receipt')
+      toast.error(error?.response?.data?.message || 'Failed to download receipt')
     }
   }
 
   const handleChequeStatusUpdate = async (paymentId, status) => {
     try {
-      const response = await paymentsAPI.updateChequeStatus(paymentId, status)
+      // FIX: Use correct API endpoint for updating payment status
+      const response = await paymentsAPI.updatePaymentStatus(paymentId, status)
       if (response.success) {
         toast.success(`Cheque status updated to ${status}`)
         fetchData()
+        // Trigger global update event to refresh customer balances
+        window.dispatchEvent(new CustomEvent('dataUpdated'))
       } else {
         toast.error(response.message || 'Failed to update cheque status')
       }
     } catch (error) {
       console.error('Failed to update cheque status:', error)
-      toast.error('Failed to update cheque status')
+      toast.error(error?.response?.data?.message || 'Failed to update cheque status')
     }
   }
 
@@ -461,6 +482,10 @@ const PaymentsPage = () => {
     return <CheckCircle className="h-5 w-5 text-green-500" />
   }
 
+  // Normalize API response: backend sends mode/status (camelCase); support chequeStatus if present (PRODUCTION_MASTER_TODO #39)
+  const getPaymentMethod = (p) => (p.method || p.mode || '').toLowerCase().replace(/^./, (c) => c.toUpperCase())
+  const getChequeStatus = (p) => p.chequeStatus || (p.status === 'CLEARED' ? 'Cleared' : p.status === 'RETURNED' ? 'Returned' : p.status === 'VOID' ? 'Void' : 'Pending')
+
   const getStatusColor = (status, chequeStatus, method) => {
     // If payment method is Pending, show pending status
     if (method === 'Pending') {
@@ -491,7 +516,7 @@ const PaymentsPage = () => {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Payments</h1>
-          <p className="text-gray-600">Manage customer payments and cheque status</p>
+          <p className="text-gray-600">Manage customer payments and cheque status. Customer balance reflects cleared payments only; mark cheques as cleared when they clear.</p>
         </div>
         <div className="mt-4 sm:mt-0 flex space-x-3">
           <button
@@ -507,6 +532,14 @@ const PaymentsPage = () => {
           >
             <Plus className="h-4 w-4 mr-2" />
             Add Payment
+          </button>
+          <button
+            onClick={() => setShowBulkPaymentModal(true)}
+            className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 min-h-[44px]"
+            title="Add multiple payments at once"
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            Bulk Payment
           </button>
         </div>
       </div>
@@ -623,17 +656,17 @@ const PaymentsPage = () => {
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
                         <CreditCard className="h-4 w-4 text-gray-400 mr-2" />
-                        <span className="text-sm text-gray-900">{payment.method}</span>
+                        <span className="text-sm text-gray-900">{getPaymentMethod(payment)}</span>
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {payment.ref || '-'}
+                      {payment.ref || payment.reference || '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
-                        {getStatusIcon(payment.status, payment.chequeStatus, payment.method)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(payment.status, payment.chequeStatus, payment.method)}`}>
-                          {payment.method === 'Cheque' ? (payment.chequeStatus || 'Pending') : (payment.method === 'Pending' ? 'Pending' : 'Completed')}
+                        {getStatusIcon(payment.status, getChequeStatus(payment), getPaymentMethod(payment))}
+                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(payment.status, getChequeStatus(payment), getPaymentMethod(payment))}`}>
+                          {getPaymentMethod(payment) === 'Cheque' ? getChequeStatus(payment) : (getPaymentMethod(payment) === 'Pending' ? 'Pending' : 'Completed')}
                         </span>
                       </div>
                     </td>
@@ -663,13 +696,13 @@ const PaymentsPage = () => {
                         >
                           <Download className="h-4 w-4" />
                         </button>
-                        {payment.method === 'Cheque' && payment.chequeStatus === 'Pending' && (
+                        {getPaymentMethod(payment) === 'Cheque' && getChequeStatus(payment) === 'Pending' && (
                           <div className="inline-flex space-x-1 ml-2">
                             <button
                               onClick={() => handleChequeStatusUpdate(payment.id, 'Cleared')}
                               className="text-green-600 hover:text-green-900 text-xs px-2 py-1 border border-green-300 rounded"
                             >
-                              Clear
+                              Mark cleared
                             </button>
                             <button
                               onClick={() => handleChequeStatusUpdate(payment.id, 'Returned')}
@@ -678,6 +711,15 @@ const PaymentsPage = () => {
                               Return
                             </button>
                           </div>
+                        )}
+                        {getPaymentMethod(payment) === 'Cheque' && getChequeStatus(payment) === 'Cleared' && (
+                          <button
+                            onClick={() => handleChequeStatusUpdate(payment.id, 'Pending')}
+                            className="text-amber-600 hover:text-amber-900 text-xs px-2 py-1 border border-amber-300 rounded"
+                            title="Revert to pending (e.g. cheque not yet cleared)"
+                          >
+                            Mark pending
+                          </button>
                         )}
                       </div>
                     </td>
@@ -712,7 +754,7 @@ const PaymentsPage = () => {
               <div className="flex items-center gap-3 mb-3 text-xs text-gray-500">
                 <div className="flex items-center gap-1">
                   <CreditCard className="h-3.5 w-3.5" />
-                  <span>{payment.method}</span>
+                  <span>{getPaymentMethod(payment)}</span>
                 </div>
                 <div className="flex items-center gap-1">
                   <Calendar className="h-3.5 w-3.5" />
@@ -724,9 +766,9 @@ const PaymentsPage = () => {
               </div>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  {getStatusIcon(payment.status, payment.chequeStatus, payment.method)}
-                  <span className={`inline-flex px-2 py-0.5 text-xs font-semibold rounded-full ${getStatusColor(payment.status, payment.chequeStatus, payment.method)}`}>
-                    {payment.method === 'Cheque' ? (payment.chequeStatus || 'Pending') : (payment.method === 'Pending' ? 'Pending' : 'Completed')}
+                  {getStatusIcon(payment.status, getChequeStatus(payment), getPaymentMethod(payment))}
+                  <span className={`inline-flex px-2 py-0.5 text-xs font-semibold rounded-full ${getStatusColor(payment.status, getChequeStatus(payment), getPaymentMethod(payment))}`}>
+                    {getPaymentMethod(payment) === 'Cheque' ? getChequeStatus(payment) : (getPaymentMethod(payment) === 'Pending' ? 'Pending' : 'Completed')}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -751,13 +793,13 @@ const PaymentsPage = () => {
                   >
                     <Download className="h-4 w-4" />
                   </button>
-                  {payment.method === 'Cheque' && payment.chequeStatus === 'Pending' && (
+                  {getPaymentMethod(payment) === 'Cheque' && getChequeStatus(payment) === 'Pending' && (
                     <>
                       <button
                         onClick={() => handleChequeStatusUpdate(payment.id, 'Cleared')}
                         className="text-xs px-2 py-1 text-green-700 bg-green-50 border border-green-200 rounded-lg"
                       >
-                        Clear
+                        Mark cleared
                       </button>
                       <button
                         onClick={() => handleChequeStatusUpdate(payment.id, 'Returned')}
@@ -766,6 +808,14 @@ const PaymentsPage = () => {
                         Return
                       </button>
                     </>
+                  )}
+                  {getPaymentMethod(payment) === 'Cheque' && getChequeStatus(payment) === 'Cleared' && (
+                    <button
+                      onClick={() => handleChequeStatusUpdate(payment.id, 'Pending')}
+                      className="text-xs px-2 py-1 text-amber-700 bg-amber-50 border border-amber-200 rounded-lg"
+                    >
+                      Mark pending
+                    </button>
                   )}
                 </div>
               </div>
@@ -810,18 +860,17 @@ const PaymentsPage = () => {
               label="Invoice/Sale (Optional - if not selecting customer)"
               options={[
                 { value: '', label: 'Select Invoice' },
-                // Show outstanding invoices first if customer is selected
+                // PERFORMANCE FIX: Only show outstanding invoices (loads dynamically when customer selected)
+                // Removed fallback to sales list (which was loaded unnecessarily on page load)
                 ...(selectedCustomerId && outstandingInvoices.length > 0
                   ? outstandingInvoices.map(inv => ({
                       value: inv.id,
                       label: `${inv.invoiceNo} - Balance: ${formatCurrency(inv.balanceAmount)} ${inv.daysOverdue > 0 ? `(${inv.daysOverdue} days overdue)` : ''}`
                     }))
-                  : sales.map(sale => ({
-                      value: sale.id,
-                      label: `${sale.invoiceNo || `Sale #${sale.id}`} - ${sale.customerName || 'No Customer'} (${formatCurrency(sale.grandTotal || sale.total || 0)})`
-                    })))
+                  : [])
               ]}
               error={errors.saleId?.message}
+              disabled={selectedCustomerId && loadingInvoices}
               {...register('saleId', { 
                 validate: (value) => {
                   if (!value && !selectedCustomerId) {
@@ -1099,12 +1148,16 @@ const PaymentsPage = () => {
               label="Invoice/Sale (Optional - if not selecting customer)"
               options={[
                 { value: '', label: 'Select Invoice' },
-                ...sales.map(sale => ({
-                  value: sale.id,
-                  label: `${sale.invoiceNo || `Sale #${sale.id}`} - ${sale.customerName || 'No Customer'} (${formatCurrency(sale.grandTotal || sale.total || 0)})`
-                }))
+                // PERFORMANCE FIX: Only show outstanding invoices (loads dynamically when customer selected)
+                ...(selectedCustomerId && outstandingInvoices.length > 0
+                  ? outstandingInvoices.map(inv => ({
+                      value: inv.id,
+                      label: `${inv.invoiceNo} - Balance: ${formatCurrency(inv.balanceAmount)} ${inv.daysOverdue > 0 ? `(${inv.daysOverdue} days overdue)` : ''}`
+                    }))
+                  : [])
               ]}
               error={errors.saleId?.message}
+              disabled={selectedCustomerId && loadingInvoices}
               {...register('saleId', { 
                 validate: (value) => {
                   if (!value && !selectedCustomerId) {
@@ -1205,6 +1258,175 @@ const PaymentsPage = () => {
         </form>
       </Modal>
 
+      {/* Bulk Payment Modal */}
+      <Modal
+        isOpen={showBulkPaymentModal}
+        onClose={() => {
+          setShowBulkPaymentModal(false)
+          setBulkPayments([{ customerId: '', amount: '', method: 'Cash', paymentDate: new Date().toISOString().split('T')[0] }])
+        }}
+        title="Bulk Payment Entry"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600 mb-4">
+            Add multiple payments at once. Each row represents one payment.
+          </p>
+          {bulkPayments.map((payment, index) => (
+            <div key={index} className="border border-gray-200 rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-gray-700">Payment #{index + 1}</span>
+                {bulkPayments.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBulkPayments(bulkPayments.filter((_, i) => i !== index))
+                    }}
+                    className="text-red-600 hover:text-red-800 text-sm"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Select
+                  label="Customer"
+                  options={[
+                    { value: '', label: 'Select Customer' },
+                    ...customers.map(customer => ({
+                      value: customer.id,
+                      label: `${customer.name} ${customer.phone ? `(${customer.phone})` : ''} - Balance: ${formatBalance(customer.balance || 0)}`
+                    }))
+                  ]}
+                  value={payment.customerId}
+                  onChange={(e) => {
+                    const updated = [...bulkPayments]
+                    updated[index].customerId = e.target.value
+                    setBulkPayments(updated)
+                  }}
+                />
+                <Input
+                  label="Amount"
+                  type="number"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={payment.amount}
+                  onChange={(e) => {
+                    const updated = [...bulkPayments]
+                    updated[index].amount = e.target.value
+                    setBulkPayments(updated)
+                  }}
+                />
+                <Select
+                  label="Payment Method"
+                  options={[
+                    { value: 'Cash', label: 'Cash' },
+                    { value: 'Cheque', label: 'Cheque' },
+                    { value: 'Online', label: 'Online Transfer' }
+                  ]}
+                  value={payment.method}
+                  onChange={(e) => {
+                    const updated = [...bulkPayments]
+                    updated[index].method = e.target.value
+                    setBulkPayments(updated)
+                  }}
+                />
+                <Input
+                  label="Payment Date"
+                  type="date"
+                  value={payment.paymentDate}
+                  onChange={(e) => {
+                    const updated = [...bulkPayments]
+                    updated[index].paymentDate = e.target.value
+                    setBulkPayments(updated)
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+          <div className="flex justify-between">
+            <button
+              type="button"
+              onClick={() => {
+                setBulkPayments([...bulkPayments, { customerId: '', amount: '', method: 'Cash', paymentDate: new Date().toISOString().split('T')[0] }])
+              }}
+              className="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+            >
+              <Plus className="h-4 w-4 inline mr-2" />
+              Add Another Payment
+            </button>
+            <div className="space-x-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowBulkPaymentModal(false)
+                  setBulkPayments([{ customerId: '', amount: '', method: 'Cash', paymentDate: new Date().toISOString().split('T')[0] }])
+                }}
+                className="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <LoadingButton
+                onClick={async () => {
+                  // Validate all payments
+                  const invalidPayments = bulkPayments.filter(p => !p.customerId || !p.amount || parseFloat(p.amount) <= 0)
+                  if (invalidPayments.length > 0) {
+                    toast.error('Please fill all required fields for all payments')
+                    return
+                  }
+
+                  try {
+                    setSubmitting(true)
+                    let successCount = 0
+                    let errorCount = 0
+
+                    // Process each payment sequentially to avoid race conditions
+                    for (const payment of bulkPayments) {
+                      try {
+                        const paymentDate = payment.paymentDate ? new Date(payment.paymentDate + 'T00:00:00').toISOString() : new Date().toISOString()
+                        const paymentData = {
+                          customerId: parseInt(payment.customerId, 10),
+                          amount: parseFloat(payment.amount),
+                          mode: payment.method,
+                          paymentDate: paymentDate
+                        }
+                        const response = await paymentsAPI.createPayment(paymentData)
+                        if (response.success) {
+                          successCount++
+                        } else {
+                          errorCount++
+                        }
+                      } catch (error) {
+                        console.error(`Failed to create payment ${bulkPayments.indexOf(payment) + 1}:`, error)
+                        errorCount++
+                      }
+                    }
+
+                    if (successCount > 0) {
+                      toast.success(`Successfully created ${successCount} payment(s)${errorCount > 0 ? `. ${errorCount} failed.` : ''}`)
+                      setShowBulkPaymentModal(false)
+                      setBulkPayments([{ customerId: '', amount: '', method: 'Cash', paymentDate: new Date().toISOString().split('T')[0] }])
+                      fetchData()
+                      window.dispatchEvent(new CustomEvent('dataUpdated'))
+                    } else {
+                      toast.error('Failed to create payments. Please check the errors and try again.')
+                    }
+                  } catch (error) {
+                    console.error('Failed to create bulk payments:', error)
+                    toast.error('Failed to create bulk payments')
+                  } finally {
+                    setSubmitting(false)
+                  }
+                }}
+                loading={submitting}
+              >
+                Save All Payments ({bulkPayments.length})
+              </LoadingButton>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
       {/* Payment Receipt/Invoice Modal */}
       <Modal
         isOpen={showReceiptModal}
@@ -1263,8 +1485,8 @@ const PaymentsPage = () => {
                 <tbody className="bg-white divide-y divide-gray-200">
                   <tr>
                     <td className="px-4 py-3 text-sm text-gray-900">
-                      Payment received via {receiptPayment.method}
-                      {receiptPayment.ref && <span className="text-gray-500"> - Ref: {receiptPayment.ref}</span>}
+                      Payment received via {getPaymentMethod(receiptPayment)}
+                      {(receiptPayment.ref || receiptPayment.reference) && <span className="text-gray-500"> - Ref: {receiptPayment.ref || receiptPayment.reference}</span>}
                     </td>
                     <td className="px-4 py-3 text-sm font-medium text-gray-900 text-right">
                       {formatCurrency(receiptPayment.amount)}
@@ -1285,7 +1507,7 @@ const PaymentsPage = () => {
               <div>
                 <p className="text-xs text-gray-500">Payment Status</p>
                 <p className="text-sm font-medium text-gray-900">
-                  {receiptPayment.method === 'Cheque' ? (receiptPayment.chequeStatus || 'Pending') : 'Completed'}
+                  {getPaymentMethod(receiptPayment) === 'Cheque' ? getChequeStatus(receiptPayment) : 'Completed'}
                 </p>
               </div>
               <div className="flex space-x-2">

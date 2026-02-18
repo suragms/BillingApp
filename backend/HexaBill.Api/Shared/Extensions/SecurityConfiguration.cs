@@ -4,11 +4,18 @@ Author: AI Assistant
 Date: 2024
 */
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using System.Text.Json;
+using System.Threading.RateLimiting;
 using System;
 using System.Linq;
-using HexaBill.Api.Shared.Middleware;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using HexaBill.Api.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace HexaBill.Api.Shared.Extensions
 {
@@ -39,6 +46,28 @@ namespace HexaBill.Api.Shared.Extensions
 
                     options.Events = new JwtBearerEvents
                     {
+                        // Force logout: SessionVersion checked on every JWT request (PRODUCTION_MASTER_TODO #22)
+                        OnTokenValidated = async context =>
+                        {
+                            var principal = context.Principal;
+                            var sessionVersionClaim = principal?.FindFirst("session_version")?.Value;
+                            if (string.IsNullOrEmpty(sessionVersionClaim)) return; // Old tokens without claim allowed
+                            if (!int.TryParse(sessionVersionClaim, out var tokenVer)) return;
+
+                            var userIdClaim = principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                                ?? principal?.FindFirst("id")?.Value
+                                ?? principal?.FindFirst("sub")?.Value;
+                            if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var userId))
+                                return;
+
+                            var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+                            var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId);
+                            if (user != null && user.SessionVersion != tokenVer)
+                            {
+                                context.Response.Headers["X-Auth-Failure"] = "Session-Expired";
+                                context.Fail(new UnauthorizedAccessException("Session expired. Please login again."));
+                            }
+                        },
                         OnAuthenticationFailed = context =>
                         {
                             if (context.Exception.GetType() == typeof(SecurityTokenExpiredException))
@@ -80,6 +109,7 @@ namespace HexaBill.Api.Shared.Extensions
                             var errorMessage = authFailureType switch
                             {
                                 "Token-Expired" => "Your session has expired. Please login again.",
+                                "Session-Expired" => "Session expired. Please login again.",
                                 "Invalid-Token" => "Invalid authentication token. Please login again.",
                                 _ => "Authentication required. Please login again."
                             };
@@ -120,7 +150,7 @@ namespace HexaBill.Api.Shared.Extensions
                     .ToList();
                 
                 // Always ensure known frontend origins are included
-                var knownOrigins = new[] { "https://hexabill.netlify.app", "https://hexabill.company", "https://www.hexabill.company" };
+                var knownOrigins = new[] { "https://hexabill.netlify.app", "https://hexabill.vercel.app", "https://hexabill.onrender.com", "https://hexabill.company", "https://www.hexabill.company" };
                 foreach (var origin in knownOrigins)
                 {
                     if (!envOrigins.Contains(origin))
@@ -194,6 +224,30 @@ namespace HexaBill.Api.Shared.Extensions
 
             Console.WriteLine($"✅ CORS: Configuration complete. Environment: {(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Not Set")}");
 
+            // Built-in rate limiter (replaces custom in-memory RateLimitingMiddleware) - PRODUCTION_MASTER_TODO #31
+            services.AddRateLimiter(options =>
+            {
+                options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+                {
+                    var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                    return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 100,
+                        Window = TimeSpan.FromMinutes(1)
+                    });
+                });
+                options.OnRejected = async (context, cancellationToken) =>
+                {
+                    context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                    context.HttpContext.Response.ContentType = "application/json";
+                    await context.HttpContext.Response.WriteAsync(JsonSerializer.Serialize(new
+                    {
+                        success = false,
+                        message = "Rate limit exceeded. Please try again later."
+                    }), cancellationToken);
+                };
+            });
+
             return services;
         }
 
@@ -212,8 +266,8 @@ namespace HexaBill.Api.Shared.Extensions
                 await next();
             });
 
-            // Rate limiting
-            app.UseRateLimiting();
+            // Rate limiting (ASP.NET Core built-in; no in-memory lock contention)
+            app.UseRateLimiter();
 
             // Note: CORS is now called in Program.cs BEFORE UseSecurityMiddleware
             // This ensures CORS headers are set before authentication checks

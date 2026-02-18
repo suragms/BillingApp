@@ -72,6 +72,17 @@ const Dashboard = () => {
   const [allocations, setAllocations] = useState({ branches: [], routes: [], users: [] })
 
   // Dashboard Item Permissions Logic
+  const staffPermissionList = useMemo(() => {
+    const raw = user?.dashboardPermissions
+    if (raw === null || raw === undefined || String(raw).trim() === '') return []
+    return String(raw).split(',').map(s => s.trim()).filter(Boolean)
+  }, [user?.dashboardPermissions])
+
+  const staffHasNoPermissions = user?.role === 'Staff' && staffPermissionList.length === 0
+
+  // Default items when Staff has no permissions (avoid blank dashboard); include expenses so staff can add expense
+  const DEFAULT_STAFF_VIEW_ITEMS = ['quickActions', 'salesLedger', 'salesToday', 'expenses']
+
   const canShow = (itemId) => {
     // Only Owners and SystemAdmins bypass all permission checks
     if (isOwner(user)) return true
@@ -79,8 +90,11 @@ const Dashboard = () => {
     // If permissions array doesn't exist (legacy), show everything
     if (user?.dashboardPermissions === null || user?.dashboardPermissions === undefined) return true
 
+    // Staff with no permissions: show default basic view so dashboard isn't blank
+    if (staffHasNoPermissions) return DEFAULT_STAFF_VIEW_ITEMS.includes(itemId)
+
     // Otherwise, check if the specific item ID is in the allowed list
-    return user.dashboardPermissions.split(',').includes(itemId)
+    return staffPermissionList.includes(itemId)
   }
 
   const fetchDashboardData = async () => {
@@ -387,6 +401,16 @@ const Dashboard = () => {
 
       {/* Main Content — full-width grid: 12 cols desktop, fluid */}
       <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-10 py-6 space-y-6 lg:space-y-8 overflow-x-hidden">
+        {/* Staff with no dashboard permissions: show guidance */}
+        {staffHasNoPermissions && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-amber-900">No dashboard widgets assigned</p>
+              <p className="text-xs text-amber-800 mt-1">You’re seeing a limited view. Contact your admin to get full dashboard access.</p>
+            </div>
+          </div>
+        )}
         {/* Row 1: KPI Cards — col-span-3 each on desktop (4 cards) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-4 lg:gap-6">
           {canShow('salesToday') && (
@@ -488,8 +512,8 @@ const Dashboard = () => {
                   <Wallet className="h-5 w-5 text-primary-600" />
                 </div>
               </div>
-              <h3 className="text-sm font-medium text-primary-600 mb-1">Expenses</h3>
-              <p className="text-lg font-bold text-primary-800">Manage</p>
+              <h3 className="text-sm font-medium text-primary-600 mb-1">{isAdminOrOwner(user) ? 'Expenses' : 'Add expense'}</h3>
+              <p className="text-lg font-bold text-primary-800">{isAdminOrOwner(user) ? 'Manage' : 'Log expense'}</p>
               <p className="text-xs text-primary-600 mt-1 font-medium">Click to open →</p>
             </div>
           )}

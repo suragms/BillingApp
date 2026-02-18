@@ -41,6 +41,8 @@ namespace HexaBill.Api.Data
         public DbSet<Payment> Payments { get; set; }
         public DbSet<Expense> Expenses { get; set; }
         public DbSet<ExpenseCategory> ExpenseCategories { get; set; }
+        public DbSet<RecurringExpense> RecurringExpenses { get; set; }
+        public DbSet<ProductCategory> ProductCategories { get; set; }
         public DbSet<InventoryTransaction> InventoryTransactions { get; set; }
         public DbSet<AuditLog> AuditLogs { get; set; }
         public DbSet<Setting> Settings { get; set; }
@@ -60,6 +62,9 @@ namespace HexaBill.Api.Data
         public DbSet<RouteStaff> RouteStaff { get; set; }
         public DbSet<BranchStaff> BranchStaff { get; set; }
         public DbSet<RouteExpense> RouteExpenses { get; set; }
+        public DbSet<CustomerVisit> CustomerVisits { get; set; }
+        public DbSet<HeldInvoice> HeldInvoices { get; set; }
+        public DbSet<UserSession> UserSessions { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -343,13 +348,34 @@ namespace HexaBill.Api.Data
                 entity.HasIndex(e => e.Name).IsUnique();
             });
 
+            // ProductCategory configuration
+            modelBuilder.Entity<ProductCategory>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+                entity.Property(e => e.Description).HasMaxLength(200);
+                entity.Property(e => e.ColorCode).HasMaxLength(7);
+                // Unique name per tenant
+                entity.HasIndex(e => new { e.TenantId, e.Name }).IsUnique();
+                entity.HasMany(e => e.Products)
+                    .WithOne(p => p.Category)
+                    .HasForeignKey(p => p.CategoryId)
+                    .OnDelete(DeleteBehavior.SetNull); // Don't delete products when category is deleted
+            });
+
             // Expense configuration
             modelBuilder.Entity<Expense>(entity =>
             {
                 entity.HasKey(e => e.Id);
                 entity.Property(e => e.Amount).HasColumnType("decimal(18,2)");
                 entity.Property(e => e.Note).HasMaxLength(500);
+                entity.Property(e => e.AttachmentUrl).HasMaxLength(500);
+                entity.Property(e => e.RejectionReason).HasMaxLength(500);
+                entity.Property(e => e.Status).HasConversion<int>(); // Store enum as int
                 entity.HasOne(e => e.Category).WithMany(c => c.Expenses).HasForeignKey(e => e.CategoryId);
+                entity.HasOne(e => e.Route).WithMany().HasForeignKey(e => e.RouteId).OnDelete(DeleteBehavior.SetNull);
+                entity.HasOne(e => e.RecurringExpense).WithMany(r => r.GeneratedExpenses).HasForeignKey(e => e.RecurringExpenseId).OnDelete(DeleteBehavior.SetNull);
+                entity.HasOne(e => e.ApprovedByUser).WithMany().HasForeignKey(e => e.ApprovedBy).OnDelete(DeleteBehavior.SetNull);
                 entity.HasOne(e => e.CreatedByUser).WithMany().HasForeignKey(e => e.CreatedBy);
             });
 
@@ -384,6 +410,16 @@ namespace HexaBill.Api.Data
                 entity.HasIndex(e => new { e.EntityType, e.EntityId });
             });
 
+            modelBuilder.Entity<UserSession>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.UserAgent).HasMaxLength(500);
+                entity.Property(e => e.IpAddress).HasMaxLength(45);
+                entity.HasOne(e => e.User).WithMany().HasForeignKey(e => e.UserId);
+                entity.HasIndex(e => e.TenantId);
+                entity.HasIndex(e => e.LoginAt);
+            });
+
             modelBuilder.Entity<ErrorLog>(entity =>
             {
                 entity.HasKey(e => e.Id);
@@ -394,6 +430,7 @@ namespace HexaBill.Api.Data
                 entity.Property(e => e.Method).HasMaxLength(16);
                 entity.HasIndex(e => e.CreatedAt);
                 entity.HasIndex(e => e.TenantId);
+                entity.HasIndex(e => e.ResolvedAt);
             });
 
             modelBuilder.Entity<DemoRequest>(entity =>
@@ -558,6 +595,22 @@ namespace HexaBill.Api.Data
                 entity.HasIndex(e => e.RouteId);
                 entity.HasIndex(e => e.TenantId);
                 entity.HasIndex(e => e.ExpenseDate);
+            });
+
+            // CustomerVisit configuration
+            modelBuilder.Entity<CustomerVisit>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Status).HasConversion<string>().HasDefaultValue(VisitStatus.NotVisited);
+                entity.Property(e => e.Notes).HasMaxLength(500);
+                entity.Property(e => e.PaymentCollected).HasColumnType("decimal(18,2)");
+                entity.HasOne(e => e.Route).WithMany().HasForeignKey(e => e.RouteId);
+                entity.HasOne(e => e.Customer).WithMany().HasForeignKey(e => e.CustomerId);
+                entity.HasOne(e => e.Tenant).WithMany().HasForeignKey(e => e.TenantId);
+                entity.HasOne(e => e.Staff).WithMany().HasForeignKey(e => e.StaffId).OnDelete(DeleteBehavior.SetNull);
+                entity.HasIndex(e => new { e.RouteId, e.CustomerId, e.VisitDate }).IsUnique();
+                entity.HasIndex(e => e.TenantId);
+                entity.HasIndex(e => e.VisitDate);
             });
 
             // Seed data

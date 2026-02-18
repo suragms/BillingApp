@@ -13,4 +13,6 @@ public class ErrorLog
     public int? TenantId { get; set; }
     public int? UserId { get; set; }
     public DateTime CreatedAt { get; set; }
+    /// <summary>When set, entry is resolved/suppressed; can be hidden from default list.</summary>
+    public DateTime? ResolvedAt { get; set; }
 }

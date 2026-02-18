@@ -3,10 +3,12 @@ Purpose: Subscription Management Controller
 Author: AI Assistant
 Date: 2026-02-11
 */
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using HexaBill.Api.Models;
 using HexaBill.Api.Shared.Extensions;
+using Stripe;
 
 namespace HexaBill.Api.Modules.Subscription
 {
@@ -122,7 +124,100 @@ namespace HexaBill.Api.Modules.Subscription
         }
 
         /// <summary>
-        /// Create new subscription (for tenant)
+        /// Create Stripe Checkout Session for subscription payment. Returns URL to redirect user to. (PRODUCTION_MASTER_TODO #43)
+        /// When Stripe is not configured, returns 404 so frontend can fall back to direct create.
+        /// </summary>
+        [HttpPost("checkout-session")]
+        public async Task<ActionResult<ApiResponse<StripeCheckoutResponse>>> CreateCheckoutSession([FromBody] CreateCheckoutSessionRequest request)
+        {
+            try
+            {
+                var result = await _subscriptionService.CreateStripeCheckoutSessionAsync(
+                    CurrentTenantId,
+                    request.PlanId,
+                    request.BillingCycle ?? BillingCycle.Monthly,
+                    request.SuccessUrl ?? "",
+                    request.CancelUrl ?? ""
+                );
+                if (result == null || string.IsNullOrEmpty(result.Url))
+                {
+                    return NotFound(new ApiResponse<StripeCheckoutResponse>
+                    {
+                        Success = false,
+                        Message = "Payment gateway is not configured or plan not found. Use Subscribe without payment for trial."
+                    });
+                }
+                return Ok(new ApiResponse<StripeCheckoutResponse>
+                {
+                    Success = true,
+                    Message = "Checkout session created",
+                    Data = new StripeCheckoutResponse { Url = result.Url, SessionId = result.SessionId }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<StripeCheckoutResponse>
+                {
+                    Success = false,
+                    Message = "Failed to create checkout session",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        /// <summary>
+        /// Stripe webhook: verify signature and activate subscription on checkout.session.completed. No auth.
+        /// </summary>
+        [HttpPost("webhook")]
+        [AllowAnonymous]
+        public async Task<IActionResult> StripeWebhook()
+        {
+            var json = await ReadRequestBodyAsync();
+            var signature = Request.Headers["Stripe-Signature"].FirstOrDefault();
+            var webhookSecret = HttpContext.RequestServices.GetRequiredService<IConfiguration>()["Stripe:WebhookSecret"];
+            if (string.IsNullOrEmpty(webhookSecret))
+            {
+                return BadRequest("Webhook secret not configured");
+            }
+            Event? stripeEvent;
+            try
+            {
+                stripeEvent = EventUtility.ConstructEvent(json, signature!, webhookSecret);
+            }
+            catch (Exception)
+            {
+                return BadRequest("Invalid signature");
+            }
+            if (stripeEvent.Type != "checkout.session.completed")
+            {
+                return Ok();
+            }
+            var session = stripeEvent.Data.Object as Stripe.Checkout.Session;
+            if (session?.Metadata == null || !session.Metadata.ContainsKey("tenantId") || !session.Metadata.ContainsKey("planId") || !session.Metadata.ContainsKey("billingCycle"))
+            {
+                return Ok();
+            }
+            if (!int.TryParse(session.Metadata["tenantId"], out var tenantId) ||
+                !int.TryParse(session.Metadata["planId"], out var planId))
+            {
+                return Ok();
+            }
+            var billingCycle = session.Metadata["billingCycle"] == "Yearly" ? BillingCycle.Yearly : BillingCycle.Monthly;
+            var activated = await _subscriptionService.ActivateSubscriptionFromStripePaymentAsync(tenantId, planId, billingCycle, session.Id);
+            return Ok();
+        }
+
+        private async Task<string> ReadRequestBodyAsync()
+        {
+            Request.EnableBuffering();
+            using var reader = new StreamReader(Request.Body, Encoding.UTF8, leaveOpen: true);
+            var body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            return body;
+        }
+
+        /// <summary>
+        /// Create new subscription (for tenant) — direct create without payment (trial or manual)
         /// </summary>
         [HttpPost]
         public async Task<ActionResult<ApiResponse<SubscriptionDto>>> CreateSubscription([FromBody] CreateSubscriptionRequest request)
@@ -378,12 +473,54 @@ namespace HexaBill.Api.Modules.Subscription
                 });
             }
         }
+
+        /// <summary>
+        /// Platform revenue report: MRR trend, new signups by month, churn. SystemAdmin only. (PRODUCTION_MASTER_TODO #45)
+        /// </summary>
+        [HttpGet("revenue-report")]
+        public async Task<ActionResult<ApiResponse<PlatformRevenueReportDto>>> GetRevenueReport()
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var report = await _subscriptionService.GetPlatformRevenueReportAsync();
+                return Ok(new ApiResponse<PlatformRevenueReportDto>
+                {
+                    Success = true,
+                    Message = "Revenue report retrieved",
+                    Data = report
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<PlatformRevenueReportDto>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
     }
 
     public class CreateSubscriptionRequest
     {
         public int PlanId { get; set; }
         public BillingCycle? BillingCycle { get; set; }
+    }
+
+    public class CreateCheckoutSessionRequest
+    {
+        public int PlanId { get; set; }
+        public BillingCycle? BillingCycle { get; set; }
+        public string? SuccessUrl { get; set; }
+        public string? CancelUrl { get; set; }
+    }
+
+    public class StripeCheckoutResponse
+    {
+        public string Url { get; set; } = string.Empty;
+        public string SessionId { get; set; } = string.Empty;
     }
 
     public class UpdateSubscriptionRequest

@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Mvc;
 using HexaBill.Api.Modules.Inventory;
 using HexaBill.Api.Models;
 using HexaBill.Api.Shared.Extensions; // MULTI-TENANT: Add helpers for TenantScopedController
+using Microsoft.Extensions.DependencyInjection;
+using HexaBill.Api.Modules.SuperAdmin;
 
 namespace HexaBill.Api.Modules.Inventory
 {
@@ -18,11 +20,25 @@ namespace HexaBill.Api.Modules.Inventory
     {
         private readonly IProductService _productService;
         private readonly IExcelImportService _excelImportService;
+        private readonly HexaBill.Api.Shared.Security.IFileUploadService? _fileUploadService;
+        private readonly ISettingsService _settingsService;
 
-        public ProductsController(IProductService productService, IExcelImportService excelImportService)
+        public ProductsController(IProductService productService, IExcelImportService excelImportService, IServiceProvider serviceProvider, ISettingsService settingsService)
         {
             _productService = productService;
             _excelImportService = excelImportService;
+            _fileUploadService = serviceProvider.GetService<HexaBill.Api.Shared.Security.IFileUploadService>();
+            _settingsService = settingsService;
+        }
+
+        private async Task<int?> GetGlobalLowStockThresholdAsync()
+        {
+            var tenantId = CurrentTenantId;
+            if (tenantId <= 0) return null;
+            var settings = await _settingsService.GetOwnerSettingsAsync(tenantId);
+            var raw = settings.TryGetValue("LOW_STOCK_GLOBAL_THRESHOLD", out var v) ? v : null;
+            if (string.IsNullOrWhiteSpace(raw) || !int.TryParse(raw.Trim(), out int threshold) || threshold <= 0) return null;
+            return threshold;
         }
 
         [HttpGet]
@@ -31,7 +47,9 @@ namespace HexaBill.Api.Modules.Inventory
             [FromQuery] int pageSize = 10,
             [FromQuery] string? search = null,
             [FromQuery] bool lowStock = false,
-            [FromQuery] string? unitType = null)
+            [FromQuery] string? unitType = null,
+            [FromQuery] int? categoryId = null,
+            [FromQuery] bool includeInactive = false)
         {
             try
             {
@@ -99,7 +117,8 @@ namespace HexaBill.Api.Modules.Inventory
                     });
                 }
                 
-                var result = await _productService.GetProductsAsync(tenantId, page, pageSize, search, lowStock, unitType);
+                var globalThreshold = await GetGlobalLowStockThresholdAsync();
+                var result = await _productService.GetProductsAsync(tenantId, page, pageSize, search, lowStock, unitType, categoryId, includeInactive, globalThreshold);
                 return Ok(new ApiResponse<PagedResponse<ProductDto>>
                 {
                     Success = true,
@@ -276,6 +295,40 @@ namespace HexaBill.Api.Modules.Inventory
             }
         }
 
+        [HttpPost("{id}/activate")]
+        [Authorize(Roles = "Owner,Admin")]
+        public async Task<ActionResult<ApiResponse<object>>> ActivateProduct(int id)
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                var result = await _productService.ActivateProductAsync(id, tenantId);
+                if (!result)
+                {
+                    return NotFound(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Product not found"
+                    });
+                }
+
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Message = "Product activated successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
         [HttpDelete("{id}")]
         [Authorize(Roles = "Owner,Admin")]
         public async Task<ActionResult<ApiResponse<object>>> DeleteProduct(int id)
@@ -297,7 +350,7 @@ namespace HexaBill.Api.Modules.Inventory
                 return Ok(new ApiResponse<object>
                 {
                     Success = true,
-                    Message = "Product deleted successfully"
+                    Message = "Product deactivated successfully (soft delete)"
                 });
             }
             catch (Exception ex)
@@ -361,9 +414,10 @@ namespace HexaBill.Api.Modules.Inventory
         {
             try
             {
-                // CRITICAL: Get tenantId from JWT token
+                // CRITICAL: Get tenantId from JWT token. #55: use global low-stock threshold from settings if set
                 var tenantId = CurrentTenantId;
-                var result = await _productService.GetLowStockProductsAsync(tenantId);
+                var globalThreshold = await GetGlobalLowStockThresholdAsync();
+                var result = await _productService.GetLowStockProductsAsync(tenantId, globalThreshold);
                 return Ok(new ApiResponse<List<ProductDto>>
                 {
                     Success = true,

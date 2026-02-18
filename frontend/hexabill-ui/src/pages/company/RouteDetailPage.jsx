@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { MapPin, ArrowLeft, Plus, Trash2, Edit, Printer, Users, Receipt, BarChart3 } from 'lucide-react'
+import { MapPin, ArrowLeft, Plus, Trash2, Edit, Printer, Users, Receipt, BarChart3, TrendingUp, DollarSign, FileText, Calendar } from 'lucide-react'
 import { formatCurrency } from '../../utils/currency'
 import toast from 'react-hot-toast'
-import { routesAPI, salesAPI } from '../../services'
+import { routesAPI, salesAPI, expensesAPI } from '../../services'
 import Modal from '../../components/Modal'
 import { Input } from '../../components/Form'
 import { isAdminOrOwner } from '../../utils/roles'
@@ -48,6 +48,11 @@ const RouteDetailPage = () => {
   const [loadingSheet, setLoadingSheet] = useState(false)
   const [routeSales, setRouteSales] = useState([])
   const [routeSalesLoading, setRouteSalesLoading] = useState(false)
+  const [generalExpenses, setGeneralExpenses] = useState([])
+  const [generalExpensesLoading, setGeneralExpensesLoading] = useState(false)
+  const [showTodaysRoute, setShowTodaysRoute] = useState(false)
+  const [todaysRouteCustomers, setTodaysRouteCustomers] = useState([])
+  const [updatingVisitStatus, setUpdatingVisitStatus] = useState(null) // { customerId: status }
 
   const canManage = isAdminOrOwner(JSON.parse(localStorage.getItem('user') || '{}'))
 
@@ -113,6 +118,19 @@ const RouteDetailPage = () => {
         .finally(() => setRouteSalesLoading(false))
     }
   }, [activeTab, id])
+
+  useEffect(() => {
+    if (activeTab === 'expenses' && id && route?.branchId) {
+      setGeneralExpensesLoading(true)
+      expensesAPI.getExpenses({ branchId: route.branchId, pageSize: 100 })
+        .then(res => {
+          const items = res?.data?.items ?? res?.items ?? []
+          setGeneralExpenses(Array.isArray(items) ? items : [])
+        })
+        .catch(() => setGeneralExpenses([]))
+        .finally(() => setGeneralExpensesLoading(false))
+    }
+  }, [activeTab, id, route?.branchId])
 
   const handleAddExpense = async (e) => {
     e?.preventDefault()
@@ -211,6 +229,34 @@ const RouteDetailPage = () => {
       toast.error('Failed to load collection sheet')
     } finally {
       setLoadingSheet(false)
+    }
+  }
+
+  const handleUpdateVisitStatus = async (customerId, status, notes, paymentCollected) => {
+    if (!id) return
+    const key = `${customerId}-${status}`
+    setUpdatingVisitStatus(key)
+    try {
+      const res = await routesAPI.updateCustomerVisit(id, customerId, {
+        visitDate: collectionSheetDate,
+        status: status,
+        notes: notes || undefined,
+        paymentCollected: paymentCollected || undefined
+      })
+      if (res?.success) {
+        toast.success(`Status updated to ${status === 'PaymentCollected' ? 'Payment Collected' : status}`, { id: `visit-${customerId}` })
+        // Refresh collection sheet to get updated data
+        const refreshRes = await routesAPI.getRouteCollectionSheet(id, collectionSheetDate)
+        if (refreshRes?.success && refreshRes?.data) {
+          setCollectionSheet(refreshRes.data)
+        }
+      } else {
+        toast.error(res?.message || 'Failed to update visit status')
+      }
+    } catch (e) {
+      if (!e?._handledByInterceptor) toast.error(e?.message || 'Failed to update visit status')
+    } finally {
+      setUpdatingVisitStatus(null)
     }
   }
 
@@ -387,72 +433,112 @@ const RouteDetailPage = () => {
 
       {activeTab === 'expenses' && (
         <>
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-        <h2 className="text-lg font-medium text-neutral-800">Route expenses</h2>
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            value={collectionSheetDate}
-            onChange={(e) => setCollectionSheetDate(e.target.value)}
-            className="border border-neutral-300 rounded px-2 py-1 text-sm print:hidden"
-          />
-          <button
-            type="button"
-            onClick={openCollectionSheet}
-            disabled={loadingSheet}
-            className="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-neutral-300 text-neutral-700 rounded-lg hover:bg-neutral-50 text-sm print:hidden"
-          >
-            <Printer className="h-4 w-4" />
-            {loadingSheet ? 'Loading…' : 'Print Collection Sheet'}
-          </button>
-          {canManage && (
-            <button
-              type="button"
-              onClick={openAddExpenseModal}
-              className="inline-flex items-center gap-1 px-3 py-1.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm"
-            >
-              <Plus className="h-4 w-4" />
-              Add expense
-            </button>
-          )}
-        </div>
-      </div>
-      {expenses.length === 0 ? (
-        <p className="text-neutral-500 text-sm">No expenses in this date range.</p>
-      ) : (
-        <ul className="space-y-2">
-          {expenses.map((e) => (
-            <li key={e.id} className="flex items-center justify-between p-3 bg-white rounded-lg border border-neutral-200">
-              <div>
-                <span className="font-medium">{e.category}</span>
-                <span className="text-neutral-600 ml-2">{formatCurrency(e.amount)}</span>
-                {e.description && <p className="text-sm text-neutral-500">{e.description}</p>}
-                <p className="text-xs text-neutral-400">{e.expenseDate?.split('T')[0]}</p>
-              </div>
-              {canManage && (
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => openEditExpenseModal(e)}
-                    className="p-1.5 text-primary-600 hover:bg-primary-50 rounded"
-                    aria-label="Edit expense"
-                  >
-                    <Edit className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteExpense(e.id)}
-                    className="p-1.5 text-red-600 hover:bg-red-50 rounded"
-                    aria-label="Delete expense"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+            <h2 className="text-lg font-medium text-neutral-800">Route Expenses</h2>
+            {canManage && (
+              <button
+                type="button"
+                onClick={openAddExpenseModal}
+                className="inline-flex items-center gap-1 px-3 py-1.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm"
+              >
+                <Plus className="h-4 w-4" />
+                Add Route Expense
+              </button>
+            )}
+          </div>
+          
+          {/* Route Expenses Section */}
+          <div className="mb-6">
+            <h3 className="text-md font-medium text-neutral-700 mb-3">Route-Specific Expenses (Fuel, Staff, Delivery, etc.)</h3>
+            {expenses.length === 0 ? (
+              <p className="text-neutral-500 text-sm py-2">No route expenses in this date range.</p>
+            ) : (
+              <ul className="space-y-2">
+                {expenses.map((e) => (
+                  <li key={e.id} className="flex items-center justify-between p-3 bg-white rounded-lg border border-neutral-200">
+                    <div>
+                      <span className="font-medium">{e.category}</span>
+                      <span className="text-neutral-600 ml-2">{formatCurrency(e.amount)}</span>
+                      {e.description && <p className="text-sm text-neutral-500">{e.description}</p>}
+                      <p className="text-xs text-neutral-400">{e.expenseDate?.split('T')[0]}</p>
+                    </div>
+                    {canManage && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => openEditExpenseModal(e)}
+                          className="p-1.5 text-primary-600 hover:bg-primary-50 rounded"
+                          aria-label="Edit expense"
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteExpense(e.id)}
+                          className="p-1.5 text-red-600 hover:bg-red-50 rounded"
+                          aria-label="Delete expense"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {expenses.length > 0 && (
+              <p className="text-sm text-neutral-600 mt-2">
+                Route Expenses Total: <span className="font-semibold">{formatCurrency(expenses.reduce((sum, e) => sum + (e.amount || 0), 0))}</span>
+              </p>
+            )}
+          </div>
+
+          {/* General Expenses Section */}
+          {route?.branchId && (
+            <div className="mb-6">
+              <h3 className="text-md font-medium text-neutral-700 mb-3">Branch-Level Expenses (Rent, Utilities, etc.)</h3>
+              {generalExpensesLoading ? (
+                <div className="py-4 flex justify-center"><div className="animate-spin rounded-full h-6 w-6 border-2 border-primary-600 border-t-transparent" /></div>
+              ) : generalExpenses.length === 0 ? (
+                <p className="text-neutral-500 text-sm py-2">No branch-level expenses allocated to this route's branch.</p>
+              ) : (
+                <>
+                  <ul className="space-y-2">
+                    {generalExpenses.map((e) => (
+                      <li key={e.id} className="flex items-center justify-between p-3 bg-neutral-50 rounded-lg border border-neutral-200">
+                        <div>
+                          <span className="font-medium">{e.categoryName || 'Uncategorized'}</span>
+                          <span className="text-neutral-600 ml-2">{formatCurrency(e.amount || 0)}</span>
+                          {e.note && <p className="text-sm text-neutral-500">{e.note}</p>}
+                          <p className="text-xs text-neutral-400">{e.date ? new Date(e.date).toLocaleDateString() : '—'}</p>
+                        </div>
+                        <span className="text-xs text-neutral-500">Branch Expense</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-sm text-neutral-600 mt-2">
+                    Branch Expenses Total: <span className="font-semibold">{formatCurrency(generalExpenses.reduce((sum, e) => sum + (e.amount || 0), 0))}</span>
+                  </p>
+                </>
               )}
-            </li>
-          ))}
-        </ul>
-      )}
+            </div>
+          )}
+
+          {/* Combined Total */}
+          {(expenses.length > 0 || generalExpenses.length > 0) && (
+            <div className="bg-primary-50 rounded-lg border border-primary-200 p-4">
+              <p className="text-sm font-medium text-neutral-700 mb-1">Combined Expenses Total</p>
+              <p className="text-xl font-semibold text-primary-700">
+                {formatCurrency(
+                  expenses.reduce((sum, e) => sum + (e.amount || 0), 0) +
+                  generalExpenses.reduce((sum, e) => sum + (e.amount || 0), 0)
+                )}
+              </p>
+              <p className="text-xs text-neutral-500 mt-1">
+                Note: Route expenses are specific to this route. Branch expenses are shared across all routes in the branch.
+              </p>
+            </div>
+          )}
         </>
       )}
 
@@ -496,22 +582,92 @@ const RouteDetailPage = () => {
             <button type="button" onClick={applyDateRange} className="px-3 py-1.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium">Apply</button>
           </div>
           {summary && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="bg-white rounded-lg border border-neutral-200 p-4">
-                <p className="text-sm text-neutral-500">Total Sales</p>
-                <p className="text-xl font-semibold text-neutral-900">{formatCurrency(summary.totalSales)}</p>
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <TrendingUp className="h-4 w-4 text-primary-600" />
+                    <p className="text-sm text-neutral-500">Total Sales</p>
+                  </div>
+                  <p className="text-xl font-semibold text-neutral-900">{formatCurrency(summary.totalSales)}</p>
+                </div>
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <DollarSign className="h-4 w-4 text-primary-600" />
+                    <p className="text-sm text-neutral-500">Total Expenses</p>
+                  </div>
+                  <p className="text-xl font-semibold text-neutral-900">{formatCurrency(summary.totalExpenses)}</p>
+                </div>
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <BarChart3 className="h-4 w-4 text-primary-600" />
+                    <p className="text-sm text-neutral-500">Net Profit</p>
+                  </div>
+                  <p className={`text-xl font-semibold ${summary.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{formatCurrency(summary.profit)}</p>
+                </div>
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Receipt className="h-4 w-4 text-primary-600" />
+                    <p className="text-sm text-neutral-500">Profit Margin</p>
+                  </div>
+                  <p className={`text-xl font-semibold ${summary.totalSales > 0 && (summary.profit / summary.totalSales * 100) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {summary.totalSales > 0 ? `${(summary.profit / summary.totalSales * 100).toFixed(1)}%` : '—'}
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <p className="text-sm text-neutral-500">Cost of Goods Sold</p>
+                  <p className="text-lg font-semibold text-neutral-900">{formatCurrency(summary.costOfGoodsSold || 0)}</p>
+                </div>
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <p className="text-sm text-neutral-500">Gross Profit</p>
+                  <p className={`text-lg font-semibold ${(summary.totalSales - (summary.costOfGoodsSold || 0)) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {formatCurrency(summary.totalSales - (summary.costOfGoodsSold || 0))}
+                  </p>
+                </div>
+                <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                  <p className="text-sm text-neutral-500">Gross Margin</p>
+                  <p className={`text-lg font-semibold ${summary.totalSales > 0 && ((summary.totalSales - (summary.costOfGoodsSold || 0)) / summary.totalSales * 100) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {summary.totalSales > 0 ? `${((summary.totalSales - (summary.costOfGoodsSold || 0)) / summary.totalSales * 100).toFixed(1)}%` : '—'}
+                  </p>
+                </div>
               </div>
               <div className="bg-white rounded-lg border border-neutral-200 p-4">
-                <p className="text-sm text-neutral-500">Total Expenses</p>
-                <p className="text-xl font-semibold text-neutral-900">{formatCurrency(summary.totalExpenses)}</p>
+                <h3 className="text-md font-medium text-neutral-800 mb-3 flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4" />
+                  Performance Summary
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div>
+                    <p className="text-sm text-neutral-500">Invoice Count</p>
+                    <p className="text-lg font-semibold text-neutral-900">{summary.invoiceCount ?? 0}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-neutral-500">Average Invoice Size</p>
+                    <p className="text-lg font-semibold text-neutral-900">
+                      {(summary.invoiceCount ?? 0) > 0 ? formatCurrency(summary.totalSales / (summary.invoiceCount ?? 1)) : '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-neutral-500">Visits Recorded</p>
+                    <p className="text-lg font-semibold text-neutral-900">{summary.visitCount ?? 0}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-neutral-500">Expense Ratio</p>
+                    <p className="text-lg font-semibold text-neutral-900">
+                      {summary.totalSales > 0 ? `${(summary.totalExpenses / summary.totalSales * 100).toFixed(1)}%` : '—'}
+                    </p>
+                  </div>
+                </div>
+                <p className="mt-3 text-xs text-neutral-500">Customer count on route: {route?.customers?.length ?? 0}</p>
               </div>
-              <div className="bg-white rounded-lg border border-neutral-200 p-4">
-                <p className="text-sm text-neutral-500">Net Profit</p>
-                <p className={`text-xl font-semibold ${summary.profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{formatCurrency(summary.profit)}</p>
-              </div>
-            </div>
+            </>
           )}
-          <p className="mt-4 text-sm text-neutral-500 flex items-center gap-1"><BarChart3 className="h-4 w-4" />Route performance for selected date range.</p>
+          {!summary && !loading && (
+            <p className="text-neutral-500">Select a date range and click Apply to load performance metrics.</p>
+          )}
+          <p className="mt-4 text-sm text-neutral-500 flex items-center gap-1"><BarChart3 className="h-4 w-4" />Route performance metrics for selected date range.</p>
         </div>
       )}
 
@@ -570,39 +726,111 @@ const RouteDetailPage = () => {
       )}
 
       {collectionSheet && (
-        <Modal isOpen={true} title="Daily Collection Sheet" onClose={closeCollectionSheet}>
-          <div id="collection-sheet-print" className="space-y-4">
-            <div className="text-sm text-neutral-600">
-              <p><strong>Route:</strong> {collectionSheet.routeName}</p>
-              <p><strong>Branch:</strong> {collectionSheet.branchName}</p>
-              <p><strong>Date:</strong> {collectionSheet.date}</p>
-              {collectionSheet.staffName && <p><strong>Staff:</strong> {collectionSheet.staffName}</p>}
+        <Modal isOpen={true} title="Daily Collection Sheet" onClose={closeCollectionSheet} size="lg">
+          <div id="collection-sheet-print" className="space-y-4 print:space-y-2">
+            <style>{`
+              @media print {
+                body * { visibility: hidden; }
+                #collection-sheet-print, #collection-sheet-print * { visibility: visible; }
+                #collection-sheet-print { position: absolute; left: 0; top: 0; width: 100%; }
+                .print\\:hidden { display: none !important; }
+                table { page-break-inside: avoid; }
+                tr { page-break-inside: avoid; }
+              }
+            `}</style>
+            <div className="text-sm text-neutral-600 print:text-xs border-b border-neutral-300 pb-3 print:pb-2">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <p><strong>Route:</strong> {collectionSheet.routeName}</p>
+                  <p><strong>Branch:</strong> {collectionSheet.branchName}</p>
+                </div>
+                <div>
+                  <p><strong>Date:</strong> {collectionSheet.date}</p>
+                  {collectionSheet.staffName && <p><strong>Staff:</strong> {collectionSheet.staffName}</p>}
+                </div>
+              </div>
             </div>
-            <table className="w-full border-collapse text-sm">
+            <table className="w-full border-collapse text-sm print:text-xs">
               <thead>
-                <tr className="border-b border-neutral-300">
-                  <th className="text-left py-2 px-2">#</th>
-                  <th className="text-left py-2 px-2">Customer</th>
-                  <th className="text-left py-2 px-2">Phone</th>
-                  <th className="text-right py-2 px-2">Outstanding</th>
-                  <th className="text-right py-2 px-2">Today&apos;s Invoice</th>
-                  <th className="text-center py-2 px-2 w-16">✓</th>
+                <tr className="border-b-2 border-neutral-400 bg-neutral-100 print:bg-neutral-200">
+                  <th className="text-left py-2 px-2 print:py-1 print:px-1 font-semibold">#</th>
+                  <th className="text-left py-2 px-2 print:py-1 print:px-1 font-semibold">Customer</th>
+                  <th className="text-left py-2 px-2 print:py-1 print:px-1 font-semibold">Phone</th>
+                  <th className="text-right py-2 px-2 print:py-1 print:px-1 font-semibold">Outstanding</th>
+                  <th className="text-right py-2 px-2 print:py-1 print:px-1 font-semibold">Today&apos;s Invoice</th>
+                  <th className="text-center py-2 px-2 print:py-1 print:px-1 font-semibold print:hidden">Visit Status</th>
+                  <th className="text-center py-2 px-2 print:py-1 print:px-1 font-semibold print:w-16">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {collectionSheet.customers?.map((c, i) => (
-                  <tr key={c.customerId} className="border-b border-neutral-200">
-                    <td className="py-2 px-2">{i + 1}</td>
-                    <td className="py-2 px-2 font-medium">{c.customerName}</td>
-                    <td className="py-2 px-2">{c.phone || '—'}</td>
-                    <td className="py-2 px-2 text-right">{formatCurrency(c.outstandingBalance)}</td>
-                    <td className="py-2 px-2 text-right">{c.todayInvoiceAmount != null ? formatCurrency(c.todayInvoiceAmount) : '—'}</td>
-                    <td className="py-2 px-2 text-center">□</td>
-                  </tr>
-                ))}
+                {collectionSheet.customers?.map((c, i) => {
+                  const statusColors = {
+                    'NotVisited': 'bg-neutral-100 text-neutral-600',
+                    'Visited': 'bg-blue-100 text-blue-700',
+                    'NotHome': 'bg-amber-100 text-amber-700',
+                    'PaymentCollected': 'bg-emerald-100 text-emerald-700',
+                    'Rescheduled': 'bg-purple-100 text-purple-700'
+                  }
+                  const statusLabels = {
+                    'NotVisited': 'Not Visited',
+                    'Visited': 'Visited',
+                    'NotHome': 'Not Home',
+                    'PaymentCollected': 'Payment Collected',
+                    'Rescheduled': 'Rescheduled'
+                  }
+                  const currentStatus = c.visitStatus || 'NotVisited'
+                  const isUpdating = updatingVisitStatus === `${c.customerId}-${currentStatus}`
+                  return (
+                    <tr key={c.customerId} className="border-b border-neutral-200 print:border-neutral-300">
+                      <td className="py-2 px-2 print:py-1 print:px-1">{i + 1}</td>
+                      <td className="py-2 px-2 print:py-1 print:px-1 font-medium">{c.customerName}</td>
+                      <td className="py-2 px-2 print:py-1 print:px-1">{c.phone || '—'}</td>
+                      <td className="py-2 px-2 print:py-1 print:px-1 text-right font-medium">{formatCurrency(c.outstandingBalance)}</td>
+                      <td className="py-2 px-2 print:py-1 print:px-1 text-right">{c.todayInvoiceAmount != null ? formatCurrency(c.todayInvoiceAmount) : '—'}</td>
+                      <td className="py-2 px-2 print:py-1 print:px-1 text-center print:hidden">
+                        <select
+                          value={currentStatus}
+                          onChange={(e) => {
+                            const newStatus = e.target.value
+                            const paymentAmount = newStatus === 'PaymentCollected' && c.outstandingBalance > 0 ? c.outstandingBalance : null
+                            handleUpdateVisitStatus(c.customerId, newStatus, c.visitNotes, paymentAmount)
+                          }}
+                          disabled={isUpdating}
+                          className={`text-xs px-2 py-1 rounded border font-medium ${statusColors[currentStatus] || statusColors['NotVisited']} disabled:opacity-50`}
+                        >
+                          <option value="NotVisited">Not Visited</option>
+                          <option value="Visited">Visited</option>
+                          <option value="NotHome">Not Home</option>
+                          <option value="PaymentCollected">Payment Collected</option>
+                          <option value="Rescheduled">Rescheduled</option>
+                        </select>
+                        {isUpdating && <span className="ml-2 text-xs text-neutral-500">Updating...</span>}
+                      </td>
+                      <td className="py-2 px-2 print:py-1 print:px-1 text-center hidden print:table-cell">
+                        <div className={`w-6 h-6 border-2 rounded inline-block ${currentStatus === 'PaymentCollected' ? 'bg-emerald-200 border-emerald-400' : currentStatus === 'Visited' ? 'bg-blue-200 border-blue-400' : currentStatus === 'NotHome' ? 'bg-amber-200 border-amber-400' : 'border-neutral-400'}`} title={statusLabels[currentStatus] || currentStatus}></div>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-neutral-400 bg-neutral-100 print:bg-neutral-200 font-semibold">
+                  <td colSpan="5" className="py-2 px-2 print:py-1 print:px-1 text-right">Total Outstanding:</td>
+                  <td colSpan="2" className="py-2 px-2 print:py-1 print:px-1 text-right">{formatCurrency(collectionSheet.totalOutstanding)}</td>
+                </tr>
+                <tr className="border-t border-neutral-300 bg-neutral-50 print:bg-neutral-100">
+                  <td colSpan="7" className="py-2 px-2 print:py-1 print:px-1 text-xs text-neutral-600 print:text-xs">
+                    <div className="flex flex-wrap gap-4 print:gap-2">
+                      <span><span className="inline-block w-3 h-3 rounded-full bg-neutral-200 border border-neutral-400 mr-1"></span> Not Visited</span>
+                      <span><span className="inline-block w-3 h-3 rounded-full bg-blue-200 border border-blue-400 mr-1"></span> Visited</span>
+                      <span><span className="inline-block w-3 h-3 rounded-full bg-amber-200 border border-amber-400 mr-1"></span> Not Home</span>
+                      <span><span className="inline-block w-3 h-3 rounded-full bg-emerald-200 border border-emerald-400 mr-1"></span> Payment Collected</span>
+                      <span><span className="inline-block w-3 h-3 rounded-full bg-purple-200 border border-purple-400 mr-1"></span> Rescheduled</span>
+                    </div>
+                  </td>
+                </tr>
+              </tfoot>
             </table>
-            <p className="text-right font-semibold">Total Outstanding: {formatCurrency(collectionSheet.totalOutstanding)}</p>
             <div className="flex justify-between pt-4 print:hidden">
               <button type="button" onClick={closeCollectionSheet} className="px-4 py-2 border border-neutral-300 rounded-lg">
                 Close

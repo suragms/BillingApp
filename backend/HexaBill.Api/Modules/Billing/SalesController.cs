@@ -4,10 +4,13 @@ Author: AI Assistant
 Date: 2024
 */
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Modules.Billing;
 using HexaBill.Api.Models;
+using HexaBill.Api.Data;
 using HexaBill.Api.Shared.Extensions;
 using HexaBill.Api.Shared.Services;
 
@@ -20,11 +23,13 @@ namespace HexaBill.Api.Modules.Billing
     {
         private readonly ISaleService _saleService;
         private readonly IRouteScopeService _routeScopeService;
+        private readonly AppDbContext _context;
 
-        public SalesController(ISaleService saleService, IRouteScopeService routeScopeService)
+        public SalesController(ISaleService saleService, IRouteScopeService routeScopeService, AppDbContext context)
         {
             _saleService = saleService;
             _routeScopeService = routeScopeService;
+            _context = context;
         }
 
         [HttpGet]
@@ -135,11 +140,20 @@ namespace HexaBill.Api.Modules.Billing
                 var tenantId = CurrentTenantId; // CRITICAL: Get from JWT
                 var role = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
 
-                // RISK-4: Staff route validation — reject if Staff submits routeId they are not assigned to
-                if (tenantId > 0 && string.Equals(role, "Staff", StringComparison.OrdinalIgnoreCase) && request.RouteId.HasValue)
+                // RISK-4: Staff route validation — Staff must have at least one route; can only use assigned routes
+                if (tenantId > 0 && string.Equals(role, "Staff", StringComparison.OrdinalIgnoreCase))
                 {
                     var allowedRouteIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userId, tenantId, role);
-                    if (allowedRouteIds != null && (allowedRouteIds.Length == 0 || !allowedRouteIds.Contains(request.RouteId.Value)))
+                    if (allowedRouteIds == null || allowedRouteIds.Length == 0)
+                    {
+                        return StatusCode(403, new ApiResponse<SaleDto>
+                        {
+                            Success = false,
+                            Message = "You have no route assigned. Ask your admin to assign you to a route before creating invoices.",
+                            Errors = new List<string> { "NO_ROUTE_ASSIGNED" }
+                        });
+                    }
+                    if (request.RouteId.HasValue && !allowedRouteIds.Contains(request.RouteId.Value))
                     {
                         return StatusCode(403, new ApiResponse<SaleDto>
                         {
@@ -155,6 +169,15 @@ namespace HexaBill.Api.Modules.Billing
                     Success = true,
                     Message = "Sale created successfully",
                     Data = result
+                });
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return StatusCode(403, new ApiResponse<SaleDto>
+                {
+                    Success = false,
+                    Message = ex.Message,
+                    Errors = new List<string> { ex.Message }
                 });
             }
             catch (InvalidOperationException ex)
@@ -793,6 +816,206 @@ namespace HexaBill.Api.Modules.Billing
             {
                 Console.WriteLine($"\u274c ReconcilePaymentStatus Error: {ex.Message}");
                 return StatusCode(500, new ApiResponse<ReconciliationResult>
+                {
+                    Success = false,
+                    Message = $"An error occurred: {ex.Message}",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        // Held Invoice Endpoints
+        [HttpPost("held")]
+        public async Task<ActionResult<ApiResponse<HeldInvoiceDto>>> HoldInvoice([FromBody] HoldInvoiceRequest request)
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<HeldInvoiceDto>
+                    {
+                        Success = false,
+                        Message = "Invalid user"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var heldInvoice = new HeldInvoice
+                {
+                    TenantId = tenantId,
+                    UserId = userId,
+                    Name = request.Name ?? "Held Invoice",
+                    InvoiceData = JsonSerializer.Serialize(request.InvoiceData),
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _context.HeldInvoices.Add(heldInvoice);
+                await _context.SaveChangesAsync();
+
+                return Ok(new ApiResponse<HeldInvoiceDto>
+                {
+                    Success = true,
+                    Message = "Invoice held successfully",
+                    Data = new HeldInvoiceDto
+                    {
+                        Id = heldInvoice.Id,
+                        Name = heldInvoice.Name,
+                        InvoiceData = request.InvoiceData,
+                        CreatedAt = heldInvoice.CreatedAt
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<HeldInvoiceDto>
+                {
+                    Success = false,
+                    Message = $"An error occurred: {ex.Message}",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpGet("held")]
+        public async Task<ActionResult<ApiResponse<List<HeldInvoiceDto>>>> GetHeldInvoices()
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<List<HeldInvoiceDto>>
+                    {
+                        Success = false,
+                        Message = "Invalid user"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var heldInvoices = await _context.HeldInvoices
+                    .Where(h => h.TenantId == tenantId && h.UserId == userId)
+                    .OrderByDescending(h => h.CreatedAt)
+                    .ToListAsync();
+
+                var result = heldInvoices.Select(h => new HeldInvoiceDto
+                {
+                    Id = h.Id,
+                    Name = h.Name,
+                    InvoiceData = JsonSerializer.Deserialize<object>(h.InvoiceData) ?? new { },
+                    CreatedAt = h.CreatedAt
+                }).ToList();
+
+                return Ok(new ApiResponse<List<HeldInvoiceDto>>
+                {
+                    Success = true,
+                    Message = "Held invoices retrieved successfully",
+                    Data = result
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<List<HeldInvoiceDto>>
+                {
+                    Success = false,
+                    Message = $"An error occurred: {ex.Message}",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpDelete("held/{id}")]
+        public async Task<ActionResult<ApiResponse<object>>> DeleteHeldInvoice(int id)
+        {
+            try
+            {
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                {
+                    return Unauthorized(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Invalid user"
+                    });
+                }
+
+                var tenantId = CurrentTenantId;
+                var heldInvoice = await _context.HeldInvoices
+                    .FirstOrDefaultAsync(h => h.Id == id && h.TenantId == tenantId && h.UserId == userId);
+
+                if (heldInvoice == null)
+                {
+                    return NotFound(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Held invoice not found"
+                    });
+                }
+
+                _context.HeldInvoices.Remove(heldInvoice);
+                await _context.SaveChangesAsync();
+
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Message = "Held invoice deleted successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<object>
+                {
+                    Success = false,
+                    Message = $"An error occurred: {ex.Message}",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpGet("last")]
+        public async Task<ActionResult<ApiResponse<SaleDto>>> GetLastInvoice()
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+                var userId = userIdClaim != null && int.TryParse(userIdClaim.Value, out var uid) ? uid : (int?)null;
+                var role = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+
+                HashSet<int>? allowedRouteIds = null;
+                if (tenantId > 0 && userId.HasValue && string.Equals(role, "Staff", StringComparison.OrdinalIgnoreCase))
+                {
+                    var routeIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userId.Value, tenantId, role ?? "");
+                    if (routeIds != null)
+                        allowedRouteIds = new HashSet<int>(routeIds);
+                }
+
+                var lastSale = await _context.Sales
+                    .Where(s => s.TenantId == tenantId && !s.IsDeleted)
+                    .Where(s => allowedRouteIds == null || !s.RouteId.HasValue || allowedRouteIds.Contains(s.RouteId.Value))
+                    .OrderByDescending(s => s.CreatedAt)
+                    .FirstOrDefaultAsync();
+
+                if (lastSale == null)
+                {
+                    return NotFound(new ApiResponse<SaleDto>
+                    {
+                        Success = false,
+                        Message = "No previous invoice found"
+                    });
+                }
+
+                var result = await _saleService.GetSaleByIdAsync(lastSale.Id, tenantId, allowedRouteIds);
+                return Ok(new ApiResponse<SaleDto>
+                {
+                    Success = true,
+                    Message = "Last invoice retrieved successfully",
+                    Data = result!
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<SaleDto>
                 {
                     Success = false,
                     Message = $"An error occurred: {ex.Message}",

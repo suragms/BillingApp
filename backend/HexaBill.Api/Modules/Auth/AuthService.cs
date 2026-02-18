@@ -10,6 +10,7 @@ using System.Security.Claims;
 using System.Text;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
+using Microsoft.AspNetCore.Http;
 
 namespace HexaBill.Api.Modules.Auth
 {
@@ -20,6 +21,7 @@ namespace HexaBill.Api.Modules.Auth
         Task<bool> ValidateTokenAsync(string token);
         Task<User?> GetUserByIdAsync(int userId);
         Task<UserProfileDto?> UpdateProfileAsync(int userId, UpdateProfileRequest request);
+        Task<UserProfileDto?> SetProfilePhotoAsync(int userId, string profilePhotoUrl);
         Task<bool> ChangePasswordAsync(int userId, string currentPassword, string newPassword);
         Task<(List<int> BranchIds, List<int> RouteIds)> GetUserAssignmentsAsync(int userId);
     }
@@ -34,23 +36,28 @@ namespace HexaBill.Api.Modules.Auth
         public int tenantId { get; set; }
         public string? DashboardPermissions { get; set; }
         public DateTime CreatedAt { get; set; }
+        public string? ProfilePhotoUrl { get; set; }
+        public string? LanguagePreference { get; set; }
     }
 
     public class UpdateProfileRequest
     {
         public string Name { get; set; } = string.Empty;
         public string? Phone { get; set; }
+        public string? LanguagePreference { get; set; }
     }
 
     public class AuthService : IAuthService
     {
         private readonly AppDbContext _context;
         private readonly IConfiguration _configuration;
+        private readonly IHttpContextAccessor? _httpContextAccessor;
 
-        public AuthService(AppDbContext context, IConfiguration configuration)
+        public AuthService(AppDbContext context, IConfiguration configuration, IHttpContextAccessor? httpContextAccessor = null)
         {
             _context = context;
             _configuration = configuration;
+            _httpContextAccessor = httpContextAccessor;
         }
 
         public async Task<LoginResponse?> LoginAsync(LoginRequest request)
@@ -63,11 +70,11 @@ namespace HexaBill.Api.Modules.Auth
                 return null;
             }
 
-            // Use case-insensitive comparison with EF.Functions for better database performance
-            // For SQLite, we'll use Contains with case-insensitive collation or fallback to in-memory
-            var allUsers = await _context.Users.ToListAsync();
-            var user = allUsers.FirstOrDefault(u => 
-                (u.Email?.Trim().ToLowerInvariant() ?? string.Empty) == normalizedEmail);
+            // Single indexed query by email (no full table scan). Uses exact match so DB index is used.
+            // Emails are stored normalized (lowercase, trimmed) on register; existing users may need to use lowercase to login.
+            // Do not use AsNoTracking: we update LastLoginAt and TenantId and call SaveChangesAsync.
+            var user = await _context.Users
+                .FirstOrDefaultAsync(u => u.Email == normalizedEmail);
 
             if (user == null)
             {
@@ -102,7 +109,35 @@ namespace HexaBill.Api.Modules.Auth
                 return null;
             }
 
-            // Determine token expiry: 30 days if RememberMe, otherwise 8 hours
+            // Update last login timestamp
+            user.LastLoginAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            // Record session for "who is logged in" / session list
+            try
+            {
+                var tenantId = user.TenantId ?? 0;
+                string? userAgent = null;
+                string? ipAddress = null;
+                if (_httpContextAccessor?.HttpContext != null)
+                {
+                    userAgent = _httpContextAccessor.HttpContext.Request.Headers["User-Agent"].FirstOrDefault();
+                    ipAddress = _httpContextAccessor.HttpContext.Connection.RemoteIpAddress?.ToString();
+                }
+                _context.UserSessions.Add(new UserSession
+                {
+                    UserId = user.Id,
+                    TenantId = tenantId,
+                    LoginAt = DateTime.UtcNow,
+                    UserAgent = userAgent != null && userAgent.Length > 500 ? userAgent.Substring(0, 500) : userAgent,
+                    IpAddress = ipAddress != null && ipAddress.Length > 45 ? ipAddress.Substring(0, 45) : ipAddress
+                });
+                await _context.SaveChangesAsync();
+            }
+            catch { /* session recording is optional */ }
+
+            // Determine token expiry: 30 days if RememberMe, otherwise 8 hours.
+            // Mitigation: long-lived tokens are still invalidated when an admin uses Force Logout — SessionVersion is checked on every JWT request (SecurityConfiguration OnTokenValidated); mismatch returns 401. See docs (e.g. PRODUCTION_DEPLOYMENT_VERCEL_RENDER.md) and PRODUCTION_MASTER_TODO #36.
             var expiryHours = request.RememberMe ? 24 * 30 : 8;
             var token = GenerateJwtToken(user, expiryHours);
             var companyName = await GetCompanyNameAsync();
@@ -143,10 +178,10 @@ namespace HexaBill.Api.Modules.Auth
                 throw new InvalidOperationException("Email is required");
             }
 
-            // Check if email already exists
-            var allUsers = await _context.Users.ToListAsync();
-            var existingUser = allUsers.FirstOrDefault(u => 
-                (u.Email?.Trim().ToLowerInvariant() ?? string.Empty) == normalizedEmail);
+            // Check if email already exists (single indexed query, no full table scan; exact match for index use)
+            var existingUser = await _context.Users
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Email == normalizedEmail);
 
             if (existingUser != null)
             {
@@ -256,6 +291,12 @@ namespace HexaBill.Api.Modules.Auth
             {
                 user.Phone = request.Phone.Trim();
             }
+            if (request.LanguagePreference != null)
+            {
+                user.LanguagePreference = request.LanguagePreference.Trim();
+                if (string.IsNullOrEmpty(user.LanguagePreference))
+                    user.LanguagePreference = null;
+            }
 
             await _context.SaveChangesAsync();
 
@@ -267,7 +308,29 @@ namespace HexaBill.Api.Modules.Auth
                 Phone = user.Phone,
                 Role = user.Role.ToString(),
                 tenantId = user.TenantId ?? 0,
-                CreatedAt = user.CreatedAt
+                CreatedAt = user.CreatedAt,
+                ProfilePhotoUrl = user.ProfilePhotoUrl,
+                LanguagePreference = user.LanguagePreference
+            };
+        }
+
+        public async Task<UserProfileDto?> SetProfilePhotoAsync(int userId, string profilePhotoUrl)
+        {
+            var user = await _context.Users.FindAsync(userId);
+            if (user == null) return null;
+            user.ProfilePhotoUrl = profilePhotoUrl;
+            await _context.SaveChangesAsync();
+            return new UserProfileDto
+            {
+                Id = user.Id,
+                Name = user.Name,
+                Email = user.Email,
+                Phone = user.Phone,
+                Role = user.Role.ToString(),
+                tenantId = user.TenantId ?? 0,
+                CreatedAt = user.CreatedAt,
+                ProfilePhotoUrl = user.ProfilePhotoUrl,
+                LanguagePreference = user.LanguagePreference
             };
         }
 

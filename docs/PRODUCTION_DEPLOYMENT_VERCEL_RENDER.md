@@ -142,6 +142,10 @@ VITE_API_BASE_URL=https://hexabill-api.onrender.com/api
 - [ ] Custom domain on Vercel uses HTTPS (Vercel default).
 - [ ] Backend uses `ASPNETCORE_ENVIRONMENT=Production` (HTTPS redirect and stricter settings).
 
+### Remember Me and force logout
+
+Login supports **Remember Me**, which issues a JWT valid for **30 days** (otherwise 8 hours). Long-lived tokens are still **revoked as soon as the user makes any API request** after an admin triggers **Force Logout**: the backend checks `SessionVersion` on every JWT request; if it no longer matches the user’s current value (e.g. after force logout), the request returns **401** and the frontend should redirect to login. So “Remember Me” does not prevent force logout from taking effect on the next request.
+
 ---
 
 ## 7. Troubleshooting

@@ -79,7 +79,7 @@ const AlertNotifications = () => {
         setUnreadCount(response.data || 0)
       }
     } catch (error) {
-      console.error('Failed to fetch unread count:', error)
+      if (!error?.isConnectionBlocked) console.error('Failed to fetch unread count:', error)
     }
   }
 
@@ -92,7 +92,7 @@ const AlertNotifications = () => {
         setAlerts(response.data || [])
       }
     } catch (error) {
-      console.error('Failed to fetch alerts:', error)
+      if (!error?.isConnectionBlocked) console.error('Failed to fetch alerts:', error)
       if (!error?._handledByInterceptor) toast.error('Failed to load notifications')
     } finally {
       setLoading(false)

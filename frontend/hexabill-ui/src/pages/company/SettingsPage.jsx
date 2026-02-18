@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import {
@@ -25,7 +25,8 @@ import { LoadingButton } from '../../components/Loading'
 import Modal from '../../components/Modal'
 import { LoadingCard } from '../../components/Loading'
 import { TabNavigation } from '../../components/ui'
-import { adminAPI } from '../../services'
+import { adminAPI, settingsAPI } from '../../services'
+import { getApiBaseUrlNoSuffix } from '../../services/apiConfig'
 import toast from 'react-hot-toast'
 import { isAdminOrOwner } from '../../utils/roles'  // CRITICAL: Multi-tenant role checking
 import { useBranding } from '../../contexts/TenantBrandingContext'
@@ -48,6 +49,7 @@ const SettingsPage = () => {
   const [clearDataCheckbox, setClearDataCheckbox] = useState(false)
   const [loadingClearData, setLoadingClearData] = useState(false)
   const [uploadingLogo, setUploadingLogo] = useState(false)
+  const [showTemplatePreview, setShowTemplatePreview] = useState(false)
   const [settings, setSettings] = useState({
     companyNameEn: 'HexaBill',
     companyNameAr: 'هيكسابيل',
@@ -63,7 +65,8 @@ const SettingsPage = () => {
     cloudBackupClientId: '',
     cloudBackupClientSecret: '',
     cloudBackupRefreshToken: '',
-    cloudBackupFolderId: ''
+    cloudBackupFolderId: '',
+    lowStockGlobalThreshold: '' // #55: optional global fallback when product ReorderLevel is 0
   })
 
   const [dangerModal, setDangerModal] = useState({
@@ -79,10 +82,13 @@ const SettingsPage = () => {
     handleSubmit,
     watch,
     setValue,
-    formState: { errors }
+    formState: { errors, isDirty }
   } = useForm({
     defaultValues: settings
   })
+
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  const [initialSettings, setInitialSettings] = useState(null)
 
   const currencyOptions = [
     { value: 'AED', label: 'AED - UAE Dirham' },
@@ -94,6 +100,30 @@ const SettingsPage = () => {
   useEffect(() => {
     if (location.state?.tab === 'backup') setActiveTab('backup')
   }, [location.state?.tab])
+
+  // Track unsaved changes
+  useEffect(() => {
+    const subscription = watch((value, { name, type }) => {
+      if (type === 'change' && initialSettings) {
+        const hasChanges = JSON.stringify(value) !== JSON.stringify(initialSettings)
+        setHasUnsavedChanges(hasChanges)
+      }
+    })
+    return () => subscription.unsubscribe()
+  }, [watch, initialSettings])
+
+  // Warn before leaving with unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault()
+        e.returnValue = 'You have unsaved changes. Are you sure you want to leave?'
+        return e.returnValue
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [hasUnsavedChanges])
 
   useEffect(() => {
     fetchSettings()
@@ -290,13 +320,16 @@ const SettingsPage = () => {
           cloudBackupClientId: response.data.CLOUD_BACKUP_CLIENT_ID || response.data.cloudBackupClientId || '',
           cloudBackupClientSecret: response.data.CLOUD_BACKUP_CLIENT_SECRET || response.data.cloudBackupClientSecret || '',
           cloudBackupRefreshToken: response.data.CLOUD_BACKUP_REFRESH_TOKEN || response.data.cloudBackupRefreshToken || '',
-          cloudBackupFolderId: response.data.CLOUD_BACKUP_FOLDER_ID || response.data.cloudBackupFolderId || ''
+          cloudBackupFolderId: response.data.CLOUD_BACKUP_FOLDER_ID || response.data.cloudBackupFolderId || '',
+          lowStockGlobalThreshold: response.data.LOW_STOCK_GLOBAL_THRESHOLD ?? response.data.lowStockGlobalThreshold ?? ''
         }
         setSettings(mappedSettings)
+        setInitialSettings(JSON.parse(JSON.stringify(mappedSettings))) // Deep copy for comparison
         // Set form values
         Object.keys(mappedSettings).forEach(key => {
-          setValue(key, mappedSettings[key])
+          setValue(key, mappedSettings[key], { shouldDirty: false })
         })
+        setHasUnsavedChanges(false)
       }
     } catch (error) {
       console.error('Failed to load settings:', error)
@@ -324,7 +357,8 @@ const SettingsPage = () => {
         CLOUD_BACKUP_CLIENT_ID: data.cloudBackupClientId || '',
         CLOUD_BACKUP_CLIENT_SECRET: data.cloudBackupClientSecret || '',
         CLOUD_BACKUP_REFRESH_TOKEN: data.cloudBackupRefreshToken || '',
-        CLOUD_BACKUP_FOLDER_ID: data.cloudBackupFolderId || ''
+        CLOUD_BACKUP_FOLDER_ID: data.cloudBackupFolderId || '',
+        LOW_STOCK_GLOBAL_THRESHOLD: (data.lowStockGlobalThreshold !== undefined && data.lowStockGlobalThreshold !== null && String(data.lowStockGlobalThreshold).trim() !== '') ? String(data.lowStockGlobalThreshold).trim() : ''
       }
 
       // Only include logoUrl if it's set
@@ -335,8 +369,19 @@ const SettingsPage = () => {
       const response = await adminAPI.updateSettings(backendSettings)
       if (response.success) {
         setSettings(data)
+        setInitialSettings(JSON.parse(JSON.stringify(data))) // Update initial state
+        setHasUnsavedChanges(false)
+        // Reset form dirty state
+        Object.keys(data).forEach(key => {
+          setValue(key, data[key], { shouldDirty: false })
+        })
+        // Refresh branding with delay to ensure server has processed
         await refreshBranding()
-        toast.success('Settings saved successfully!')
+        setTimeout(async () => {
+          await refreshBranding()
+          window.dispatchEvent(new Event('logo-updated'))
+        }, 500)
+        toast.success('Settings saved successfully!', { id: 'settings-save' })
       } else {
         toast.error(response.message || 'Failed to save settings')
       }
@@ -381,10 +426,34 @@ const SettingsPage = () => {
         setSettings(prev => ({ ...prev, logoUrl }))
         setValue('logoUrl', logoUrl)
         await updateAppIcon(logoUrl)
+        // Update settings immediately
+        setSettings(prev => ({ ...prev, logoUrl }))
+        setValue('logoUrl', logoUrl, { shouldDirty: true })
+        setHasUnsavedChanges(true)
+        
+        // Refresh branding with multiple attempts to ensure cache is cleared
         await refreshBranding()
-        toast.success('Logo uploaded. App name and logo updated.')
+        setTimeout(async () => {
+          await refreshBranding()
+          window.dispatchEvent(new Event('logo-updated'))
+        }, 500)
+        setTimeout(async () => {
+          await refreshBranding()
+        }, 1500)
+        
+        toast.success('Logo uploaded successfully. Saving settings...', { id: 'logo-upload' })
         setShowLogoModal(false)
-        await fetchSettings()
+        
+        // Auto-save logo URL to settings
+        try {
+          const saveResponse = await adminAPI.updateSettings({ COMPANY_LOGO: logoUrl })
+          if (saveResponse.success) {
+            await fetchSettings() // Reload to get fresh data
+            toast.success('Logo saved and updated in header.', { id: 'logo-save' })
+          }
+        } catch (err) {
+          console.error('Failed to save logo URL:', err)
+        }
       } else {
         toast.error(response?.message || 'Failed to upload logo')
       }
@@ -424,7 +493,7 @@ const SettingsPage = () => {
   const updateAppIcon = async (logoUrl) => {
     try {
       // Get full URL for logo
-      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace('/api', '') || 'http://localhost:5000'
+      const apiBaseUrl = getApiBaseUrlNoSuffix()
       const fullLogoUrl = logoUrl.startsWith('http') ? logoUrl : `${apiBaseUrl}${logoUrl.startsWith('/') ? '' : '/'}${logoUrl}`
 
       // Update favicon in document
@@ -495,8 +564,71 @@ const SettingsPage = () => {
   const tabs = [
     { id: 'company', label: 'Company', icon: Building2 },
     { id: 'billing', label: 'Billing', icon: DollarSign },
+    { id: 'email', label: 'Email', icon: Globe },
+    { id: 'notifications', label: 'Notifications', icon: Shield },
     ...(isAdminOrOwner(user) ? [{ id: 'backup', label: 'Backup', icon: Database }] : [])
   ]
+
+  const renderTemplatePreview = (templateHtml) => {
+    if (!templateHtml) return '<p class="text-neutral-500">No template defined</p>'
+    
+    // Sample data for preview
+    const sampleData = {
+      company_name_en: settings.companyNameEn || 'HexaBill',
+      company_name_ar: settings.companyNameAr || 'هيكسابيل',
+      company_address: settings.companyAddress || 'Abu Dhabi, UAE',
+      company_phone: settings.companyPhone || '+971 56 955 22 52',
+      company_trn: settings.companyTrn || '105274438800003',
+      currency: settings.defaultCurrency || 'AED',
+      invoice_no: 'INV-2026-001',
+      invoiceNo: 'INV-2026-001',
+      INVOICE_NO: 'INV-2026-001',
+      date: new Date().toLocaleDateString('en-GB'),
+      DATE: new Date().toLocaleDateString('en-GB'),
+      customer_name: 'Sample Customer',
+      CUSTOMER_NAME: 'Sample Customer',
+      customer_trn: '123456789012345',
+      CUSTOMER_TRN: '123456789012345',
+      subtotal: '1,000.00',
+      SUBTOTAL: '1,000.00',
+      vat_amount: '50.00',
+      VAT_AMOUNT: '50.00',
+      vat_total: '50.00',
+      VAT_TOTAL: '50.00',
+      grand_total: '1,050.00',
+      GRAND_TOTAL: '1,050.00',
+      amount_in_words: 'One Thousand and Fifty Dirhams Only',
+      items: `
+        <tr>
+          <td class="center">1</td>
+          <td>Sample Product 1</td>
+          <td class="center">10</td>
+          <td class="center">PCS</td>
+          <td class="right">50.00</td>
+          <td class="right">500.00</td>
+          <td class="right"><strong>525.00</strong><br/><span style="font-size:7pt;color:#666;">(+25.00 VAT)</span></td>
+        </tr>
+        <tr>
+          <td class="center">2</td>
+          <td>Sample Product 2</td>
+          <td class="center">5</td>
+          <td class="center">BOX</td>
+          <td class="right">100.00</td>
+          <td class="right">500.00</td>
+          <td class="right"><strong>525.00</strong><br/><span style="font-size:7pt;color:#666;">(+25.00 VAT)</span></td>
+        </tr>
+      `
+    }
+
+    // Replace all placeholders
+    let preview = templateHtml
+    Object.keys(sampleData).forEach(key => {
+      const regex = new RegExp(`{{${key}}}`, 'gi')
+      preview = preview.replace(regex, sampleData[key])
+    })
+
+    return preview
+  }
 
   return (
     <div className="space-y-6">
@@ -507,7 +639,23 @@ const SettingsPage = () => {
           <p className="text-gray-600">Manage your company settings and preferences</p>
         </div>
         <div className="mt-4 sm:mt-0 flex space-x-3">
-          <button className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50">
+          {hasUnsavedChanges && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-amber-600 font-medium">● Unsaved changes</span>
+              <button
+                type="submit"
+                disabled={saving}
+                className="inline-flex items-center px-4 py-2 bg-primary-600 text-white rounded-md shadow-sm text-sm font-medium hover:bg-primary-700 disabled:opacity-50"
+              >
+                <Save className="h-4 w-4 mr-2" />
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          )}
+          <button 
+            type="button"
+            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+          >
             <Download className="h-4 w-4 mr-2" />
             Export Settings
           </button>
@@ -593,7 +741,7 @@ const SettingsPage = () => {
                   {logoPreview || settings.logoUrl ? (
                     <div className="relative">
                       <img
-                        src={logoPreview || (settings.logoUrl?.startsWith('http') ? settings.logoUrl : `${import.meta.env.VITE_API_BASE_URL?.replace('/api', '') || 'http://localhost:5000'}${settings.logoUrl?.startsWith('/') ? '' : '/'}${settings.logoUrl}`)}
+                        src={logoPreview || (settings.logoUrl?.startsWith('http') ? settings.logoUrl : `${getApiBaseUrlNoSuffix()}${settings.logoUrl?.startsWith('/') ? '' : '/'}${settings.logoUrl}`)}
                         alt="Company Logo"
                         className="h-24 w-24 object-contain border border-gray-200 rounded-lg"
                         onError={(e) => {
@@ -649,12 +797,17 @@ const SettingsPage = () => {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <Select
-                  label="Default Currency"
-                  options={currencyOptions}
-                  error={errors.defaultCurrency?.message}
-                  {...register('defaultCurrency', { required: 'Default currency is required' })}
-                />
+                <div>
+                  <Select
+                    label="Default Currency"
+                    options={currencyOptions}
+                    error={errors.defaultCurrency?.message}
+                    {...register('defaultCurrency', { required: 'Default currency is required' })}
+                  />
+                  <p className="text-xs text-amber-600 mt-1">
+                    ⚠️ Changing currency only updates the label. Historical invoices will still show original amounts. Currency conversion is not supported.
+                  </p>
+                </div>
 
                 <Input
                   label="VAT Percentage"
@@ -670,6 +823,19 @@ const SettingsPage = () => {
                     max: { value: 100, message: 'VAT must be 100 or less' }
                   })}
                 />
+                <Input
+                  label="Low stock global threshold (optional)"
+                  type="number"
+                  min={0}
+                  placeholder="e.g. 10"
+                  error={errors.lowStockGlobalThreshold?.message}
+                  {...register('lowStockGlobalThreshold', {
+                    min: { value: 0, message: 'Must be 0 or greater' }
+                  })}
+                />
+                <p className="text-xs text-neutral-500">
+                  When set, products with reorder level 0 are treated as low stock when quantity is at or below this value. Leave empty to use only each product&apos;s reorder level.
+                </p>
               </div>
             </div>
 
@@ -692,21 +858,172 @@ const SettingsPage = () => {
                 <div className="flex space-x-3">
                   <button
                     type="button"
+                    onClick={() => setShowTemplatePreview(!showTemplatePreview)}
                     className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
                   >
                     <Eye className="h-4 w-4 mr-2" />
-                    Preview Template
+                    {showTemplatePreview ? 'Hide Preview' : 'Preview Template'}
                   </button>
                   <button
                     type="button"
+                    onClick={() => {
+                      setValue('invoiceTemplate', '')
+                      toast.info('Template reset to default')
+                    }}
                     className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
                   >
                     Reset to Default
                   </button>
                 </div>
+
+                {showTemplatePreview && (
+                  <div className="mt-4 border border-neutral-200 rounded-lg p-4 bg-neutral-50">
+                    <h3 className="text-sm font-semibold text-neutral-700 mb-2">Template Preview (with sample data)</h3>
+                    <div 
+                      className="bg-white border border-neutral-300 rounded p-4 max-h-96 overflow-auto"
+                      dangerouslySetInnerHTML={{ __html: renderTemplatePreview(watch('invoiceTemplate')) }}
+                    />
+                    <p className="text-xs text-neutral-500 mt-2">
+                      This preview shows how your template will look with sample invoice data. Actual invoices will use real customer and product data.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </>
+        )}
+
+        {/* Email Settings Tab */}
+        {activeTab === 'email' && (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center mb-6">
+              <Globe className="h-6 w-6 text-primary-600 mr-3" />
+              <h2 className="text-lg font-semibold text-neutral-900">Email Settings</h2>
+            </div>
+            <div className="space-y-4">
+              <p className="text-sm text-neutral-600 mb-4">
+                Configure SMTP settings to enable email notifications and invoice delivery.
+              </p>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <p className="text-sm text-amber-800">
+                  <strong>Note:</strong> Email functionality is not yet implemented. This feature will allow you to:
+                </p>
+                <ul className="list-disc list-inside text-sm text-amber-700 mt-2 space-y-1">
+                  <li>Send invoices to customers via email</li>
+                  <li>Receive payment reminders and notifications</li>
+                  <li>Configure SMTP server settings (Gmail, Outlook, custom SMTP)</li>
+                  <li>Set up email templates for automated communications</li>
+                </ul>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Input
+                  label="SMTP Server"
+                  placeholder="smtp.gmail.com"
+                  disabled
+                  className="opacity-60"
+                />
+                <Input
+                  label="SMTP Port"
+                  type="number"
+                  placeholder="587"
+                  disabled
+                  className="opacity-60"
+                />
+                <Input
+                  label="Email Address"
+                  type="email"
+                  placeholder="your-email@example.com"
+                  disabled
+                  className="opacity-60"
+                />
+                <Input
+                  label="Password/App Password"
+                  type="password"
+                  placeholder="••••••••"
+                  disabled
+                  className="opacity-60"
+                />
+              </div>
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  id="enableEmail"
+                  disabled
+                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded opacity-60"
+                />
+                <label htmlFor="enableEmail" className="ml-2 block text-sm text-gray-500">
+                  Enable email notifications (Coming soon)
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Notification Settings Tab */}
+        {activeTab === 'notifications' && (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center mb-6">
+              <Shield className="h-6 w-6 text-primary-600 mr-3" />
+              <h2 className="text-lg font-semibold text-neutral-900">Notification Settings</h2>
+            </div>
+            <div className="space-y-4">
+              <p className="text-sm text-neutral-600 mb-4">
+                Configure how and when you receive notifications for important events.
+              </p>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <p className="text-sm text-amber-800">
+                  <strong>Note:</strong> Notification settings are not yet implemented. This feature will allow you to:
+                </p>
+                <ul className="list-disc list-inside text-sm text-amber-700 mt-2 space-y-1">
+                  <li>Configure notification channels (Email, SMS, WhatsApp, In-App)</li>
+                  <li>Set up alerts for low stock, overdue payments, new orders</li>
+                  <li>Customize notification preferences per event type</li>
+                  <li>Schedule daily/weekly summary reports</li>
+                </ul>
+              </div>
+              <div className="space-y-4">
+                <div className="border border-neutral-200 rounded-lg p-4">
+                  <h3 className="text-md font-medium text-neutral-800 mb-3">Payment Reminders</h3>
+                  <div className="space-y-2">
+                    <label className="flex items-center">
+                      <input type="checkbox" disabled className="h-4 w-4 text-indigo-600 opacity-60" />
+                      <span className="ml-2 text-sm text-gray-500">Email notification for overdue payments</span>
+                    </label>
+                    <label className="flex items-center">
+                      <input type="checkbox" disabled className="h-4 w-4 text-indigo-600 opacity-60" />
+                      <span className="ml-2 text-sm text-gray-500">SMS notification for overdue payments</span>
+                    </label>
+                  </div>
+                </div>
+                <div className="border border-neutral-200 rounded-lg p-4">
+                  <h3 className="text-md font-medium text-neutral-800 mb-3">Inventory Alerts</h3>
+                  <div className="space-y-2">
+                    <label className="flex items-center">
+                      <input type="checkbox" disabled className="h-4 w-4 text-indigo-600 opacity-60" />
+                      <span className="ml-2 text-sm text-gray-500">Alert when product stock is low</span>
+                    </label>
+                    <label className="flex items-center">
+                      <input type="checkbox" disabled className="h-4 w-4 text-indigo-600 opacity-60" />
+                      <span className="ml-2 text-sm text-gray-500">Daily inventory summary</span>
+                    </label>
+                  </div>
+                </div>
+                <div className="border border-neutral-200 rounded-lg p-4">
+                  <h3 className="text-md font-medium text-neutral-800 mb-3">Sales & Orders</h3>
+                  <div className="space-y-2">
+                    <label className="flex items-center">
+                      <input type="checkbox" disabled className="h-4 w-4 text-indigo-600 opacity-60" />
+                      <span className="ml-2 text-sm text-gray-500">Notify on new orders</span>
+                    </label>
+                    <label className="flex items-center">
+                      <input type="checkbox" disabled className="h-4 w-4 text-indigo-600 opacity-60" />
+                      <span className="ml-2 text-sm text-gray-500">Weekly sales report</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Backup Tab */}

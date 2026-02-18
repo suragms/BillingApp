@@ -35,7 +35,9 @@ import {
   Lock,
   Sliders,
   User as UserIcon,
-  Copy
+  Copy,
+  Info,
+  Download
 } from 'lucide-react'
 import { superAdminAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
@@ -70,6 +72,8 @@ const SuperAdminTenantDetailPage = () => {
   const [tenantsList, setTenantsList] = useState([])
   const [duplicateSourceTenantId, setDuplicateSourceTenantId] = useState('')
   const [duplicateDataTypes, setDuplicateDataTypes] = useState({ Products: true, Settings: true })
+  const [duplicatePreview, setDuplicatePreview] = useState(null)
+  const [duplicatePreviewLoading, setDuplicatePreviewLoading] = useState(false)
   const [suspendReason, setSuspendReason] = useState('')
   const [subscriptionFormData, setSubscriptionFormData] = useState({
     planId: '',
@@ -83,6 +87,12 @@ const SuperAdminTenantDetailPage = () => {
   const [limitsData, setLimitsData] = useState({ maxRequestsPerMinute: 200, maxConcurrentUsers: 50, maxStorageMb: 1024, maxInvoicesPerMonth: 1000 })
   const [limitsLoading, setLimitsLoading] = useState(false)
   const [limitsSaving, setLimitsSaving] = useState(false)
+  const [invoicesData, setInvoicesData] = useState(null)
+  const [invoicesPage, setInvoicesPage] = useState(1)
+  const [invoicesLoading, setInvoicesLoading] = useState(false)
+  const [paymentHistory, setPaymentHistory] = useState(null)
+  const [paymentHistoryLoading, setPaymentHistoryLoading] = useState(false)
+  const [exportLoading, setExportLoading] = useState(false)
   const [dangerModal, setDangerModal] = useState({
     isOpen: false,
     title: '',
@@ -111,6 +121,32 @@ const SuperAdminTenantDetailPage = () => {
       superAdminAPI.getTenantHealth(parseInt(id))
         .then((res) => res?.success && res?.data && setTenantHealth(res.data))
         .catch(() => setTenantHealth(null))
+    }
+  }, [id, activeTab])
+
+  useEffect(() => {
+    if (id && activeTab === 'invoices') {
+      setInvoicesLoading(true)
+      superAdminAPI.getTenantInvoices(parseInt(id), invoicesPage, 20)
+        .then((res) => {
+          if (res?.success && res?.data) setInvoicesData(res.data)
+          else setInvoicesData(null)
+        })
+        .catch(() => setInvoicesData(null))
+        .finally(() => setInvoicesLoading(false))
+    }
+  }, [id, activeTab, invoicesPage])
+
+  useEffect(() => {
+    if (id && activeTab === 'payments') {
+      setPaymentHistoryLoading(true)
+      superAdminAPI.getTenantPaymentHistory(parseInt(id))
+        .then((res) => {
+          if (res?.success && Array.isArray(res?.data)) setPaymentHistory(res.data)
+          else setPaymentHistory([])
+        })
+        .catch(() => setPaymentHistory([]))
+        .finally(() => setPaymentHistoryLoading(false))
     }
   }, [id, activeTab])
 
@@ -231,6 +267,29 @@ const SuperAdminTenantDetailPage = () => {
     window.location.href = '/dashboard'
   }
 
+  const handleExportData = async () => {
+    if (!id) return
+    setExportLoading(true)
+    try {
+      const res = await superAdminAPI.getTenantExport(parseInt(id))
+      const blob = res.data
+      const disp = res.headers?.['content-disposition']
+      const match = disp && /filename[*]?=(?:UTF-8'')?"?([^";\n]+)"?/i.exec(disp)
+      const filename = match ? decodeURIComponent(match[1].trim()) : `export_tenant_${id}_${new Date().toISOString().slice(0, 10)}.zip`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success('Export downloaded')
+    } catch (e) {
+      toast.error(e?.response?.data?.message || e?.message || 'Export failed')
+    } finally {
+      setExportLoading(false)
+    }
+  }
+
   const handleClearData = async () => {
     if (!clearDataCheckbox || clearDataConfirmation.trim().toUpperCase() !== 'CLEAR') {
       toast.error("Check the box and type CLEAR to confirm")
@@ -271,6 +330,34 @@ const SuperAdminTenantDetailPage = () => {
     setDuplicateDataTypes({ Products: true, Settings: true })
     setShowDuplicateDataModal(true)
   }
+
+  // Fetch duplicate-data preview when source or data types change
+  useEffect(() => {
+    if (!showDuplicateDataModal || !tenant?.id || !duplicateSourceTenantId) {
+      setDuplicatePreview(null)
+      return
+    }
+    const sourceId = parseInt(duplicateSourceTenantId, 10)
+    if (!sourceId || sourceId === tenant.id) {
+      setDuplicatePreview(null)
+      return
+    }
+    const types = Object.entries(duplicateDataTypes).filter(([, v]) => v).map(([k]) => k)
+    if (types.length === 0) {
+      setDuplicatePreview(null)
+      return
+    }
+    let cancelled = false
+    setDuplicatePreviewLoading(true)
+    superAdminAPI.getDuplicateDataPreview(tenant.id, sourceId, types)
+      .then((res) => {
+        if (!cancelled && res?.success && res?.data) setDuplicatePreview(res.data)
+        else if (!cancelled) setDuplicatePreview(null)
+      })
+      .catch(() => { if (!cancelled) setDuplicatePreview(null) })
+      .finally(() => { if (!cancelled) setDuplicatePreviewLoading(false) })
+    return () => { cancelled = true }
+  }, [showDuplicateDataModal, tenant?.id, duplicateSourceTenantId, duplicateDataTypes])
 
   const handleDuplicateData = async () => {
     const sourceId = parseInt(duplicateSourceTenantId, 10)
@@ -543,7 +630,7 @@ const SuperAdminTenantDetailPage = () => {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 font-bold">
         <nav className="-mb-px flex space-x-8">
-          {['overview', 'users', 'subscription', 'usage', 'limits', 'reports'].map((tab) => (
+          {['overview', 'users', 'invoices', 'payments', 'subscription', 'usage', 'limits', 'reports'].map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -571,7 +658,17 @@ const SuperAdminTenantDetailPage = () => {
               <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
                 <Shield className="h-5 w-5" />
                 Tenant Health Score
+                <span
+                  className="inline-flex text-gray-500 hover:text-gray-700 cursor-help"
+                  title={tenantHealth.scoreDescription || 'Starts at 100. Deductions: trial expiring soon (−15 to −30), high outstanding vs revenue (−10 to −25), high storage (−20), no activity 30+ days (−10). Green ≥70, Yellow ≥40, Red <40.'}
+                  aria-label="How health score is calculated"
+                >
+                  <Info className="h-5 w-5" />
+                </span>
               </h2>
+              {tenantHealth.scoreDescription && (
+                <p className="text-sm text-gray-600 mb-4 max-w-2xl">{tenantHealth.scoreDescription}</p>
+              )}
               <div className="flex flex-wrap items-center gap-6">
                 <div className={`text-4xl font-bold ${
                   tenantHealth.level === 'Green' ? 'text-green-700' :
@@ -644,6 +741,25 @@ const SuperAdminTenantDetailPage = () => {
             </div>
           </div>
 
+          {/* Data export (offboarding/compliance) #52 */}
+          <div className="bg-neutral-50 rounded-lg border border-neutral-200 shadow-sm p-6 mt-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <Download className="h-5 w-5" />
+              Export data
+            </h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Download key data (invoices, customers, products) as a ZIP of CSV files for offboarding or compliance.
+            </p>
+            <button
+              onClick={handleExportData}
+              disabled={exportLoading}
+              className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+            >
+              {exportLoading ? <RefreshCw className="h-5 w-5 animate-spin" /> : <Download className="h-5 w-5" />}
+              {exportLoading ? 'Preparing…' : 'Download ZIP (CSV)'}
+            </button>
+          </div>
+
           {/* Danger Zone */}
           <div className="bg-red-50 rounded-lg border border-red-100 shadow-sm p-6 mt-6">
             <h2 className="text-xl font-bold text-red-800 mb-4">Danger Zone</h2>
@@ -651,7 +767,7 @@ const SuperAdminTenantDetailPage = () => {
               <div>
                 <h3 className="text-sm font-bold text-red-900 uppercase tracking-wider">Reset Database</h3>
                 <p className="text-sm text-red-700 mt-1">
-                  Wipe all transactions, sales, and expenses. This keeps products and customers but resets their stock/balances.
+                  Wipe all transactions, sales, and expenses. Subscription and company settings are kept. Products and customers remain; stock and balances reset to 0. Create a backup first if needed.
                 </p>
               </div>
               <button
@@ -670,6 +786,126 @@ const SuperAdminTenantDetailPage = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'invoices' && (
+        <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
+          <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <Receipt className="h-5 w-5" />
+            Invoices (read-only)
+          </h2>
+          <p className="text-sm text-gray-500 mb-4">View-only list. No edit or impersonation. Use &quot;Enter Workspace&quot; to manage invoices.</p>
+          {invoicesLoading ? (
+            <LoadingCard />
+          ) : invoicesData ? (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-neutral-200">
+                      <th className="text-left py-2 font-medium text-neutral-600">Invoice #</th>
+                      <th className="text-left py-2 font-medium text-neutral-600">Date</th>
+                      <th className="text-left py-2 font-medium text-neutral-600">Customer</th>
+                      <th className="text-right py-2 font-medium text-neutral-600">Total</th>
+                      <th className="text-right py-2 font-medium text-neutral-600">Paid</th>
+                      <th className="text-left py-2 font-medium text-neutral-600">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(invoicesData.items || []).map((inv) => (
+                      <tr key={inv.id} className="border-b border-neutral-100">
+                        <td className="py-2 font-mono">{inv.invoiceNo || inv.id}</td>
+                        <td className="py-2 text-neutral-700">{inv.invoiceDate ? new Date(inv.invoiceDate).toLocaleDateString() : '—'}</td>
+                        <td className="py-2">{inv.customerName || '—'}</td>
+                        <td className="py-2 text-right font-medium">{formatCurrency(Number(inv.grandTotal) || 0)}</td>
+                        <td className="py-2 text-right">{formatCurrency(Number(inv.paidAmount) || 0)}</td>
+                        <td className="py-2">{inv.paymentStatus || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {((invoicesData.items || []).length === 0) && (
+                <p className="py-6 text-center text-neutral-500">No invoices for this company.</p>
+              )}
+              {invoicesData.totalPages > 1 && (
+                <div className="flex items-center justify-between mt-4 pt-4 border-t border-neutral-200">
+                  <span className="text-sm text-neutral-600">
+                    Page {invoicesData.page} of {invoicesData.totalPages} · {invoicesData.totalCount} total
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={invoicesData.page <= 1}
+                      onClick={() => setInvoicesPage((p) => Math.max(1, p - 1))}
+                      className="px-3 py-1.5 border border-neutral-300 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-neutral-50"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      disabled={invoicesData.page >= (invoicesData.totalPages || 1)}
+                      onClick={() => setInvoicesPage((p) => p + 1)}
+                      className="px-3 py-1.5 border border-neutral-300 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-neutral-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-neutral-500">Could not load invoices.</p>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'payments' && (
+        <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
+          <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <CreditCard className="h-5 w-5" />
+            Payment history
+          </h2>
+          <p className="text-sm text-gray-500 mb-4">Subscription and payment method. When the tenant paid or started trial, renewals, and payment method.</p>
+          {paymentHistoryLoading ? (
+            <LoadingCard />
+          ) : paymentHistory && paymentHistory.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-neutral-200">
+                    <th className="text-left py-2 font-medium text-neutral-600">Plan</th>
+                    <th className="text-left py-2 font-medium text-neutral-600">Status</th>
+                    <th className="text-left py-2 font-medium text-neutral-600">Cycle</th>
+                    <th className="text-left py-2 font-medium text-neutral-600">Start</th>
+                    <th className="text-left py-2 font-medium text-neutral-600">Expires / Next billing</th>
+                    <th className="text-right py-2 font-medium text-neutral-600">Amount</th>
+                    <th className="text-left py-2 font-medium text-neutral-600">Payment method</th>
+                    <th className="text-left py-2 font-medium text-neutral-600">Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paymentHistory.map((row) => (
+                    <tr key={row.id} className="border-b border-neutral-100">
+                      <td className="py-2 font-medium">{row.planName || '—'}</td>
+                      <td className="py-2">{row.status || '—'}</td>
+                      <td className="py-2">{row.billingCycle || '—'}</td>
+                      <td className="py-2 text-neutral-700">{row.startDate ? new Date(row.startDate).toLocaleDateString() : '—'}</td>
+                      <td className="py-2 text-neutral-700">
+                        {row.expiresAt ? new Date(row.expiresAt).toLocaleDateString() : row.nextBillingDate ? new Date(row.nextBillingDate).toLocaleDateString() + ' (next)' : '—'}
+                      </td>
+                      <td className="py-2 text-right font-medium">{formatCurrency(Number(row.amount) || 0)} {row.currency || ''}</td>
+                      <td className="py-2">{row.paymentMethod || '—'}</td>
+                      <td className="py-2 text-neutral-600">{row.createdAt ? new Date(row.createdAt).toLocaleString() : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="py-6 text-center text-neutral-500">No subscription or payment history for this company.</p>
+          )}
         </div>
       )}
 
@@ -970,12 +1206,14 @@ const SuperAdminTenantDetailPage = () => {
               ].map((report) => (
                 <button
                   key={report.path}
-                  onClick={() => {
-                    localStorage.setItem('selected_tenant_id', tenant.id)
+                  onClick={async () => {
+                    try {
+                      await superAdminAPI.impersonateEnter(tenant.id)
+                    } catch (_) { /* audit failure should not block */ }
+                    impersonateTenant(tenant.id)
                     localStorage.setItem('selected_tenant_name', tenant.name)
                     toast.success(`Opening ${report.label} for ${tenant.name}...`)
-                    // Use window.location.href to ensure a clean state transition with new tenant context
-                    window.location.href = report.path
+                    navigate(report.path)
                   }}
                   className={`flex items-center p-4 rounded-xl border border-transparent hover:border-blue-300 transition-all duration-200 group ${report.color}`}
                 >
@@ -1330,9 +1568,9 @@ const SuperAdminTenantDetailPage = () => {
 
           <div className="space-y-3">
             <ul className="text-xs space-y-2 text-gray-700">
-              <li className="flex items-center gap-2"><span className="h-1.5 w-1.5 bg-red-500 rounded-full"></span> Users, Products, and Customers are kept</li>
-              <li className="flex items-center gap-2"><span className="h-1.5 w-1.5 bg-red-500 rounded-full"></span> Stock quantities and balances reset to 0</li>
-              <li className="flex items-center gap-2 font-bold text-red-700"><span className="h-1.5 w-1.5 bg-red-600 rounded-full"></span> IRREVERSIBLE — no backup is created here</li>
+              <li className="flex items-center gap-2"><span className="h-1.5 w-1.5 bg-red-500 rounded-full"></span> Preserved: Users, Products, Customers, Subscription, Company settings</li>
+              <li className="flex items-center gap-2"><span className="h-1.5 w-1.5 bg-red-500 rounded-full"></span> Wiped: Sales, Purchases, Payments, Expenses, Returns; stock and balances reset to 0</li>
+              <li className="flex items-center gap-2 font-bold text-red-700"><span className="h-1.5 w-1.5 bg-red-600 rounded-full"></span> IRREVERSIBLE — create a backup first if you may need to restore</li>
             </ul>
           </div>
 
@@ -1384,7 +1622,10 @@ const SuperAdminTenantDetailPage = () => {
       {/* Duplicate Data Modal */}
       <Modal
         isOpen={showDuplicateDataModal}
-        onClose={() => setShowDuplicateDataModal(false)}
+        onClose={() => {
+          setShowDuplicateDataModal(false)
+          setDuplicatePreview(null)
+        }}
         title="Duplicate Data to This Company"
         size="md"
         closeOnOverlayClick={false}
@@ -1418,6 +1659,27 @@ const SuperAdminTenantDetailPage = () => {
               ))}
             </div>
           </div>
+
+          {duplicatePreviewLoading && (
+            <p className="text-sm text-gray-500">Loading preview…</p>
+          )}
+          {!duplicatePreviewLoading && duplicatePreview && (
+            <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4 space-y-2">
+              <p className="text-sm font-semibold text-gray-800">Preview</p>
+              <ul className="text-sm text-gray-700 space-y-1">
+                {duplicateDataTypes.Products && (
+                  <li>Will copy <strong>{duplicatePreview.sourceProductsCount ?? 0}</strong> products from source. Target currently has <strong>{duplicatePreview.targetProductsCount ?? 0}</strong> products.</li>
+                )}
+                {duplicateDataTypes.Settings && (
+                  <li>Will copy <strong>{duplicatePreview.sourceSettingsCount ?? 0}</strong> settings (existing keys in target are skipped). Target currently has <strong>{duplicatePreview.targetSettingsCount ?? 0}</strong> settings.</li>
+                )}
+              </ul>
+              {((duplicatePreview.targetProductsCount > 0 && duplicateDataTypes.Products) || (duplicatePreview.targetSettingsCount > 0 && duplicateDataTypes.Settings)) && (
+                <p className="text-sm font-medium text-amber-700 mt-2">Target already has data. Products will be added; settings with the same key are skipped.</p>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-3 pt-2">
             <button
               type="button"

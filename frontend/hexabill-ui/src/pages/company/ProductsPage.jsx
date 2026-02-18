@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, Edit, Trash2, Package, AlertTriangle, Search, Filter, RefreshCw, Download, Upload, MoreVertical } from 'lucide-react'
-import { productsAPI, stockAdjustmentsAPI } from '../../services'
+import { Plus, Edit, Trash2, Package, AlertTriangle, Search, Filter, RefreshCw, Download, Upload, MoreVertical, RotateCw, Tag, Image as ImageIcon, X } from 'lucide-react'
+import { productsAPI, stockAdjustmentsAPI, productCategoriesAPI } from '../../services'
 import ProductForm from '../../components/ProductForm'
 import StockAdjustmentModal from '../../components/StockAdjustmentModal'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
@@ -26,8 +26,9 @@ const ProductsPage = () => {
   const [editingProduct, setEditingProduct] = useState(null)
   const [showStockModal, setShowStockModal] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState(null)
-  const [activeTab, setActiveTab] = useState('all')
+  const [activeTab, setActiveTab] = useState('all') // 'all', 'lowStock', 'inactive'
   const [activeFilters, setActiveFilters] = useState({})
+  const [categories, setCategories] = useState([])
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [productToDelete, setProductToDelete] = useState(null)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -35,6 +36,9 @@ const ProductsPage = () => {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [showCategoryModal, setShowCategoryModal] = useState(false)
+  const [editingCategory, setEditingCategory] = useState(null)
+  const [categoryFormData, setCategoryFormData] = useState({ name: '', description: '', colorCode: '#3B82F6' })
   const [dangerModal, setDangerModal] = useState({
     isOpen: false,
     title: '',
@@ -54,12 +58,22 @@ const ProductsPage = () => {
         pageSize: pageSize,
         search: debouncedSearchTerm || undefined,
         lowStock: activeTab === 'lowStock',
-        unitType: activeFilters.unitType || undefined
+        unitType: activeFilters.unitType || undefined,
+        categoryId: activeFilters.categoryId ? parseInt(activeFilters.categoryId) : undefined,
+        includeInactive: activeTab === 'inactive' // Include inactive products when on inactive tab
       }
+      
+      // Filter inactive products client-side when on inactive tab
+      // (Backend returns all products when includeInactive=true, we filter to only inactive)
 
       const response = await productsAPI.getProducts(params)
       if (response?.success && response?.data) {
-        setProducts(response.data.items || [])
+        let items = response.data.items || []
+        // Filter to only inactive products when on inactive tab
+        if (activeTab === 'inactive') {
+          items = items.filter(p => !p.isActive)
+        }
+        setProducts(items)
         setTotalPages(response.data.totalPages || 1)
         setTotalCount(response.data.totalCount || 0)
       } else {
@@ -204,10 +218,10 @@ const ProductsPage = () => {
   const handleDeleteClick = (product) => {
     setDangerModal({
       isOpen: true,
-      title: 'Delete Product',
-      message: `This will permanently delete ${product.nameEn || product.sku}. This action cannot be undone.`,
-      confirmLabel: 'Delete Product',
-      requireTypedText: 'DELETE',
+      title: 'Deactivate Product',
+      message: `This will deactivate ${product.nameEn || product.sku}. The product will be hidden from POS but will still appear in old invoices. You can reactivate it later.`,
+      confirmLabel: 'Deactivate Product',
+      requireTypedText: 'DEACTIVATE',
       onConfirm: () => handleDeleteProduct(product.id)
     })
   }
@@ -221,14 +235,34 @@ const ProductsPage = () => {
     try {
       const response = await productsAPI.deleteProduct(productId)
       if (response?.success) {
-        toast.success('Product deleted successfully')
+        toast.success('Product deactivated successfully')
         loadProducts()
       } else {
-        toast.error(response?.message || 'Failed to delete product')
+        toast.error(response?.message || 'Failed to deactivate product')
       }
     } catch (error) {
-      console.error('Error deleting product:', error)
-      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to delete product')
+      console.error('Error deactivating product:', error)
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to deactivate product')
+    }
+  }
+
+  const handleActivateProduct = async (productId) => {
+    if (!productId) {
+      toast.error('Invalid product ID')
+      return
+    }
+
+    try {
+      const response = await productsAPI.activateProduct(productId)
+      if (response?.success) {
+        toast.success('Product activated successfully')
+        loadProducts()
+      } else {
+        toast.error(response?.message || 'Failed to activate product')
+      }
+    } catch (error) {
+      console.error('Error activating product:', error)
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to activate product')
     }
   }
 
@@ -335,8 +369,62 @@ const ProductsPage = () => {
 
   const tabs = [
     { id: 'all', label: 'All Products', icon: Package },
-    { id: 'lowStock', label: 'Low Stock', icon: AlertTriangle, badge: products.filter(p => p.stockQty <= (p.reorderLevel || 0)).length }
+    { id: 'lowStock', label: 'Low Stock', icon: AlertTriangle, badge: products.filter(p => p.stockQty <= (p.reorderLevel || 0)).length },
+    { id: 'inactive', label: 'Inactive', icon: Trash2, badge: products.filter(p => !p.isActive).length }
   ]
+
+  const handleCreateCategory = async () => {
+    if (!categoryFormData.name || !categoryFormData.name.trim()) {
+      toast.error('Category name is required')
+      return
+    }
+
+    try {
+      const response = editingCategory
+        ? await productCategoriesAPI.updateCategory(editingCategory.id, categoryFormData)
+        : await productCategoriesAPI.createCategory(categoryFormData)
+      
+      if (response?.success) {
+        toast.success(editingCategory ? 'Category updated successfully' : 'Category created successfully')
+        setShowCategoryModal(false)
+        setEditingCategory(null)
+        setCategoryFormData({ name: '', description: '', colorCode: '#3B82F6' })
+        // Reload categories
+        const catResponse = await productCategoriesAPI.getCategories()
+        if (catResponse?.success && catResponse?.data) {
+          setCategories(catResponse.data)
+        }
+      } else {
+        toast.error(response?.message || 'Failed to save category')
+      }
+    } catch (error) {
+      console.error('Error saving category:', error)
+      if (!error?._handledByInterceptor) {
+        toast.error(error?.response?.data?.message || 'Failed to save category')
+      }
+    }
+  }
+
+  const handleDeleteCategory = async (categoryId) => {
+    try {
+      const response = await productCategoriesAPI.deleteCategory(categoryId)
+      if (response?.success) {
+        toast.success('Category deleted successfully')
+        // Reload categories
+        const catResponse = await productCategoriesAPI.getCategories()
+        if (catResponse?.success && catResponse?.data) {
+          setCategories(catResponse.data)
+        }
+      } else {
+        toast.error(response?.message || 'Failed to delete category')
+      }
+    } catch (error) {
+      console.error('Error deleting category:', error)
+      if (!error?._handledByInterceptor) {
+        toast.error(error?.response?.data?.message || 'Failed to delete category')
+      }
+    }
+  }
 
   return (
     <div className="w-full space-y-4 lg:space-y-6">
@@ -372,14 +460,29 @@ const ProductsPage = () => {
               </button>
             )}
             {canManageInventory && (
-              <button
-                onClick={() => setShowImportModal(true)}
-                className="inline-flex items-center justify-center px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2 border border-neutral-300 rounded-lg text-xs sm:text-sm font-medium text-neutral-700 bg-white hover:bg-neutral-50 transition-colors flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-              >
-                <Upload className="h-3.5 w-3.5 sm:h-4 sm:w-4 sm:mr-2" />
-                <span className="hidden sm:inline">Import Excel</span>
-                <span className="sm:hidden">Import</span>
-              </button>
+              <>
+                <button
+                  onClick={() => {
+                    setEditingCategory(null)
+                    setCategoryFormData({ name: '', description: '', colorCode: '#3B82F6' })
+                    setShowCategoryModal(true)
+                  }}
+                  className="inline-flex items-center justify-center px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2 border border-neutral-300 rounded-lg text-xs sm:text-sm font-medium text-neutral-700 bg-white hover:bg-neutral-50 transition-colors flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
+                  title="Manage Categories"
+                >
+                  <Tag className="h-3.5 w-3.5 sm:h-4 sm:w-4 sm:mr-2" />
+                  <span className="hidden sm:inline">Categories</span>
+                  <span className="sm:hidden">Cats</span>
+                </button>
+                <button
+                  onClick={() => setShowImportModal(true)}
+                  className="inline-flex items-center justify-center px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2 border border-neutral-300 rounded-lg text-xs sm:text-sm font-medium text-neutral-700 bg-white hover:bg-neutral-50 transition-colors flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
+                >
+                  <Upload className="h-3.5 w-3.5 sm:h-4 sm:w-4 sm:mr-2" />
+                  <span className="hidden sm:inline">Import Excel</span>
+                  <span className="sm:hidden">Import</span>
+                </button>
+              </>
             )}
             <button
               onClick={() => setShowForm(true)}
@@ -426,6 +529,12 @@ const ProductsPage = () => {
               { value: 'PC', label: 'PC' },
               { value: 'UNIT', label: 'UNIT' }
             ]
+          },
+          {
+            key: 'categoryId', label: 'Category', options: [
+              { value: '', label: 'All Categories' },
+              ...categories.map(cat => ({ value: cat.id.toString(), label: cat.name }))
+            ]
           }
         ]}
         activeFilters={activeFilters}
@@ -438,7 +547,21 @@ const ProductsPage = () => {
         loading={loading}
         columns={[
           { key: 'sku', label: 'SKU', sortable: true },
-          { key: 'nameEn', label: 'Name (EN)', sortable: true },
+          { 
+            key: 'nameEn', 
+            label: 'Name (EN)', 
+            sortable: true,
+            render: (product) => (
+              <div className="flex items-center gap-2">
+                <span>{product.nameEn}</span>
+                {product.isActive === false && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                    Inactive
+                  </span>
+                )}
+              </div>
+            )
+          },
           { key: 'unitType', label: 'Qty', sortable: true },
           {
             key: 'stockQty',
@@ -508,18 +631,33 @@ const ProductsPage = () => {
               </button>
             )}
             {canManageInventory && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleDeleteClick(product)
-                }}
-                className="bg-error/10 text-error hover:text-white hover:bg-error border border-error/30 p-1.5 sm:p-2 rounded transition-colors flex items-center gap-1 min-h-[44px] sm:min-h-0"
-                title="Delete Product"
-                aria-label="Delete Product"
-              >
-                <Trash2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-                <span className="hidden sm:inline text-xs font-medium">Delete</span>
-              </button>
+              product.isActive === false ? (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleActivateProduct(product.id)
+                  }}
+                  className="bg-green-50 text-green-600 hover:text-white hover:bg-green-600 border border-green-300 p-1.5 sm:p-2 rounded transition-colors flex items-center gap-1 min-h-[44px] sm:min-h-0"
+                  title="Activate Product"
+                  aria-label="Activate Product"
+                >
+                  <RotateCw className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                  <span className="hidden sm:inline text-xs font-medium">Activate</span>
+                </button>
+              ) : (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleDeleteClick(product)
+                  }}
+                  className="bg-error/10 text-error hover:text-white hover:bg-error border border-error/30 p-1.5 sm:p-2 rounded transition-colors flex items-center gap-1 min-h-[44px] sm:min-h-0"
+                  title="Deactivate Product"
+                  aria-label="Deactivate Product"
+                >
+                  <Trash2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                  <span className="hidden sm:inline text-xs font-medium">Deactivate</span>
+                </button>
+              )
             )}
           </div>
         )}
@@ -573,7 +711,7 @@ const ProductsPage = () => {
           <ProductForm
             product={editingProduct}
             saving={saving}
-            onSave={editingProduct ? (data) => handleUpdateProduct(editingProduct.id, data) : handleCreateProduct}
+            onSave={(data, imageFile) => editingProduct ? handleUpdateProduct(editingProduct.id, data, imageFile) : handleCreateProduct(data, imageFile)}
             onCancel={() => {
               setShowForm(false)
               setEditingProduct(null)
@@ -796,6 +934,146 @@ const ProductsPage = () => {
         onConfirm={dangerModal.onConfirm}
         onClose={() => setDangerModal(prev => ({ ...prev, isOpen: false }))}
       />
+
+      {/* Category Management Modal */}
+      {showCategoryModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-semibold text-gray-900">
+                {editingCategory ? 'Edit Category' : 'Manage Categories'}
+              </h2>
+              <button
+                onClick={() => {
+                  setShowCategoryModal(false)
+                  setEditingCategory(null)
+                  setCategoryFormData({ name: '', description: '', colorCode: '#3B82F6' })
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            {/* Create/Edit Category Form */}
+            <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+              <h3 className="text-sm font-medium text-gray-700 mb-4">
+                {editingCategory ? 'Edit Category' : 'Create New Category'}
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    Category Name *
+                  </label>
+                  <input
+                    type="text"
+                    value={categoryFormData.name}
+                    onChange={(e) => setCategoryFormData({ ...categoryFormData, name: e.target.value })}
+                    className="input"
+                    placeholder="e.g., Dairy, Beverages, Snacks"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    Description (Optional)
+                  </label>
+                  <textarea
+                    value={categoryFormData.description}
+                    onChange={(e) => setCategoryFormData({ ...categoryFormData, description: e.target.value })}
+                    className="input"
+                    rows="2"
+                    placeholder="Category description"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    Color
+                  </label>
+                  <input
+                    type="color"
+                    value={categoryFormData.colorCode}
+                    onChange={(e) => setCategoryFormData({ ...categoryFormData, colorCode: e.target.value })}
+                    className="h-10 w-20 rounded border border-gray-300"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleCreateCategory}
+                    disabled={!categoryFormData.name.trim()}
+                    className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {editingCategory ? 'Update Category' : 'Create Category'}
+                  </button>
+                  {editingCategory && (
+                    <button
+                      onClick={() => {
+                        setEditingCategory(null)
+                        setCategoryFormData({ name: '', description: '', colorCode: '#3B82F6' })
+                      }}
+                      className="px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition-colors"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Categories List */}
+            <div>
+              <h3 className="text-sm font-medium text-gray-700 mb-4">Existing Categories</h3>
+              {categories.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-4">No categories created yet</p>
+              ) : (
+                <div className="space-y-2">
+                  {categories.map(cat => (
+                    <div key={cat.id} className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg">
+                      <div className="flex items-center gap-3">
+                        <div 
+                          className="w-4 h-4 rounded"
+                          style={{ backgroundColor: cat.colorCode || '#3B82F6' }}
+                        />
+                        <div>
+                          <div className="font-medium text-gray-900">{cat.name}</div>
+                          {cat.description && (
+                            <div className="text-xs text-gray-500">{cat.description}</div>
+                          )}
+                          <div className="text-xs text-gray-400">{cat.productCount || 0} products</div>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            setEditingCategory(cat)
+                            setCategoryFormData({
+                              name: cat.name,
+                              description: cat.description || '',
+                              colorCode: cat.colorCode || '#3B82F6'
+                            })
+                          }}
+                          className="px-3 py-1 text-sm bg-primary-50 text-primary-600 rounded hover:bg-primary-100 transition-colors"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Delete category "${cat.name}"? Products in this category will be unassigned.`)) {
+                              handleDeleteCategory(cat.id)
+                            }
+                          }}
+                          className="px-3 py-1 text-sm bg-red-50 text-red-600 rounded hover:bg-red-100 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div >
   )
 }

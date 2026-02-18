@@ -6,7 +6,7 @@ import toast from 'react-hot-toast'
 import PrintOptionsModal from './PrintOptionsModal'
 import ConfirmDangerModal from './ConfirmDangerModal'
 
-const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => {
+const InvoicePreviewModal = ({ saleId, invoiceNo, customerPhone, onClose, onPrint, onNew }) => {
   const [loading, setLoading] = useState(false)
   const [invoice, setInvoice] = useState(null)
   const [showPrintOptions, setShowPrintOptions] = useState(false)
@@ -171,8 +171,9 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, onClose, onPrint, onNew }) => 
         document.body.removeChild(a)
       }, 100)
 
-      // Open WhatsApp Web with message (user will attach the downloaded PDF file)
-      const whatsappUrl = `https://wa.me/?text=${encodedMessage}`
+      // Open WhatsApp to customer when phone provided (#56)
+      const { getWhatsAppShareUrl } = await import('../utils/whatsapp')
+      const whatsappUrl = getWhatsAppShareUrl(message, customerPhone)
       window.open(whatsappUrl, '_blank')
 
       toast.success('PDF downloaded. WhatsApp opened. Please attach the downloaded PDF file.')

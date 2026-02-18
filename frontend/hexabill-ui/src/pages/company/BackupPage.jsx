@@ -18,18 +18,39 @@ const BackupPage = () => {
   const [fileToDelete, setFileToDelete] = useState(null)
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false)
   const [showCloudSettings, setShowCloudSettings] = useState(false)
+  const [showScheduleSettings, setShowScheduleSettings] = useState(false)
   const [cloudSettings, setCloudSettings] = useState({
     googleDriveClientId: '',
     googleDriveClientSecret: '',
     googleDriveRefreshToken: '',
     googleDriveEnabled: false
   })
+  const [scheduleSettings, setScheduleSettings] = useState({
+    enabled: false,
+    time: '21:00', // Default 9 PM
+    frequency: 'daily', // daily, weekly
+    retentionDays: 30
+  })
 
   useEffect(() => {
     loadBackups()
-    // Auto-refresh DISABLED - prevents UI interruption during user actions
-    // User can manually refresh with refresh button
   }, [])
+
+  const loadSchedule = async () => {
+    try {
+      const res = await backupAPI.getSchedule()
+      if (res.success && res.data) {
+        setScheduleSettings({
+          enabled: res.data.enabled ?? false,
+          time: res.data.time || '21:00',
+          frequency: res.data.frequency || 'daily',
+          retentionDays: res.data.retentionDays ?? 30
+        })
+      }
+    } catch (e) {
+      console.error('Failed to load backup schedule', e)
+    }
+  }
 
   const loadBackups = async () => {
     try {
@@ -59,14 +80,16 @@ const BackupPage = () => {
     }
   }
 
-  const handleCreateFullBackup = async (exportToDesktop = false) => {
+  const handleCreateFullBackup = async (downloadToBrowser = false) => {
     try {
       setLoading(true)
-      const response = await backupAPI.createFullBackup(exportToDesktop)
+      const response = await backupAPI.createFullBackup(downloadToBrowser)
       if (response.success) {
-        toast.success(exportToDesktop
-          ? 'Backup created! Note: On cloud hosting, use Download button to save to your computer.'
-          : 'Full backup created successfully! Click Download to save to your computer.')
+        if (downloadToBrowser) {
+          toast.success('Backup downloaded to your computer!')
+        } else {
+          toast.success('Full backup created successfully! Click Download to save to your computer.')
+        }
         await loadBackups()
       } else {
         toast.error(response.message || 'Failed to create full backup')
@@ -172,8 +195,10 @@ const BackupPage = () => {
 
   const handleSaveCloudSettings = async () => {
     try {
-      // TODO: Add API endpoint to save cloud settings to appsettings.json
-      toast.success('Cloud settings saved! (Note: Restart server for changes to take effect)')
+      // NOTE: Cloud backup (S3/Google Drive) is not yet implemented
+      // For production, backups should be stored in S3/Cloudflare R2/Google Cloud Storage
+      // instead of ephemeral server filesystem
+      toast.error('Cloud backup settings are not yet implemented. For production, configure S3/cloud storage backups.')
       setShowCloudSettings(false)
     } catch (error) {
       if (!error?._handledByInterceptor) toast.error('Failed to save cloud settings')
@@ -222,91 +247,173 @@ const BackupPage = () => {
               <h2 className="text-lg font-semibold text-gray-900">Create Backup</h2>
             </div>
             {isAdmin && (
-              <button
-                onClick={() => setShowCloudSettings(!showCloudSettings)}
-                className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-                title="Cloud Backup Settings"
-              >
-                <Cloud className="h-4 w-4 mr-2" />
-                Cloud Settings
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setShowCloudSettings(!showCloudSettings)
+                    setShowScheduleSettings(false)
+                  }}
+                  className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+                  title="Cloud Backup Settings"
+                >
+                  <Cloud className="h-4 w-4 mr-2" />
+                  Cloud Settings
+                </button>
+                <button
+                  onClick={async () => {
+                    setShowScheduleSettings(!showScheduleSettings)
+                    setShowCloudSettings(false)
+                    if (!showScheduleSettings) await loadSchedule()
+                  }}
+                  className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+                  title="Backup Schedule Settings"
+                >
+                  <Settings className="h-4 w-4 mr-2" />
+                  Schedule
+                </button>
+              </div>
             )}
           </div>
 
-          {/* Google Drive Settings (Admin Only) */}
-          {isAdmin && showCloudSettings && (
+          {/* Backup Schedule Settings (Admin Only) */}
+          {isAdmin && showScheduleSettings && (
             <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-md">
-              <h3 className="text-sm font-semibold text-blue-900 mb-3">Google Drive Backup Settings</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Client ID</label>
-                  <input
-                    type="text"
-                    value={cloudSettings.googleDriveClientId}
-                    onChange={(e) => setCloudSettings(prev => ({ ...prev, googleDriveClientId: e.target.value }))}
-                    placeholder="your-client-id.apps.googleusercontent.com"
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Client Secret</label>
-                  <input
-                    type="password"
-                    value={cloudSettings.googleDriveClientSecret}
-                    onChange={(e) => setCloudSettings(prev => ({ ...prev, googleDriveClientSecret: e.target.value }))}
-                    placeholder="your-client-secret"
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Refresh Token</label>
-                  <input
-                    type="text"
-                    value={cloudSettings.googleDriveRefreshToken}
-                    onChange={(e) => setCloudSettings(prev => ({ ...prev, googleDriveRefreshToken: e.target.value }))}
-                    placeholder="your-refresh-token"
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                <div className="flex items-end">
-                  <label className="flex items-center">
-                    <input
-                      type="checkbox"
-                      checked={cloudSettings.googleDriveEnabled}
-                      onChange={(e) => setCloudSettings(prev => ({ ...prev, googleDriveEnabled: e.target.checked }))}
-                      className="mr-2"
-                    />
-                    <span className="text-xs text-gray-700">Enable Google Drive Backup</span>
-                  </label>
+              <h3 className="text-sm font-semibold text-blue-900 mb-3">Backup Schedule Settings</h3>
+              <div className="bg-white p-3 rounded border border-blue-200 mb-3">
+                <p className="text-xs text-blue-800 mb-3">
+                  Configure automatic daily backups. Backups run automatically at the scheduled time.
+                </p>
+                <div className="space-y-3">
+                  <div className="flex items-center">
+                    <label className="flex items-center">
+                      <input
+                        type="checkbox"
+                        checked={scheduleSettings.enabled}
+                        onChange={(e) => setScheduleSettings(prev => ({ ...prev, enabled: e.target.checked }))}
+                        className="mr-2"
+                      />
+                      <span className="text-sm text-gray-700">Enable automatic backups</span>
+                    </label>
+                  </div>
+                  {scheduleSettings.enabled && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Backup Time</label>
+                        <input
+                          type="time"
+                          value={scheduleSettings.time}
+                          onChange={(e) => setScheduleSettings(prev => ({ ...prev, time: e.target.value }))}
+                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Frequency</label>
+                        <select
+                          value={scheduleSettings.frequency}
+                          onChange={(e) => setScheduleSettings(prev => ({ ...prev, frequency: e.target.value }))}
+                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                        >
+                          <option value="daily">Daily</option>
+                          <option value="weekly">Weekly (Sunday)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Retention (days)</label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="365"
+                          value={scheduleSettings.retentionDays}
+                          onChange={(e) => setScheduleSettings(prev => ({ ...prev, retentionDays: parseInt(e.target.value) || 30 }))}
+                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">Backups older than this will be automatically deleted</p>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
-              <div className="mt-3">
+              <div className="flex gap-2">
                 <button
-                  onClick={handleSaveCloudSettings}
+                  onClick={async () => {
+                    try {
+                      const res = await backupAPI.saveSchedule(scheduleSettings)
+                      if (res.success) {
+                        toast.success('Backup schedule saved.')
+                        setShowScheduleSettings(false)
+                      } else toast.error(res.message || 'Failed to save schedule')
+                    } catch (e) {
+                      if (!e?._handledByInterceptor) toast.error('Failed to save schedule')
+                    }
+                  }}
                   className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700"
                 >
-                  Save Cloud Settings
+                  Save Schedule
+                </button>
+                <button
+                  onClick={() => setShowScheduleSettings(false)}
+                  className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded-md hover:bg-gray-300"
+                >
+                  Cancel
                 </button>
               </div>
               <p className="text-xs text-gray-600 mt-2">
-                Note: These settings are saved to appsettings.json. See BACKUP_CLOUD_INTEGRATION.md for setup instructions.
+                Automatic backups run at the scheduled time. Older backups are deleted after the retention period.
               </p>
             </div>
           )}
 
-          {/* IMPORTANT NOTICE FOR CLOUD HOSTING */}
-          <div className="bg-amber-50 border border-amber-300 rounded-md p-3 mb-4">
-            <p className="text-sm font-medium text-amber-800">
-              📢 <strong>Cloud Hosting Notice (Render.com):</strong>
+          {/* Cloud Backup Settings (Admin Only) */}
+          {isAdmin && showCloudSettings && (
+            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-md">
+              <h3 className="text-sm font-semibold text-blue-900 mb-3">Cloud backup (S3 / offline)</h3>
+              <div className="bg-white p-3 rounded border border-blue-200 mb-3">
+                <p className="text-xs text-blue-800 mb-2">
+                  <strong>S3 (recommended for production):</strong> Backups can be uploaded to AWS S3 or compatible storage (e.g. Cloudflare R2). Configure in <code className="bg-blue-100 px-1">appsettings.json</code>: <code className="bg-blue-100 px-1">BackupSettings:S3:Enabled</code> = true, <code className="bg-blue-100 px-1">Bucket</code>, <code className="bg-blue-100 px-1">Region</code>, <code className="bg-blue-100 px-1">AwsAccessKeyId</code>, <code className="bg-blue-100 px-1">AwsSecretAccessKey</code>. Optional: <code className="bg-blue-100 px-1">Prefix</code> for folder path.
+                </p>
+                <p className="text-xs text-blue-700 mb-2">
+                  <strong>Offline / desktop:</strong> Use &quot;Full Backup (Download to PC/Desktop)&quot; to save a copy on your computer. Server backups are ephemeral on cloud hosts; keep a local or S3 copy.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowCloudSettings(false)}
+                className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700"
+              >
+                Close
+              </button>
+            </div>
+          )}
+
+          {/* Offline / Desktop backup notice */}
+          <div className="bg-blue-50 border border-blue-300 rounded-md p-3 mb-4">
+            <p className="text-sm font-medium text-blue-800">
+              💾 <strong>Offline &amp; desktop backup</strong>
             </p>
-            <p className="text-xs text-amber-700 mt-1">
-              "Export to Desktop" saves files to the <em>server's</em> desktop, not your local computer.
-              <br />
-              <strong>To save to YOUR computer:</strong> Create backup → Click <strong>Download</strong> button in the list below.
+            <p className="text-xs text-blue-700 mt-1">
+              To keep a copy on your computer (desktop or folder): use <strong>Full Backup (Download to Browser)</strong>.
+              The file will download to your default Downloads folder so you have an offline copy even if the server is down.
+              You can also download any backup from the list below.
             </p>
           </div>
 
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => handleCreateFullBackup(true)}
+              disabled={loading}
+              className="inline-flex items-center px-4 py-2 border border-blue-300 rounded-md shadow-sm text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:opacity-50"
+              title="Creates backup and downloads to your computer (offline/desktop copy)"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              {loading ? 'Creating...' : 'Full Backup (Download to PC/Desktop)'}
+            </button>
+            <button
+              onClick={() => handleCreateFullBackup(false)}
+              disabled={loading}
+              className="inline-flex items-center px-4 py-2 border border-green-300 rounded-md shadow-sm text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 disabled:opacity-50"
+            >
+              <HardDrive className="h-4 w-4 mr-2" />
+              {loading ? 'Creating...' : 'Full Backup (Server Only)'}
+            </button>
             <button
               onClick={handleCreateBackup}
               disabled={loading}
@@ -314,25 +421,6 @@ const BackupPage = () => {
             >
               <Database className="h-4 w-4 mr-2" />
               {loading ? 'Creating...' : 'Database Backup'}
-            </button>
-
-            <button
-              onClick={() => handleCreateFullBackup(false)}
-              disabled={loading}
-              className="inline-flex items-center px-4 py-2 border border-green-300 rounded-md shadow-sm text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 disabled:opacity-50"
-            >
-              <HardDrive className="h-4 w-4 mr-2" />
-              {loading ? 'Creating...' : 'Full Backup (ZIP)'}
-            </button>
-
-            <button
-              onClick={() => handleCreateFullBackup(true)}
-              disabled={loading}
-              className="inline-flex items-center px-4 py-2 border border-blue-300 rounded-md shadow-sm text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:opacity-50"
-              title="Creates backup on server. For cloud hosting (Render.com), use Download button instead."
-            >
-              <HardDrive className="h-4 w-4 mr-2" />
-              {loading ? 'Creating...' : 'Full Backup (Server Desktop)'}
             </button>
           </div>
         </div>

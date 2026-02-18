@@ -13,6 +13,8 @@ namespace HexaBill.Api.Shared.Security
     {
         Task<string> UploadLogoAsync(IFormFile file);
         Task<string> UploadInvoiceAttachmentAsync(IFormFile file, int purchaseId);
+        Task<string> UploadProductImageAsync(IFormFile file, int productId);
+        Task<string> UploadProfilePhotoAsync(IFormFile file, int userId);
         Task<bool> DeleteFileAsync(string filePath);
         Task<string> GetFileUrlAsync(string filePath);
         Task<List<string>> GetUploadedFilesAsync();
@@ -123,6 +125,66 @@ namespace HexaBill.Api.Shared.Security
             }
 
             return fileName;
+        }
+
+        public async Task<string> UploadProductImageAsync(IFormFile file, int productId)
+        {
+            if (file == null || file.Length == 0)
+                throw new ArgumentException("No file provided");
+
+            // Validate file type (images only)
+            var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp" };
+            if (!allowedTypes.Contains(file.ContentType.ToLower()))
+                throw new ArgumentException("Invalid file type. Only images (JPEG, PNG, GIF, WebP) are allowed.");
+
+            // Validate file size (max 5MB)
+            if (file.Length > 5 * 1024 * 1024)
+                throw new ArgumentException("File size too large. Maximum 5MB allowed.");
+
+            // Create products subdirectory
+            var productsDir = Path.Combine(_uploadPath, "products");
+            if (!Directory.Exists(productsDir))
+            {
+                Directory.CreateDirectory(productsDir);
+            }
+
+            var fileName = $"product_{productId}_{Guid.NewGuid()}{Path.GetExtension(file.FileName)}";
+            var filePath = Path.Combine(productsDir, fileName);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            // Return relative path for storage in database
+            return $"products/{fileName}";
+        }
+
+        public async Task<string> UploadProfilePhotoAsync(IFormFile file, int userId)
+        {
+            if (file == null || file.Length == 0)
+                throw new ArgumentException("No file provided");
+
+            var allowedTypes = new[] { "image/jpeg", "image/png", "image/gif", "image/webp" };
+            if (!allowedTypes.Contains(file.ContentType.ToLower()))
+                throw new ArgumentException("Invalid file type. Only images (JPEG, PNG, GIF, WebP) are allowed.");
+
+            if (file.Length > 2 * 1024 * 1024) // 2MB
+                throw new ArgumentException("File size too large. Maximum 2MB allowed.");
+
+            var profilesDir = Path.Combine(_uploadPath, "profiles");
+            if (!Directory.Exists(profilesDir))
+                Directory.CreateDirectory(profilesDir);
+
+            var fileName = $"profile_{userId}_{Guid.NewGuid()}{Path.GetExtension(file.FileName)}";
+            var filePath = Path.Combine(profilesDir, fileName);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            return $"profiles/{fileName}";
         }
 
         public Task<bool> DeleteFileAsync(string filePath)

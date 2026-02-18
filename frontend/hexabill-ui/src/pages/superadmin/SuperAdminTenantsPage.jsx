@@ -14,9 +14,12 @@ import {
   Building2,
   Filter,
   RefreshCw,
-  Copy
+  Copy,
+  CalendarPlus,
+  Megaphone
 } from 'lucide-react'
 import { superAdminAPI } from '../../services'
+import { getApiBaseUrlNoSuffix } from '../../services/apiConfig'
 import { formatCurrency } from '../../utils/currency'
 import { LoadingCard, LoadingButton } from '../../components/Loading'
 import { Input, Select, TextArea } from '../../components/Form'
@@ -57,6 +60,14 @@ const SuperAdminTenantsPage = () => {
   const [showCredentialsModal, setShowCredentialsModal] = useState(false)
   const [credentialsData, setCredentialsData] = useState(null)
   const [credentialsAcknowledged, setCredentialsAcknowledged] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [showBulkExtendModal, setShowBulkExtendModal] = useState(false)
+  const [showBulkAnnouncementModal, setShowBulkAnnouncementModal] = useState(false)
+  const [bulkExtendDays, setBulkExtendDays] = useState(7)
+  const [bulkAnnouncementTitle, setBulkAnnouncementTitle] = useState('')
+  const [bulkAnnouncementMessage, setBulkAnnouncementMessage] = useState('')
+  const [bulkAnnouncementSeverity, setBulkAnnouncementSeverity] = useState('Info')
+  const [bulkActionLoading, setBulkActionLoading] = useState(false)
 
   useEffect(() => {
     fetchTenants()
@@ -119,6 +130,73 @@ const SuperAdminTenantsPage = () => {
     }
   }
 
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const toggleSelectAll = () => {
+    if (selectedIds.size === tenants.length) setSelectedIds(new Set())
+    else setSelectedIds(new Set(tenants.map((t) => t.id)))
+  }
+  const handleBulkExtendTrial = async () => {
+    const ids = Array.from(selectedIds)
+    if (!ids.length) return
+    setBulkActionLoading(true)
+    try {
+      const res = await superAdminAPI.bulkAction({
+        tenantIds: ids,
+        action: 'extend_trial',
+        days: bulkExtendDays || 7
+      })
+      if (res?.success && res?.data) {
+        const { successCount, failureCount } = res.data
+        toast.success(`Trial extended for ${successCount} compan${successCount === 1 ? 'y' : 'ies'}${failureCount ? `; ${failureCount} failed` : ''}`)
+        setShowBulkExtendModal(false)
+        setSelectedIds(new Set())
+        fetchTenants()
+      } else {
+        toast.error(res?.message || 'Bulk action failed')
+      }
+    } catch (e) {
+      if (!e?._handledByInterceptor) toast.error(e?.response?.data?.message || 'Bulk action failed')
+    } finally {
+      setBulkActionLoading(false)
+    }
+  }
+  const handleBulkAnnouncement = async () => {
+    const ids = Array.from(selectedIds)
+    if (!ids.length) return
+    setBulkActionLoading(true)
+    try {
+      const res = await superAdminAPI.bulkAction({
+        tenantIds: ids,
+        action: 'send_announcement',
+        title: bulkAnnouncementTitle || 'Platform announcement',
+        message: bulkAnnouncementMessage || '',
+        severity: bulkAnnouncementSeverity || 'Info'
+      })
+      if (res?.success && res?.data) {
+        const { successCount, failureCount } = res.data
+        toast.success(`Announcement sent to ${successCount} compan${successCount === 1 ? 'y' : 'ies'}${failureCount ? `; ${failureCount} failed` : ''}`)
+        setShowBulkAnnouncementModal(false)
+        setBulkAnnouncementTitle('')
+        setBulkAnnouncementMessage('')
+        setSelectedIds(new Set())
+        fetchTenants()
+      } else {
+        toast.error(res?.message || 'Bulk action failed')
+      }
+    } catch (e) {
+      if (!e?._handledByInterceptor) toast.error(e?.response?.data?.message || 'Bulk action failed')
+    } finally {
+      setBulkActionLoading(false)
+    }
+  }
+
   const handleDelete = async () => {
     if (!selectedTenant) return
 
@@ -155,14 +233,18 @@ const SuperAdminTenantsPage = () => {
     return badges[effectiveStatus] || <span className="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800">{effectiveStatus}</span>
   }
 
-  const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/api\/?$/, '')
+  const apiBase = getApiBaseUrlNoSuffix()
   const logoUrl = (tenant) => {
     const path = tenant?.logoPath || tenant?.logo
     if (!path) return null
-    return path.startsWith('http') ? path : `${apiBase}${path.startsWith('/') ? '' : '/'}${path}`
+    if (path.startsWith('http')) return path
+    // Backend may return "logo_xxx.png" or "/uploads/logo_xxx.png" – serve from /uploads/
+    const normalized = path.startsWith('/') ? path : `/uploads/${path}`
+    return `${apiBase}${normalized}`
   }
 
   const columns = [
+    { key: 'select', label: '' },
     { key: 'company', label: 'Company' },
     { key: 'clientId', label: 'Client ID' },
     { key: 'name', label: 'Company Name' },
@@ -186,6 +268,15 @@ const SuperAdminTenantsPage = () => {
 
   const tableData = tenants.map(tenant => ({
     ...tenant,
+    select: (
+      <input
+        type="checkbox"
+        checked={selectedIds.has(tenant.id)}
+        onChange={() => toggleSelect(tenant.id)}
+        onClick={(e) => e.stopPropagation()}
+        className="rounded border-neutral-300"
+      />
+    ),
     clientId: (
       <div className="flex items-center gap-1">
         <code className="text-xs bg-neutral-100 px-2 py-1 rounded font-mono">{tenant.id}</code>
@@ -347,11 +438,56 @@ const SuperAdminTenantsPage = () => {
         </div>
       </div>
 
+      {/* Bulk actions bar */}
+      {selectedIds.size > 0 && (
+        <div className="mb-4 p-4 bg-indigo-50 border border-indigo-200 rounded-lg flex flex-wrap items-center justify-between gap-3">
+          <span className="text-sm font-medium text-indigo-900">
+            {selectedIds.size} selected
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowBulkExtendModal(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium"
+            >
+              <CalendarPlus className="h-4 w-4" />
+              Extend trial
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowBulkAnnouncementModal(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium"
+            >
+              <Megaphone className="h-4 w-4" />
+              Send announcement
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="px-4 py-2 text-neutral-600 hover:bg-neutral-200 rounded-lg text-sm"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       {loading ? (
         <LoadingCard />
       ) : (
         <div className="bg-white rounded-lg border border-neutral-200 shadow-sm">
+          {tenants.length > 0 && (
+            <div className="px-4 py-2 border-b border-neutral-100 text-sm text-neutral-600">
+              <button
+                type="button"
+                onClick={toggleSelectAll}
+                className="text-indigo-600 hover:underline"
+              >
+                {selectedIds.size === tenants.length ? 'Clear selection' : 'Select all on this page'}
+              </button>
+            </div>
+          )}
           <ModernTable
             columns={columns}
             data={tableData}
@@ -411,6 +547,91 @@ const SuperAdminTenantsPage = () => {
               className="px-5 py-2.5 bg-amber-600 text-white font-semibold rounded-xl hover:bg-amber-700 shadow-md hover:shadow-lg transition-all"
             >
               Suspend Access
+            </LoadingButton>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Bulk: Extend trial */}
+      <Modal
+        isOpen={showBulkExtendModal}
+        onClose={() => setShowBulkExtendModal(false)}
+        title="Extend trial (bulk)"
+      >
+        <div className="p-1">
+          <p className="text-neutral-600 mb-4">
+            Extend trial end date for <strong>{selectedIds.size}</strong> selected companies.
+          </p>
+          <div className="space-y-2 mb-6">
+            <label className="block text-sm font-semibold text-neutral-700">Days to add</label>
+            <input
+              type="number"
+              min={1}
+              max={365}
+              value={bulkExtendDays}
+              onChange={(e) => setBulkExtendDays(Number(e.target.value) || 7)}
+              className="w-full border border-neutral-300 rounded-lg px-3 py-2"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setShowBulkExtendModal(false)} className="px-4 py-2 text-neutral-700 hover:bg-neutral-100 rounded-lg">
+              Cancel
+            </button>
+            <LoadingButton onClick={handleBulkExtendTrial} loading={bulkActionLoading} className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700">
+              Extend trial
+            </LoadingButton>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Bulk: Send announcement */}
+      <Modal
+        isOpen={showBulkAnnouncementModal}
+        onClose={() => { setShowBulkAnnouncementModal(false); setBulkAnnouncementTitle(''); setBulkAnnouncementMessage('') }}
+        title="Send announcement (bulk)"
+      >
+        <div className="p-1">
+          <p className="text-neutral-600 mb-4">
+            Create an in-app announcement for <strong>{selectedIds.size}</strong> selected companies. Users will see it in their Alerts.
+          </p>
+          <div className="space-y-2 mb-4">
+            <label className="block text-sm font-semibold text-neutral-700">Title</label>
+            <input
+              type="text"
+              value={bulkAnnouncementTitle}
+              onChange={(e) => setBulkAnnouncementTitle(e.target.value)}
+              placeholder="Platform announcement"
+              className="w-full border border-neutral-300 rounded-lg px-3 py-2"
+            />
+          </div>
+          <div className="space-y-2 mb-4">
+            <label className="block text-sm font-semibold text-neutral-700">Message</label>
+            <textarea
+              value={bulkAnnouncementMessage}
+              onChange={(e) => setBulkAnnouncementMessage(e.target.value)}
+              placeholder="Optional message..."
+              rows={3}
+              className="w-full border border-neutral-300 rounded-lg px-3 py-2"
+            />
+          </div>
+          <div className="space-y-2 mb-6">
+            <label className="block text-sm font-semibold text-neutral-700">Severity</label>
+            <select
+              value={bulkAnnouncementSeverity}
+              onChange={(e) => setBulkAnnouncementSeverity(e.target.value)}
+              className="w-full border border-neutral-300 rounded-lg px-3 py-2"
+            >
+              <option value="Info">Info</option>
+              <option value="Warning">Warning</option>
+              <option value="Error">Error</option>
+            </select>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => { setShowBulkAnnouncementModal(false); setBulkAnnouncementTitle(''); setBulkAnnouncementMessage('') }} className="px-4 py-2 text-neutral-700 hover:bg-neutral-100 rounded-lg">
+              Cancel
+            </button>
+            <LoadingButton onClick={handleBulkAnnouncement} loading={bulkActionLoading} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+              Send announcement
             </LoadingButton>
           </div>
         </div>

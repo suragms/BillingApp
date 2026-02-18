@@ -13,7 +13,14 @@ import {
   TrendingDown,
   PieChart,
   X,
-  Save
+  Save,
+  Upload,
+  FileText,
+  CheckCircle,
+  XCircle,
+  Clock,
+  Repeat,
+  Download
 } from 'lucide-react'
 import { formatCurrency } from '../../utils/currency'
 import toast from 'react-hot-toast'
@@ -22,7 +29,7 @@ import { isAdminOrOwner } from '../../utils/roles'
 import { LoadingCard, LoadingButton } from '../../components/Loading'
 import { Input, Select, TextArea } from '../../components/Form'
 import Modal from '../../components/Modal'
-import { expensesAPI } from '../../services'
+import { expensesAPI, branchesAPI, routesAPI, usersAPI } from '../../services'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
 import {
   PieChart as RechartsPieChart,
@@ -64,14 +71,27 @@ const ExpensesPage = () => {
   })
 
   const [categories, setCategories] = useState([])
+  const [branches, setBranches] = useState([])
+  const [routes, setRoutes] = useState([])
+  const [selectedBranchId, setSelectedBranchId] = useState('')
+  const [staffAssignedBranchIds, setStaffAssignedBranchIds] = useState([])
+  const [staffAssignedRouteIds, setStaffAssignedRouteIds] = useState([])
+  const [attachmentFile, setAttachmentFile] = useState(null)
+  const [attachmentPreview, setAttachmentPreview] = useState(null)
+  const [showRecurringModal, setShowRecurringModal] = useState(false)
+  const [recurringExpenses, setRecurringExpenses] = useState([])
+  const [uploadingAttachment, setUploadingAttachment] = useState(false)
 
   const {
     register,
     handleSubmit,
     reset,
     setValue,
+    watch,
     formState: { errors }
   } = useForm()
+
+  const watchedBranchId = watch('branchId')
 
   const fetchCategories = useCallback(async () => {
     try {
@@ -184,6 +204,86 @@ const ExpensesPage = () => {
     setFilteredExpenses(filtered)
   }, [expenses, searchTerm])
 
+  // Load branches, routes, and staff assignments
+  useEffect(() => {
+    const loadBranchesAndRoutes = async () => {
+      try {
+        // For staff, get their assigned branches/routes
+        if (user && !isAdminOrOwner(user)) {
+          try {
+            const meRes = await usersAPI.getMyAssignedRoutes()
+            if (meRes?.success && meRes?.data) {
+              setStaffAssignedBranchIds(meRes.data.assignedBranchIds || [])
+              setStaffAssignedRouteIds(meRes.data.assignedRouteIds || [])
+            }
+          } catch (_) {
+            setStaffAssignedBranchIds([])
+            setStaffAssignedRouteIds([])
+          }
+        }
+
+        const [bRes, rRes] = await Promise.all([
+          branchesAPI.getBranches().catch(() => ({ success: false })),
+          routesAPI.getRoutes().catch(() => ({ success: false }))
+        ])
+
+        if (bRes?.success && bRes?.data) {
+          let branchList = bRes.data
+          // Filter branches for staff
+          if (user && !isAdminOrOwner(user) && staffAssignedBranchIds.length > 0) {
+            branchList = branchList.filter(b => staffAssignedBranchIds.includes(b.id))
+          }
+          setBranches(branchList)
+          // Auto-select if only 1 branch for staff
+          if (user && !isAdminOrOwner(user) && branchList.length === 1) {
+            setSelectedBranchId(String(branchList[0].id))
+            setValue('branchId', branchList[0].id)
+          }
+        }
+
+        if (rRes?.success && rRes?.data) {
+          let routeList = rRes.data
+          // Filter routes for staff
+          if (user && !isAdminOrOwner(user) && staffAssignedRouteIds.length > 0) {
+            routeList = routeList.filter(r => staffAssignedRouteIds.includes(r.id))
+          }
+          setRoutes(routeList)
+        }
+      } catch (error) {
+        console.error('Failed to load branches/routes:', error)
+      }
+    }
+    loadBranchesAndRoutes()
+  }, [user, staffAssignedBranchIds, staffAssignedRouteIds, setValue])
+
+  // Filter routes when branch changes
+  useEffect(() => {
+    if (watchedBranchId) {
+      const branchId = parseInt(watchedBranchId, 10)
+      setSelectedBranchId(watchedBranchId)
+      // Routes will be filtered in the dropdown based on selectedBranchId
+    } else {
+      setSelectedBranchId('')
+    }
+  }, [watchedBranchId])
+
+  // Load recurring expenses for owners/admins
+  useEffect(() => {
+    const loadRecurringExpenses = async () => {
+      if (isAdminOrOwner(user)) {
+        try {
+          const response = await expensesAPI.getRecurringExpenses()
+          if (response?.success && response?.data) {
+            setRecurringExpenses(response.data)
+          }
+        } catch (error) {
+          console.error('Failed to load recurring expenses:', error)
+        }
+      }
+    }
+    loadRecurringExpenses()
+  }, [user])
+
   useEffect(() => {
     fetchCategories()
     fetchExpenses()
@@ -199,6 +299,7 @@ const ExpensesPage = () => {
 
       if (selectedExpense) {
         const response = await expensesAPI.updateExpense(selectedExpense.id, {
+          branchId: data.branchId ? parseInt(data.branchId, 10) : null,
           categoryId: parseInt(data.category),
           amount: parseFloat(data.amount),
           date: expenseDate,
@@ -213,11 +314,41 @@ const ExpensesPage = () => {
         }
       } else {
         const response = await expensesAPI.createExpense({
+          branchId: data.branchId ? parseInt(data.branchId, 10) : null,
+          routeId: data.routeId ? parseInt(data.routeId, 10) : null,
           categoryId: parseInt(data.category),
           amount: parseFloat(data.amount),
           date: expenseDate,
-          note: data.note || ''
+          note: data.note || '',
+          attachmentUrl: null, // Will be uploaded after creation
+          recurringExpenseId: data.recurringExpenseId ? parseInt(data.recurringExpenseId, 10) : null
         })
+        
+        // Upload attachment after expense creation
+        if (attachmentFile && response?.success && response?.data?.id) {
+          setUploadingAttachment(true)
+          try {
+            const uploadResponse = await expensesAPI.uploadAttachment(response.data.id, attachmentFile)
+            if (uploadResponse?.success) {
+              // Update expense with attachment URL
+              await expensesAPI.updateExpense(response.data.id, {
+                branchId: data.branchId ? parseInt(data.branchId, 10) : null,
+                routeId: data.routeId ? parseInt(data.routeId, 10) : null,
+                categoryId: parseInt(data.category),
+                amount: parseFloat(data.amount),
+                date: expenseDate,
+                note: data.note || '',
+                attachmentUrl: uploadResponse.data,
+                recurringExpenseId: data.recurringExpenseId ? parseInt(data.recurringExpenseId, 10) : null
+              })
+            }
+          } catch (error) {
+            console.error('Failed to upload attachment:', error)
+            toast.error('Expense created but attachment upload failed')
+          } finally {
+            setUploadingAttachment(false)
+          }
+        }
 
         if (response?.success) {
           toast.success('Expense added successfully!', { id: 'expense-add', duration: 4000 })
@@ -231,6 +362,8 @@ const ExpensesPage = () => {
       setShowAddModal(false)
       setShowEditModal(false)
       setSelectedExpense(null)
+      setAttachmentFile(null)
+      setAttachmentPreview(null)
       setCurrentPage(1)
       fetchExpenses()
     } catch (error) {
@@ -243,12 +376,121 @@ const ExpensesPage = () => {
     setSelectedExpense(expense)
     setValue('category', expense.categoryId || '')
     setValue('amount', expense.amount || 0)
+    setValue('branchId', expense.branchId ? String(expense.branchId) : '')
+    setValue('routeId', expense.routeId ? String(expense.routeId) : '')
+    setValue('recurringExpenseId', expense.recurringExpenseId ? String(expense.recurringExpenseId) : '')
     const expenseDate = expense.date
       ? new Date(expense.date).toISOString().split('T')[0]
       : new Date().toISOString().split('T')[0]
     setValue('date', expenseDate)
     setValue('note', expense.note || '')
+    setAttachmentPreview(expense.attachmentUrl ? `/uploads/${expense.attachmentUrl}` : null)
     setShowEditModal(true)
+  }
+  
+  const handleAttachmentChange = (e) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      // Validate file type
+      const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf']
+      if (!allowedTypes.includes(file.type)) {
+        toast.error('Invalid file type. Allowed: JPG, PNG, GIF, PDF')
+        return
+      }
+      
+      // Validate file size (10MB max)
+      if (file.size > 10 * 1024 * 1024) {
+        toast.error('File size too large. Maximum 10MB allowed.')
+        return
+      }
+      
+      setAttachmentFile(file)
+      
+      // Create preview for images
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          setAttachmentPreview(reader.result)
+        }
+        reader.readAsDataURL(file)
+      } else {
+        setAttachmentPreview(null)
+      }
+    }
+  }
+  
+  const handleApproveExpense = async (expenseId) => {
+    try {
+      const response = await expensesAPI.approveExpense(expenseId)
+      if (response?.success) {
+        toast.success('Expense approved successfully!')
+        fetchExpenses()
+      } else {
+        toast.error(response?.message || 'Failed to approve expense')
+      }
+    } catch (error) {
+      console.error('Failed to approve expense:', error)
+      toast.error(error?.response?.data?.message || 'Failed to approve expense')
+    }
+  }
+  
+  const handleRejectExpense = async (expenseId) => {
+    setDangerModal({
+      isOpen: true,
+      title: 'Reject Expense',
+      message: 'Please provide a reason for rejecting this expense:',
+      confirmLabel: 'Reject Expense',
+      showInput: true,
+      inputPlaceholder: 'Rejection reason',
+      defaultValue: '',
+      onConfirm: async (reason) => {
+        try {
+          const response = await expensesAPI.rejectExpense(expenseId, reason)
+          if (response?.success) {
+            toast.success('Expense rejected successfully!')
+            fetchExpenses()
+          } else {
+            toast.error(response?.message || 'Failed to reject expense')
+          }
+        } catch (error) {
+          console.error('Failed to reject expense:', error)
+          toast.error(error?.response?.data?.message || 'Failed to reject expense')
+        }
+      }
+    })
+  }
+  
+  const handleDownloadAttachment = (expense) => {
+    if (expense.attachmentUrl) {
+      const url = `/uploads/${expense.attachmentUrl}`
+      window.open(url, '_blank')
+    }
+  }
+  
+  const getStatusIcon = (status) => {
+    switch (status?.toLowerCase()) {
+      case 'approved':
+        return <CheckCircle className="h-4 w-4 text-green-500" />
+      case 'rejected':
+        return <XCircle className="h-4 w-4 text-red-500" />
+      case 'pending':
+        return <Clock className="h-4 w-4 text-yellow-500" />
+      default:
+        return <CheckCircle className="h-4 w-4 text-green-500" />
+    }
+  }
+  
+  const getStatusColor = (status) => {
+    switch (status?.toLowerCase()) {
+      case 'approved':
+        return 'bg-green-100 text-green-800'
+      case 'rejected':
+        return 'bg-red-100 text-red-800'
+      case 'pending':
+        return 'bg-yellow-100 text-yellow-800'
+      default:
+        return 'bg-green-100 text-green-800'
+    }
   }
 
   const handleDelete = (expenseId) => {
@@ -371,6 +613,17 @@ const ExpensesPage = () => {
               <span className="hidden sm:inline">Add Expense</span>
               <span className="sm:hidden">Add</span>
             </button>
+            {isAdminOrOwner(user) && (
+              <button
+                onClick={() => setShowRecurringModal(true)}
+                className="px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2 bg-purple-600 text-white rounded font-medium hover:bg-purple-700 flex items-center justify-center text-xs sm:text-sm flex-1 sm:flex-none min-h-[44px]"
+                title="Manage recurring expenses"
+              >
+                <Repeat className="h-3.5 w-3.5 sm:h-4 sm:w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Recurring</span>
+                <span className="sm:hidden">Repeat</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -654,8 +907,11 @@ const ExpensesPage = () => {
                 <thead className="bg-lime-100">
                   <tr>
                     <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Category</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Branch</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Route</th>
                     <th className="px-4 py-3 text-right font-semibold text-gray-700 border-r border-lime-300">Amount</th>
                     <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Date</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Status</th>
                     <th className="px-4 py-3 text-left font-semibold text-gray-700">Note</th>
                     <th className="px-4 py-3 text-center font-semibold text-gray-700">Actions</th>
                   </tr>
@@ -663,7 +919,7 @@ const ExpensesPage = () => {
                 <tbody className="divide-y divide-lime-200">
                   {filteredExpenses.length === 0 ? (
                     <tr>
-                      <td colSpan="5" className="px-6 py-8 text-center text-gray-500">
+                      <td colSpan="9" className="px-6 py-8 text-center text-gray-500">
                         {user && !isAdminOrOwner(user)
                           ? 'No expenses in your assigned branch(es) for this period.'
                           : 'No expenses found'}
@@ -681,16 +937,57 @@ const ExpensesPage = () => {
                             <span className="font-medium text-gray-900">{expense.categoryName}</span>
                           </div>
                         </td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-lime-300">
+                          {expense.branchName || '-'}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-lime-300">
+                          {expense.routeName || '-'}
+                        </td>
                         <td className="px-4 py-4 whitespace-nowrap text-right font-medium text-gray-900">
                           {formatCurrency(expense.amount)}
                         </td>
                         <td className="px-4 py-4 whitespace-nowrap text-gray-900">
                           {expense.date ? new Date(expense.date).toLocaleDateString('en-GB') : '-'}
                         </td>
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          <div className="flex items-center">
+                            {getStatusIcon(expense.status)}
+                            <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(expense.status)}`}>
+                              {expense.status || 'Approved'}
+                            </span>
+                          </div>
+                        </td>
                         <td className="px-4 py-4 text-gray-900">
                           {expense.note || '-'}
                         </td>
                         <td className="px-4 py-4 whitespace-nowrap text-center space-x-2">
+                          {expense.attachmentUrl && (
+                            <button
+                              onClick={() => handleDownloadAttachment(expense.attachmentUrl)}
+                              className="text-blue-600 hover:text-blue-900"
+                              title="View Receipt"
+                            >
+                              <FileText className="h-4 w-4" />
+                            </button>
+                          )}
+                          {isAdminOrOwner(user) && expense.status === 'Pending' && (
+                            <>
+                              <button
+                                onClick={() => handleApproveExpense(expense.id)}
+                                className="text-green-600 hover:text-green-900"
+                                title="Approve"
+                              >
+                                <CheckCircle className="h-4 w-4" />
+                              </button>
+                              <button
+                                onClick={() => handleRejectExpense(expense.id)}
+                                className="text-red-600 hover:text-red-900"
+                                title="Reject"
+                              >
+                                <XCircle className="h-4 w-4" />
+                              </button>
+                            </>
+                          )}
                           <button
                             onClick={() => handleEdit(expense)}
                             className="text-indigo-600 hover:text-indigo-900"
@@ -732,6 +1029,34 @@ const ExpensesPage = () => {
                           <p className="text-sm font-semibold text-gray-900">{expense.categoryName || 'Uncategorized'}</p>
                         </div>
                         <p className="text-xs text-gray-500 mt-0.5">{expense.note || 'No description'}</p>
+                        {(expense.branchName || expense.routeName) && (
+                          <p className="text-xs text-blue-600 mt-1">
+                            {expense.branchName && `Branch: ${expense.branchName}`}
+                            {expense.branchName && expense.routeName && ' · '}
+                            {expense.routeName && `Route: ${expense.routeName}`}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-2 mt-1">
+                          {expense.status === 'Approved' && <CheckCircle className="h-3 w-3 text-green-500" />}
+                          {expense.status === 'Rejected' && <XCircle className="h-3 w-3 text-red-500" />}
+                          {expense.status === 'Pending' && <Clock className="h-3 w-3 text-yellow-500" />}
+                          <span className={`text-xs font-semibold ${
+                            expense.status === 'Approved' ? 'text-green-700' :
+                            expense.status === 'Rejected' ? 'text-red-700' :
+                            'text-yellow-700'
+                          }`}>
+                            {expense.status || 'Approved'}
+                          </span>
+                          {expense.attachmentUrl && (
+                            <button
+                              onClick={() => handleDownloadAttachment(expense.attachmentUrl)}
+                              className="text-blue-600 hover:text-blue-900"
+                              title="View receipt"
+                            >
+                              <FileText className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <p className="text-base font-bold text-red-600 ml-2">{formatCurrency(expense.amount)}</p>
                     </div>
@@ -740,6 +1065,24 @@ const ExpensesPage = () => {
                         <span>{expense.date ? new Date(expense.date).toLocaleDateString('en-GB') : '-'}</span>
                       </div>
                       <div className="flex items-center gap-2">
+                        {isAdminOrOwner(user) && expense.status === 'Pending' && (
+                          <>
+                            <button
+                              onClick={() => handleApproveExpense(expense.id)}
+                              className="text-green-600 hover:text-green-900 p-1"
+                              title="Approve"
+                            >
+                              <CheckCircle className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => handleRejectExpense(expense.id)}
+                              className="text-red-600 hover:text-red-900 p-1"
+                              title="Reject"
+                            >
+                              <XCircle className="h-4 w-4" />
+                            </button>
+                          </>
+                        )}
                         <button
                           onClick={() => handleEdit(expense)}
                           className="text-indigo-600 hover:text-indigo-900 p-1"
@@ -747,13 +1090,15 @@ const ExpensesPage = () => {
                         >
                           <Edit className="h-4 w-4" />
                         </button>
-                        <button
-                          onClick={() => handleDelete(expense.id)}
-                          className="text-red-600 hover:text-red-900 p-1"
-                          title="Delete expense"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        {isAdminOrOwner(user) && (
+                          <button
+                            onClick={() => handleDelete(expense.id)}
+                            className="text-red-600 hover:text-red-900 p-1"
+                            title="Delete expense"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -848,6 +1193,39 @@ const ExpensesPage = () => {
               {...register('date', { required: 'Date is required' })}
             />
 
+            {/* BRANCH/ROUTE ASSIGNMENT FIX: Add Branch and Route dropdowns */}
+            <Select
+              label="Branch (Optional)"
+              options={[
+                { value: '', label: 'Company Level (No Branch)' },
+                ...branches.map(branch => ({
+                  value: branch.id,
+                  label: branch.name
+                }))
+              ]}
+              error={errors.branchId?.message}
+              {...register('branchId', {
+                onChange: (e) => {
+                  setValue('branchId', e.target.value)
+                  setValue('routeId', '')
+                }
+              })}
+            />
+            {branches.length > 0 && (
+              <Select
+                label="Route (Optional)"
+                options={[
+                  { value: '', label: watchedBranchId ? 'Select route' : 'Select branch first' },
+                  ...(watchedBranchId ? routes.filter(r => r.branchId === parseInt(watchedBranchId, 10)) : []).map(r => ({
+                    value: r.id,
+                    label: r.name
+                  }))
+                ]}
+                error={errors.routeId?.message}
+                {...register('routeId')}
+              />
+            )}
+
             <TextArea
               label="Note"
               placeholder="Expense description..."
@@ -855,6 +1233,45 @@ const ExpensesPage = () => {
               error={errors.note?.message}
               {...register('note')}
             />
+
+            {/* ATTACHMENT FIX: Add receipt/attachment upload */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Receipt/Attachment (Optional)
+              </label>
+              <div className="mt-1 flex items-center gap-3">
+                <label className="cursor-pointer inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50">
+                  <Upload className="h-4 w-4 mr-2" />
+                  {attachmentFile ? attachmentFile.name : 'Choose File'}
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept="image/*,.pdf"
+                    onChange={handleAttachmentChange}
+                  />
+                </label>
+                {attachmentPreview && (
+                  <div className="flex items-center gap-2">
+                    {attachmentFile?.type?.startsWith('image/') ? (
+                      <img src={attachmentPreview} alt="Preview" className="h-12 w-12 object-cover rounded border" />
+                    ) : (
+                      <FileText className="h-8 w-8 text-blue-600" />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAttachmentFile(null)
+                        setAttachmentPreview(null)
+                      }}
+                      className="text-red-600 hover:text-red-800"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-gray-500">Supported: JPG, PNG, GIF, PDF (Max 10MB)</p>
+            </div>
           </div>
 
           <div className="flex justify-end space-x-3">
@@ -862,19 +1279,22 @@ const ExpensesPage = () => {
               type="button"
               onClick={() => {
                 setShowAddModal(false)
+                setAttachmentFile(null)
+                setAttachmentPreview(null)
                 reset()
               }}
               className="px-4 py-2 border-2 border-lime-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-lime-50"
             >
               Cancel
             </button>
-            <button
+            <LoadingButton
               type="submit"
+              loading={uploadingAttachment}
               className="px-4 py-2 bg-green-600 text-white rounded-md text-sm font-medium hover:bg-green-700 flex items-center min-h-[44px]"
             >
               <Save className="h-4 w-4 mr-2" />
-              Add Expense
-            </button>
+              {uploadingAttachment ? 'Uploading...' : 'Add Expense'}
+            </LoadingButton>
           </div>
         </form>
       </Modal>
@@ -941,6 +1361,39 @@ const ExpensesPage = () => {
               />
             </div>
 
+            {/* BRANCH/ROUTE ASSIGNMENT FIX: Add Branch and Route dropdowns in edit modal */}
+            <Select
+              label="Branch (Optional)"
+              options={[
+                { value: '', label: 'Company Level (No Branch)' },
+                ...branches.map(branch => ({
+                  value: branch.id,
+                  label: branch.name
+                }))
+              ]}
+              error={errors.branchId?.message}
+              {...register('branchId', {
+                onChange: (e) => {
+                  setValue('branchId', e.target.value)
+                  setValue('routeId', '')
+                }
+              })}
+            />
+            {branches.length > 0 && (
+              <Select
+                label="Route (Optional)"
+                options={[
+                  { value: '', label: watchedBranchId ? 'Select route' : 'Select branch first' },
+                  ...(watchedBranchId ? routes.filter(r => r.branchId === parseInt(watchedBranchId, 10)) : []).map(r => ({
+                    value: r.id,
+                    label: r.name
+                  }))
+                ]}
+                error={errors.routeId?.message}
+                {...register('routeId')}
+              />
+            )}
+
             <TextArea
               label="Note"
               placeholder="Expense description..."
@@ -948,6 +1401,55 @@ const ExpensesPage = () => {
               error={errors.note?.message}
               {...register('note')}
             />
+
+            {/* ATTACHMENT FIX: Add receipt/attachment upload in edit modal */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Receipt/Attachment (Optional)
+              </label>
+              <div className="mt-1 flex items-center gap-3">
+                <label className="cursor-pointer inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50">
+                  <Upload className="h-4 w-4 mr-2" />
+                  {attachmentFile ? attachmentFile.name : (selectedExpense?.attachmentUrl ? 'Change File' : 'Choose File')}
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept="image/*,.pdf"
+                    onChange={handleAttachmentChange}
+                  />
+                </label>
+                {attachmentPreview && (
+                  <div className="flex items-center gap-2">
+                    {attachmentFile?.type?.startsWith('image/') ? (
+                      <img src={attachmentPreview} alt="Preview" className="h-12 w-12 object-cover rounded border" />
+                    ) : (
+                      <FileText className="h-8 w-8 text-blue-600" />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAttachmentFile(null)
+                        setAttachmentPreview(null)
+                      }}
+                      className="text-red-600 hover:text-red-800"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+                {selectedExpense?.attachmentUrl && !attachmentFile && (
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttachment(selectedExpense.attachmentUrl)}
+                    className="text-blue-600 hover:text-blue-800 flex items-center gap-1 text-sm"
+                  >
+                    <Eye className="h-4 w-4" />
+                    View Current
+                  </button>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-gray-500">Supported: JPG, PNG, GIF, PDF (Max 10MB)</p>
+            </div>
           </div>
 
           <div className="flex justify-end space-x-3">
@@ -956,22 +1458,98 @@ const ExpensesPage = () => {
               onClick={() => {
                 setShowEditModal(false)
                 setSelectedExpense(null)
+                setAttachmentFile(null)
+                setAttachmentPreview(null)
                 reset()
               }}
               className="px-4 py-2 border-2 border-lime-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-lime-50"
             >
               Cancel
             </button>
-            <button
+            <LoadingButton
               type="submit"
+              loading={uploadingAttachment}
               className="px-4 py-2 bg-green-600 text-white rounded-md text-sm font-medium hover:bg-green-700 flex items-center min-h-[44px]"
             >
               <Save className="h-4 w-4 mr-2" />
-              Update Expense
-            </button>
+              {uploadingAttachment ? 'Uploading...' : 'Update Expense'}
+            </LoadingButton>
           </div>
         </form>
       </Modal>
+      {/* Recurring Expenses Modal */}
+      {isAdminOrOwner(user) && (
+        <Modal
+          isOpen={showRecurringModal}
+          onClose={() => {
+            setShowRecurringModal(false)
+          }}
+          title="Recurring Expenses"
+          size="lg"
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600 mb-4">
+              Set up expenses that repeat automatically (e.g., monthly rent, weekly fuel).
+            </p>
+            
+            <button
+              onClick={() => {
+                // TODO: Open create recurring expense form
+                toast.info('Recurring expense creation coming soon')
+              }}
+              className="w-full px-4 py-2 bg-purple-600 text-white rounded-md text-sm font-medium hover:bg-purple-700 flex items-center justify-center min-h-[44px]"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Create Recurring Expense
+            </button>
+
+            {recurringExpenses.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                <Repeat className="h-12 w-12 mx-auto mb-4 text-gray-400" />
+                <p>No recurring expenses configured</p>
+                <p className="text-xs mt-1">Create one to automate expense entry</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {recurringExpenses.map((recurring) => (
+                  <div key={recurring.id} className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="font-semibold text-gray-900">{recurring.categoryName}</p>
+                        <p className="text-sm text-gray-600">{formatCurrency(recurring.amount)}</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {recurring.frequency} • {recurring.isActive ? 'Active' : 'Inactive'}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            // TODO: Edit recurring expense
+                            toast.info('Edit recurring expense coming soon')
+                          }}
+                          className="text-indigo-600 hover:text-indigo-900"
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            // TODO: Delete recurring expense
+                            toast.info('Delete recurring expense coming soon')
+                          }}
+                          className="text-red-600 hover:text-red-900"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+
       {/* Edit Expense Modal same as add modal but with title change */}
       <ConfirmDangerModal
         isOpen={dangerModal.isOpen}

@@ -8,6 +8,8 @@ using Npgsql;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using HexaBill.Api.Modules.SuperAdmin;
 
 namespace HexaBill.Api.Modules.Notifications
 {
@@ -30,11 +32,15 @@ namespace HexaBill.Api.Modules.Notifications
     {
         private readonly AppDbContext _context;
         private readonly ILogger<AlertService> _logger;
+        private readonly IServiceProvider _serviceProvider;
+        private readonly ISettingsService _settingsService;
 
-        public AlertService(AppDbContext context, ILogger<AlertService> logger)
+        public AlertService(AppDbContext context, ILogger<AlertService> logger, IServiceProvider serviceProvider, ISettingsService settingsService)
         {
             _context = context;
             _logger = logger;
+            _serviceProvider = serviceProvider;
+            _settingsService = settingsService;
         }
 
         public async Task CreateAlertAsync(AlertType type, string title, string? message = null, AlertSeverity severity = AlertSeverity.Info, Dictionary<string, object>? metadata = null)
@@ -337,28 +343,80 @@ namespace HexaBill.Api.Modules.Notifications
 
         private async Task CheckLowStockAlertsAsync()
         {
-            var lowStockProducts = await _context.Products
-                .Where(p => p.StockQty <= p.ReorderLevel && p.ReorderLevel > 0)
-                .ToListAsync();
-
-            if (lowStockProducts.Any())
+            // #55: Per-product ReorderLevel or global fallback per tenant
+            var tenantIds = await _context.Products.Where(p => p.IsActive && p.TenantId.HasValue).Select(p => p.TenantId!.Value).Distinct().ToListAsync();
+            foreach (var tenantId in tenantIds)
             {
-                var lastLowStockAlert = await _context.Alerts
-                    .Where(a => a.Type == AlertType.LowStock.ToString() && !a.IsResolved)
-                    .OrderByDescending(a => a.CreatedAt)
-                    .FirstOrDefaultAsync();
+                var settings = await _settingsService.GetOwnerSettingsAsync(tenantId);
+                int? globalThreshold = null;
+                if (settings.TryGetValue("LOW_STOCK_GLOBAL_THRESHOLD", out var v) && !string.IsNullOrWhiteSpace(v) && int.TryParse(v.Trim(), out int gt) && gt > 0)
+                    globalThreshold = gt;
 
-                if (lastLowStockAlert == null || lastLowStockAlert.CreatedAt < DateTime.UtcNow.AddHours(-12))
+                var query = _context.Products.Where(p => p.TenantId == tenantId && p.IsActive);
+                if (globalThreshold.HasValue && globalThreshold.Value > 0)
+                    query = query.Where(p => (p.ReorderLevel > 0 && p.StockQty <= p.ReorderLevel) || (p.ReorderLevel == 0 && p.StockQty <= globalThreshold.Value));
+                else
+                    query = query.Where(p => p.ReorderLevel > 0 && p.StockQty <= p.ReorderLevel);
+                var lowStockProducts = await query.ToListAsync();
+
+                if (lowStockProducts.Any())
                 {
-                    var productList = string.Join(", ", lowStockProducts.Take(5).Select(p => $"{p.NameEn} ({p.StockQty})"));
-                    await CreateAlertAsync(AlertType.LowStock, 
-                        $"{lowStockProducts.Count} products below reorder level", 
-                        productList, 
-                        AlertSeverity.Warning,
-                        new Dictionary<string, object> { 
+                    var lastLowStockAlert = await _context.Alerts
+                        .Where(a => a.Type == AlertType.LowStock.ToString() && 
+                                   !a.IsResolved && 
+                                   a.TenantId == tenantId)
+                        .OrderByDescending(a => a.CreatedAt)
+                        .FirstOrDefaultAsync();
+
+                    // Create alert if none exists or last alert is older than 12 hours
+                    if (lastLowStockAlert == null || lastLowStockAlert.CreatedAt < DateTime.UtcNow.AddHours(-12))
+                    {
+                        var productList = string.Join(", ", lowStockProducts.Take(5).Select(p => $"{p.NameEn} ({p.StockQty})"));
+                        var alertMetadata = new Dictionary<string, object> { 
                             { "ProductIds", lowStockProducts.Select(p => p.Id).ToList() },
-                            { "Count", lowStockProducts.Count }
-                        });
+                            { "Count", lowStockProducts.Count },
+                            { "TenantId", tenantId }
+                        };
+
+                        await CreateAlertAsync(AlertType.LowStock, 
+                            $"{lowStockProducts.Count} products below reorder level", 
+                            productList, 
+                            AlertSeverity.Warning,
+                            alertMetadata);
+
+                        // Trigger automation notification (email/WhatsApp)
+                        try
+                        {
+                            var automationProvider = _serviceProvider.GetService<HexaBill.Api.Modules.Automation.IAutomationProvider>();
+                            if (automationProvider != null)
+                            {
+                                var automationPayload = new
+                                {
+                                    TenantId = tenantId,
+                                    ProductCount = lowStockProducts.Count,
+                                    Products = lowStockProducts.Select(p => new
+                                    {
+                                        Id = p.Id,
+                                        Name = p.NameEn,
+                                        SKU = p.Sku,
+                                        StockQty = p.StockQty,
+                                        ReorderLevel = p.ReorderLevel
+                                    }).ToList(),
+                                    Message = $"You have {lowStockProducts.Count} products below reorder level. Please restock soon."
+                                };
+
+                                await automationProvider.NotifyAsync(
+                                    HexaBill.Api.Modules.Automation.AutomationEvents.LowStock,
+                                    tenantId,
+                                    automationPayload
+                                );
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Failed to send low stock automation notification for tenant {TenantId}", tenantId);
+                        }
+                    }
                 }
             }
         }

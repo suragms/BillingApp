@@ -3,6 +3,9 @@ Purpose: Super Admin Tenant Management Service
 Author: AI Assistant
 Date: 2026-02-11
 */
+using System.Globalization;
+using System.IO.Compression;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
@@ -35,8 +38,82 @@ namespace HexaBill.Api.Modules.SuperAdmin
         Task<SubscriptionDto?> UpdateTenantSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle);
         /// <summary>Duplicate data from source tenant to target tenant (Products, Settings). SystemAdmin only.</summary>
         Task<DuplicateDataResultDto> DuplicateDataToTenantAsync(int targetTenantId, int sourceTenantId, IReadOnlyList<string> dataTypes);
+        /// <summary>Preview what would be copied: counts from source and existing counts in target. For UI before running duplicate.</summary>
+        Task<DuplicateDataPreviewDto> GetDuplicateDataPreviewAsync(int targetTenantId, int sourceTenantId, IReadOnlyList<string> dataTypes);
         Task<TenantLimitsDto> GetTenantLimitsAsync(int tenantId);
         Task UpdateTenantLimitsAsync(int tenantId, TenantLimitsDto dto);
+        /// <summary>Onboarding tracker: completion steps per tenant; list incomplete. (PRODUCTION_MASTER_TODO #46)</summary>
+        Task<OnboardingReportDto> GetOnboardingReportAsync(bool incompleteOnly = false);
+        /// <summary>Bulk tenant actions: extend trial, send announcement. (PRODUCTION_MASTER_TODO #48)</summary>
+        Task<BulkActionResultDto> ExecuteBulkActionAsync(BulkActionRequest request);
+        /// <summary>List tenant invoices (read-only, no impersonation). (PRODUCTION_MASTER_TODO #50)</summary>
+        Task<PagedResponse<TenantInvoiceListItemDto>> GetTenantInvoicesAsync(int tenantId, int page = 1, int pageSize = 20);
+        /// <summary>Subscription/payment history for tenant (when paid, renewals, payment method). (PRODUCTION_MASTER_TODO #51)</summary>
+        Task<List<TenantPaymentHistoryItemDto>> GetTenantPaymentHistoryAsync(int tenantId);
+        /// <summary>Export tenant key data (invoices, customers, products) as ZIP of CSVs for offboarding/compliance. (PRODUCTION_MASTER_TODO #52)</summary>
+        Task<(Stream stream, string fileName)> ExportTenantDataAsync(int tenantId);
+    }
+
+    public class TenantPaymentHistoryItemDto
+    {
+        public int Id { get; set; }
+        public string PlanName { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+        public string BillingCycle { get; set; } = string.Empty;
+        public DateTime StartDate { get; set; }
+        public DateTime? EndDate { get; set; }
+        public DateTime? ExpiresAt { get; set; }
+        public DateTime? NextBillingDate { get; set; }
+        public decimal Amount { get; set; }
+        public string Currency { get; set; } = "AED";
+        public string? PaymentMethod { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? CancelledAt { get; set; }
+        public string? PaymentGatewaySubscriptionId { get; set; }
+    }
+
+    public class TenantInvoiceListItemDto
+    {
+        public int Id { get; set; }
+        public string InvoiceNo { get; set; } = string.Empty;
+        public DateTime InvoiceDate { get; set; }
+        public string? CustomerName { get; set; }
+        public decimal GrandTotal { get; set; }
+        public decimal PaidAmount { get; set; }
+        public string PaymentStatus { get; set; } = string.Empty;
+        public DateTime CreatedAt { get; set; }
+    }
+
+    /// <summary>Internal DTO for tenant data export CSV. (PRODUCTION_MASTER_TODO #52)</summary>
+    internal record ExportInvoiceRow(int Id, string InvoiceNo, DateTime InvoiceDate, string? CustomerName, decimal Subtotal, decimal VatTotal, decimal Discount, decimal GrandTotal, decimal PaidAmount, string Status, DateTime? DueDate, string? Notes, DateTime CreatedAt);
+
+    internal record ExportCustomerRow(int Id, string Name, string? Phone, string? Email, string? Trn, string? Address, decimal CreditLimit, string CustomerType, string? PaymentTerms, DateTime CreatedAt);
+
+    internal record ExportProductRow(int Id, string Sku, string? Barcode, string NameEn, string? NameAr, string UnitType, decimal ConversionToBase, decimal CostPrice, decimal SellPrice, decimal StockQty, int ReorderLevel, DateTime? ExpiryDate, bool IsActive, DateTime CreatedAt, DateTime UpdatedAt);
+
+    public class BulkActionRequest
+    {
+        public List<int> TenantIds { get; set; } = new();
+        public string Action { get; set; } = string.Empty; // "extend_trial" | "send_announcement"
+        public int? Days { get; set; }
+        public string? Title { get; set; }
+        public string? Message { get; set; }
+        public string? Severity { get; set; }
+    }
+
+    public class BulkActionItemResultDto
+    {
+        public int TenantId { get; set; }
+        public string TenantName { get; set; } = string.Empty;
+        public bool Success { get; set; }
+        public string? ErrorMessage { get; set; }
+    }
+
+    public class BulkActionResultDto
+    {
+        public List<BulkActionItemResultDto> Results { get; set; } = new();
+        public int SuccessCount { get; set; }
+        public int FailureCount { get; set; }
     }
 
     public class TenantLimitsDto
@@ -45,6 +122,29 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public int MaxConcurrentUsers { get; set; } = 50;
         public int MaxStorageMb { get; set; } = 1024;
         public int MaxInvoicesPerMonth { get; set; } = 1000;
+    }
+
+    /// <summary>Tenant onboarding completion (5 steps: Company, VAT, Product, Customer, Invoice).</summary>
+    public class TenantOnboardingDto
+    {
+        public int TenantId { get; set; }
+        public string TenantName { get; set; } = string.Empty;
+        public string? Status { get; set; }
+        public bool Step1CompanyInfo { get; set; }
+        public bool Step2VatSetup { get; set; }
+        public bool Step3HasProduct { get; set; }
+        public bool Step4HasCustomer { get; set; }
+        public bool Step5HasInvoice { get; set; }
+        public int CompletedSteps { get; set; }
+        public bool IsComplete => CompletedSteps >= 5;
+    }
+
+    public class OnboardingReportDto
+    {
+        public List<TenantOnboardingDto> Tenants { get; set; } = new();
+        public int TotalTenants { get; set; }
+        public int CompleteCount { get; set; }
+        public int IncompleteCount { get; set; }
     }
 
     public class SuperAdminTenantService : ISuperAdminTenantService
@@ -109,15 +209,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 // Calculate MRR - handle case where Subscriptions table might not exist or be empty
                 decimal mrr = 0;
+                bool hasSubscriptionData = false;
                 try
                 {
-                    // Check if Subscriptions table exists by trying to query it
                     if (await _context.Database.CanConnectAsync())
                     {
                         try
                         {
-                            var hasSubscriptions = await _context.Subscriptions.AnyAsync();
-                            if (hasSubscriptions)
+                            hasSubscriptionData = await _context.Subscriptions.AnyAsync();
+                            if (hasSubscriptionData)
                             {
                                 mrr = await _context.Subscriptions
                                     .Include(s => s.Plan)
@@ -127,7 +227,6 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         }
                         catch (Exception ex)
                         {
-                            // Table might not exist - that's OK, default to 0
                             System.Diagnostics.Debug.WriteLine($"MRR query failed (table may not exist): {ex.Message}");
                             mrr = 0;
                         }
@@ -135,12 +234,32 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 }
                 catch
                 {
-                    // If database connection check fails, default to 0
                     mrr = 0;
                 }
 
                 var storageEstimate = totalInvoices + totalCustomers + totalProducts + totalUsers;
                 var estimatedStorageUsedMb = (int)Math.Ceiling(storageEstimate * 0.002); // rough row-based proxy
+                var isRealDatabaseSize = false;
+                try
+                {
+                    // PostgreSQL: real database size in bytes -> MB
+                    var sizeBytes = await _context.Database
+                        .SqlQueryRaw<long>("SELECT pg_database_size(current_database()) AS \"Value\"")
+                        .FirstOrDefaultAsync();
+                    if (sizeBytes > 0)
+                    {
+                        estimatedStorageUsedMb = (int)Math.Ceiling(sizeBytes / (1024.0 * 1024.0));
+                        isRealDatabaseSize = true;
+                    }
+                }
+                catch
+                {
+                    // Not PostgreSQL or query failed: use row-based estimate
+                }
+
+                var storageFormulaDescription = isRealDatabaseSize
+                    ? null
+                    : "(invoices + customers + products + users) × 0.002 MB (row-based estimate)";
 
                 // Trials expiring in next 7 days
                 var now = DateTime.UtcNow;
@@ -177,9 +296,12 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     AvgSalesPerTenant = avgSalesPerTenant,
                     TopTenants = topTenantsDto,
                     Mrr = mrr,
+                    HasSubscriptionData = hasSubscriptionData,
                     TrialsExpiringThisWeek = trialsExpiring,
                     StorageEstimate = storageEstimate,
                     EstimatedStorageUsedMb = estimatedStorageUsedMb,
+                    IsRealDatabaseSize = isRealDatabaseSize,
+                    StorageFormulaDescription = storageFormulaDescription,
                     InfraCostEstimate = infraCostEstimate,
                     Margin = margin,
                     MarginPercent = marginPercent,
@@ -213,15 +335,354 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     AvgSalesPerTenant = 0,
                     TopTenants = new List<TopTenantBySalesDto>(),
                     Mrr = 0,
+                    HasSubscriptionData = false,
                     TrialsExpiringThisWeek = new List<TrialExpiringDto>(),
                     StorageEstimate = 0,
                     EstimatedStorageUsedMb = 0,
+                    IsRealDatabaseSize = false,
+                    StorageFormulaDescription = null,
                     InfraCostEstimate = 0,
                     Margin = 0,
                     MarginPercent = 0,
                     LastUpdated = DateTime.UtcNow
                 };
             }
+        }
+
+        public async Task<OnboardingReportDto> GetOnboardingReportAsync(bool incompleteOnly = false)
+        {
+            var tenants = await _context.Tenants
+                .AsNoTracking()
+                .Select(t => new { t.Id, t.Name, t.Status, t.CompanyNameEn, t.VatNumber, t.Address })
+                .ToListAsync();
+
+            var tenantIds = tenants.Select(t => t.Id).ToList();
+            var productCounts = await _context.Products
+                .Where(p => p.TenantId != null && tenantIds.Contains(p.TenantId.Value))
+                .GroupBy(p => p.TenantId!.Value)
+                .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+            var customerCounts = await _context.Customers
+                .Where(c => c.TenantId != null && tenantIds.Contains(c.TenantId.Value))
+                .GroupBy(c => c.TenantId!.Value)
+                .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+            var saleCounts = await _context.Sales
+                .Where(s => !s.IsDeleted && s.TenantId != null && tenantIds.Contains(s.TenantId.Value))
+                .GroupBy(s => s.TenantId!.Value)
+                .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+
+            var list = new List<TenantOnboardingDto>();
+            foreach (var t in tenants)
+            {
+                var step1 = !string.IsNullOrWhiteSpace(t.CompanyNameEn) || !string.IsNullOrWhiteSpace(t.Address);
+                var step2 = !string.IsNullOrWhiteSpace(t.VatNumber);
+                var step3 = productCounts.GetValueOrDefault(t.Id, 0) > 0;
+                var step4 = customerCounts.GetValueOrDefault(t.Id, 0) > 0;
+                var step5 = saleCounts.GetValueOrDefault(t.Id, 0) > 0;
+                var completed = (step1 ? 1 : 0) + (step2 ? 1 : 0) + (step3 ? 1 : 0) + (step4 ? 1 : 0) + (step5 ? 1 : 0);
+                if (incompleteOnly && completed >= 5) continue;
+                list.Add(new TenantOnboardingDto
+                {
+                    TenantId = t.Id,
+                    TenantName = t.Name ?? "",
+                    Status = t.Status.ToString(),
+                    Step1CompanyInfo = step1,
+                    Step2VatSetup = step2,
+                    Step3HasProduct = step3,
+                    Step4HasCustomer = step4,
+                    Step5HasInvoice = step5,
+                    CompletedSteps = completed
+                });
+            }
+
+            var totalTenants = await _context.Tenants.CountAsync();
+            var completeCount = list.Count(x => x.IsComplete);
+            var incompleteCount = list.Count - completeCount;
+            if (incompleteOnly)
+            {
+                incompleteCount = list.Count;
+                completeCount = totalTenants - incompleteCount;
+            }
+            return new OnboardingReportDto
+            {
+                Tenants = list,
+                TotalTenants = totalTenants,
+                CompleteCount = completeCount,
+                IncompleteCount = incompleteCount
+            };
+        }
+
+        public async Task<BulkActionResultDto> ExecuteBulkActionAsync(BulkActionRequest request)
+        {
+            var results = new List<BulkActionItemResultDto>();
+            if (request?.TenantIds == null || request.TenantIds.Count == 0)
+                return new BulkActionResultDto { Results = results, SuccessCount = 0, FailureCount = 0 };
+
+            var action = (request.Action ?? "").Trim().ToLowerInvariant();
+            if (action != "extend_trial" && action != "send_announcement")
+                return new BulkActionResultDto { Results = results, SuccessCount = 0, FailureCount = 0 };
+
+            var tenantIds = request.TenantIds.Distinct().Take(100).ToList();
+            var tenants = await _context.Tenants
+                .Where(t => tenantIds.Contains(t.Id))
+                .ToDictionaryAsync(t => t.Id, t => t);
+
+            foreach (var tenantId in tenantIds)
+            {
+                var name = tenants.GetValueOrDefault(tenantId)?.Name ?? $"Tenant {tenantId}";
+                try
+                {
+                    if (action == "extend_trial")
+                    {
+                        var days = request.Days ?? 7;
+                        if (days < 1 || days > 365) days = 7;
+                        var tenant = await _context.Tenants.FindAsync(tenantId);
+                        if (tenant == null)
+                        {
+                            results.Add(new BulkActionItemResultDto { TenantId = tenantId, TenantName = name, Success = false, ErrorMessage = "Tenant not found." });
+                            continue;
+                        }
+                        var baseDate = tenant.TrialEndDate.HasValue && tenant.TrialEndDate.Value > DateTime.UtcNow
+                            ? tenant.TrialEndDate.Value
+                            : DateTime.UtcNow;
+                        var newEnd = baseDate.AddDays(days);
+                        tenant.TrialEndDate = newEnd;
+                        var sub = await _context.Subscriptions
+                            .Where(s => s.TenantId == tenantId && s.Status == SubscriptionStatus.Trial)
+                            .OrderByDescending(s => s.CreatedAt)
+                            .FirstOrDefaultAsync();
+                        if (sub != null)
+                            sub.TrialEndDate = newEnd;
+                        await _context.SaveChangesAsync();
+                        results.Add(new BulkActionItemResultDto { TenantId = tenantId, TenantName = name, Success = true });
+                    }
+                    else if (action == "send_announcement")
+                    {
+                        var title = (request.Title ?? "Platform announcement").Trim();
+                        if (string.IsNullOrEmpty(title)) title = "Platform announcement";
+                        var message = (request.Message ?? "").Trim();
+                        var severity = (request.Severity ?? "Info").Trim();
+                        if (string.IsNullOrEmpty(severity)) severity = "Info";
+                        var alert = new Alert
+                        {
+                            TenantId = tenantId,
+                            OwnerId = 0,
+                            Type = "PlatformAnnouncement",
+                            Title = title.Length > 200 ? title.Substring(0, 200) : title,
+                            Message = message.Length > 2000 ? message.Substring(0, 2000) : message,
+                            Severity = severity,
+                            IsRead = false,
+                            IsResolved = false,
+                            CreatedAt = DateTime.UtcNow
+                        };
+                        _context.Alerts.Add(alert);
+                        await _context.SaveChangesAsync();
+                        results.Add(new BulkActionItemResultDto { TenantId = tenantId, TenantName = name, Success = true });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new BulkActionItemResultDto { TenantId = tenantId, TenantName = name, Success = false, ErrorMessage = ex.Message });
+                }
+            }
+
+            return new BulkActionResultDto
+            {
+                Results = results,
+                SuccessCount = results.Count(r => r.Success),
+                FailureCount = results.Count(r => !r.Success)
+            };
+        }
+
+        public async Task<PagedResponse<TenantInvoiceListItemDto>> GetTenantInvoicesAsync(int tenantId, int page = 1, int pageSize = 20)
+        {
+            pageSize = Math.Min(Math.Max(pageSize, 1), 100);
+            var query = _context.Sales
+                .AsNoTracking()
+                .Where(s => s.TenantId == tenantId && !s.IsDeleted)
+                .OrderByDescending(s => s.InvoiceDate)
+                .ThenByDescending(s => s.Id);
+            var totalCount = await query.CountAsync();
+            var items = await query
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(s => new TenantInvoiceListItemDto
+                {
+                    Id = s.Id,
+                    InvoiceNo = s.InvoiceNo ?? "",
+                    InvoiceDate = s.InvoiceDate,
+                    CustomerName = s.Customer != null ? s.Customer.Name : null,
+                    GrandTotal = s.GrandTotal,
+                    PaidAmount = s.PaidAmount,
+                    PaymentStatus = s.PaymentStatus.ToString(),
+                    CreatedAt = s.CreatedAt
+                })
+                .ToListAsync();
+            var totalPages = totalCount == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize);
+            return new PagedResponse<TenantInvoiceListItemDto>
+            {
+                Items = items,
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+                TotalPages = totalPages
+            };
+        }
+
+        public async Task<List<TenantPaymentHistoryItemDto>> GetTenantPaymentHistoryAsync(int tenantId)
+        {
+            var list = await (from s in _context.Subscriptions.AsNoTracking()
+                             join p in _context.SubscriptionPlans on s.PlanId equals p.Id into pj
+                             from p in pj.DefaultIfEmpty()
+                             where s.TenantId == tenantId
+                             orderby s.CreatedAt descending
+                             select new TenantPaymentHistoryItemDto
+                             {
+                                 Id = s.Id,
+                                 PlanName = p != null ? p.Name : "Unknown",
+                                 Status = s.Status.ToString(),
+                                 BillingCycle = s.BillingCycle.ToString(),
+                                 StartDate = s.StartDate,
+                                 EndDate = s.EndDate,
+                                 ExpiresAt = s.ExpiresAt,
+                                 NextBillingDate = s.NextBillingDate,
+                                 Amount = s.Amount,
+                                 Currency = s.Currency ?? "AED",
+                                 PaymentMethod = s.PaymentMethod,
+                                 CreatedAt = s.CreatedAt,
+                                 CancelledAt = s.CancelledAt,
+                                 PaymentGatewaySubscriptionId = s.PaymentGatewaySubscriptionId
+                             })
+                .ToListAsync();
+            return list;
+        }
+
+        /// <summary>Export tenant data as ZIP containing invoices.csv, customers.csv, products.csv. (PRODUCTION_MASTER_TODO #52)</summary>
+        public async Task<(Stream stream, string fileName)> ExportTenantDataAsync(int tenantId)
+        {
+            var tenant = await _context.Tenants.AsNoTracking()
+                .Where(t => t.Id == tenantId)
+                .Select(t => new { t.Name })
+                .FirstOrDefaultAsync();
+            var safeName = string.IsNullOrEmpty(tenant?.Name) ? $"tenant-{tenantId}" : string.Join("_", (tenant!.Name).Split(Path.GetInvalidFileNameChars()));
+            var fileName = $"export_{safeName}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip";
+
+            var mem = new MemoryStream();
+            using (var zip = new ZipArchive(mem, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                var sales = await _context.Sales.AsNoTracking()
+                    .Where(s => (s.TenantId == tenantId || s.OwnerId == tenantId) && !s.IsDeleted)
+                    .OrderBy(s => s.InvoiceDate)
+                    .Select(s => new ExportInvoiceRow(s.Id, s.InvoiceNo ?? "", s.InvoiceDate, s.Customer != null ? s.Customer.Name : null, s.Subtotal, s.VatTotal, s.Discount, s.GrandTotal, s.PaidAmount, s.PaymentStatus.ToString(), s.DueDate, s.Notes, s.CreatedAt))
+                    .ToListAsync();
+                await AddZipEntry(zip, "invoices.csv", BuildInvoicesCsv(sales));
+
+                var customers = await _context.Customers.AsNoTracking()
+                    .Where(c => c.TenantId == tenantId || c.OwnerId == tenantId)
+                    .OrderBy(c => c.Name)
+                    .Select(c => new ExportCustomerRow(c.Id, c.Name, c.Phone, c.Email, c.Trn, c.Address, c.CreditLimit, c.CustomerType.ToString(), c.PaymentTerms, c.CreatedAt))
+                    .ToListAsync();
+                await AddZipEntry(zip, "customers.csv", BuildCustomersCsv(customers));
+
+                var products = await _context.Products.AsNoTracking()
+                    .Where(p => p.TenantId == tenantId || p.OwnerId == tenantId)
+                    .OrderBy(p => p.Sku)
+                    .Select(p => new ExportProductRow(p.Id, p.Sku ?? "", p.Barcode, p.NameEn, p.NameAr, p.UnitType ?? "", p.ConversionToBase, p.CostPrice, p.SellPrice, p.StockQty, p.ReorderLevel, p.ExpiryDate, p.IsActive, p.CreatedAt, p.UpdatedAt))
+                    .ToListAsync();
+                await AddZipEntry(zip, "products.csv", BuildProductsCsv(products));
+            }
+
+            mem.Position = 0;
+            return (mem, fileName);
+        }
+
+        private static string EscapeCsv(string? value)
+        {
+            if (value == null) return "";
+            if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
+                return "\"" + value.Replace("\"", "\"\"") + "\"";
+            return value;
+        }
+
+        private static async Task AddZipEntry(ZipArchive zip, string entryName, string content)
+        {
+            var entry = zip.CreateEntry(entryName, CompressionLevel.Fastest);
+            await using var w = entry.Open();
+            var bytes = Encoding.UTF8.GetBytes(content);
+            await w.WriteAsync(bytes);
+        }
+
+        private static string BuildInvoicesCsv(List<ExportInvoiceRow> sales)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Id,InvoiceNo,InvoiceDate,CustomerName,Subtotal,VatTotal,Discount,GrandTotal,PaidAmount,Status,DueDate,Notes,CreatedAt");
+            foreach (var s in sales)
+            {
+                sb.AppendLine(string.Join(",",
+                    s.Id,
+                    EscapeCsv(s.InvoiceNo),
+                    s.InvoiceDate.ToString("o", CultureInfo.InvariantCulture),
+                    EscapeCsv(s.CustomerName),
+                    s.Subtotal.ToString(CultureInfo.InvariantCulture),
+                    s.VatTotal.ToString(CultureInfo.InvariantCulture),
+                    s.Discount.ToString(CultureInfo.InvariantCulture),
+                    s.GrandTotal.ToString(CultureInfo.InvariantCulture),
+                    s.PaidAmount.ToString(CultureInfo.InvariantCulture),
+                    EscapeCsv(s.Status),
+                    s.DueDate.HasValue ? s.DueDate.Value.ToString("o", CultureInfo.InvariantCulture) : "",
+                    EscapeCsv(s.Notes),
+                    s.CreatedAt.ToString("o", CultureInfo.InvariantCulture)));
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildCustomersCsv(List<ExportCustomerRow> customers)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Id,Name,Phone,Email,Trn,Address,CreditLimit,CustomerType,PaymentTerms,CreatedAt");
+            foreach (var c in customers)
+            {
+                sb.AppendLine(string.Join(",",
+                    c.Id,
+                    EscapeCsv(c.Name),
+                    EscapeCsv(c.Phone),
+                    EscapeCsv(c.Email),
+                    EscapeCsv(c.Trn),
+                    EscapeCsv(c.Address),
+                    c.CreditLimit.ToString(CultureInfo.InvariantCulture),
+                    EscapeCsv(c.CustomerType),
+                    EscapeCsv(c.PaymentTerms),
+                    c.CreatedAt.ToString("o", CultureInfo.InvariantCulture)));
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildProductsCsv(List<ExportProductRow> products)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Id,Sku,Barcode,NameEn,NameAr,UnitType,ConversionToBase,CostPrice,SellPrice,StockQty,ReorderLevel,ExpiryDate,IsActive,CreatedAt,UpdatedAt");
+            foreach (var p in products)
+            {
+                sb.AppendLine(string.Join(",",
+                    p.Id,
+                    EscapeCsv(p.Sku),
+                    EscapeCsv(p.Barcode),
+                    EscapeCsv(p.NameEn),
+                    EscapeCsv(p.NameAr),
+                    EscapeCsv(p.UnitType),
+                    p.ConversionToBase.ToString(CultureInfo.InvariantCulture),
+                    p.CostPrice.ToString(CultureInfo.InvariantCulture),
+                    p.SellPrice.ToString(CultureInfo.InvariantCulture),
+                    p.StockQty.ToString(CultureInfo.InvariantCulture),
+                    p.ReorderLevel,
+                    p.ExpiryDate.HasValue ? p.ExpiryDate.Value.ToString("o", CultureInfo.InvariantCulture) : "",
+                    p.IsActive ? "true" : "false",
+                    p.CreatedAt.ToString("o", CultureInfo.InvariantCulture),
+                    p.UpdatedAt.ToString("o", CultureInfo.InvariantCulture)));
+            }
+            return sb.ToString();
         }
 
         public async Task<PagedResponse<TenantDto>> GetTenantsAsync(int page = 1, int pageSize = 20, string? search = null, TenantStatus? status = null)
@@ -882,7 +1343,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
         {
             var tenant = await _context.Tenants.FindAsync(tenantId);
             if (tenant == null)
-                return new TenantHealthDto { Score = 0, Level = "Red", RiskFactors = new List<string> { "Tenant not found" } };
+                return new TenantHealthDto { Score = 0, Level = "Red", RiskFactors = new List<string> { "Tenant not found" }, ScoreDescription = "Starts at 100. Deductions: trial expiring soon (−15 to −30), high outstanding vs revenue (−10 to −25), high storage (−20), no activity 30+ days (−10). Green ≥70, Yellow ≥40, Red <40." };
 
             var metrics = await GetTenantUsageMetricsAsync(tenantId);
             var riskFactors = new List<string>();
@@ -913,7 +1374,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             score = Math.Clamp(score, 0, 100);
             var level = score >= 70 ? "Green" : score >= 40 ? "Yellow" : "Red";
-            return new TenantHealthDto { Score = score, Level = level, RiskFactors = riskFactors };
+            var description = "Starts at 100. Deductions: trial expiring soon (−15 to −30), high outstanding vs revenue (−10 to −25), high storage (−20), no activity 30+ days (−10). Green ≥70, Yellow ≥40, Red <40.";
+            return new TenantHealthDto { Score = score, Level = level, RiskFactors = riskFactors, ScoreDescription = description };
         }
 
         public async Task<TenantCostDto> GetTenantCostAsync(int tenantId)
@@ -943,6 +1405,11 @@ namespace HexaBill.Api.Modules.SuperAdmin
             };
         }
 
+        /// <summary>
+        /// Wipes all transactional data for the tenant. Preserves: Tenant, Users, Products, Customers,
+        /// Subscriptions, Company Settings. Deletes: Sales, SaleItems, Payments, Expenses, Returns,
+        /// Purchases, Alerts; resets Product.StockQty and Customer balances to 0. No backup is created — recommend creating a backup first if needed.
+        /// </summary>
         public async Task<bool> ClearTenantDataAsync(int tenantId, int adminUserId)
         {
             var tenant = await _context.Tenants.FindAsync(tenantId);
@@ -951,7 +1418,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                // Delete all transactional data for this tenant
+                // Delete all transactional data for this tenant (subscription and settings are NOT touched)
                 
                 // Sales and Sale Items
                 var saleIds = await _context.Sales.Where(s => s.TenantId == tenantId).Select(s => s.Id).ToListAsync();
@@ -1203,6 +1670,46 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             return result;
         }
+
+        public async Task<DuplicateDataPreviewDto> GetDuplicateDataPreviewAsync(int targetTenantId, int sourceTenantId, IReadOnlyList<string> dataTypes)
+        {
+            var preview = new DuplicateDataPreviewDto { TargetTenantId = targetTenantId, SourceTenantId = sourceTenantId };
+            var targetTenant = await _context.Tenants.FindAsync(targetTenantId);
+            var sourceTenant = await _context.Tenants.FindAsync(sourceTenantId);
+            if (targetTenant != null) preview.TargetName = targetTenant.Name;
+            if (sourceTenant != null) preview.SourceName = sourceTenant.Name;
+            if (targetTenant == null || sourceTenant == null || targetTenantId == sourceTenantId)
+                return preview;
+
+            var types = dataTypes?.Select(t => t.Trim()).Where(t => !string.IsNullOrEmpty(t)).Select(t => t.ToLowerInvariant()).ToList() ?? new List<string>();
+
+            if (types.Contains("products"))
+            {
+                preview.SourceProductsCount = await _context.Products
+                    .CountAsync(p => p.TenantId == sourceTenantId || p.OwnerId == sourceTenantId);
+                preview.TargetProductsCount = await _context.Products
+                    .CountAsync(p => p.TenantId == targetTenantId || p.OwnerId == targetTenantId);
+            }
+            if (types.Contains("settings"))
+            {
+                preview.SourceSettingsCount = await _context.Settings.CountAsync(s => s.OwnerId == sourceTenantId);
+                preview.TargetSettingsCount = await _context.Settings.CountAsync(s => s.OwnerId == targetTenantId);
+            }
+
+            return preview;
+        }
+    }
+
+    public class DuplicateDataPreviewDto
+    {
+        public int TargetTenantId { get; set; }
+        public int SourceTenantId { get; set; }
+        public string? SourceName { get; set; }
+        public string? TargetName { get; set; }
+        public int SourceProductsCount { get; set; }
+        public int TargetProductsCount { get; set; }
+        public int SourceSettingsCount { get; set; }
+        public int TargetSettingsCount { get; set; }
     }
 
     public class DuplicateDataResultDto
@@ -1232,9 +1739,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public decimal AvgSalesPerTenant { get; set; }
         public List<TopTenantBySalesDto> TopTenants { get; set; } = new();
         public decimal Mrr { get; set; }
+        /// <summary>True when Subscriptions table has at least one row; use to show "No subscription data" instead of 0.</summary>
+        public bool HasSubscriptionData { get; set; }
         public List<TrialExpiringDto> TrialsExpiringThisWeek { get; set; } = new();
         public int StorageEstimate { get; set; }
         public int EstimatedStorageUsedMb { get; set; }
+        /// <summary>True when value comes from pg_database_size (PostgreSQL); false when row-based estimate.</summary>
+        public bool IsRealDatabaseSize { get; set; }
+        /// <summary>When estimate: formula description for tooltip (e.g. row-based formula).</summary>
+        public string? StorageFormulaDescription { get; set; }
         public decimal InfraCostEstimate { get; set; }
         public decimal Margin { get; set; }
         public decimal MarginPercent { get; set; }
@@ -1315,6 +1828,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public int Score { get; set; }
         public string Level { get; set; } = "Green";
         public List<string> RiskFactors { get; set; } = new();
+        /// <summary>Human-readable explanation of how the score is computed (for tooltip/breakdown in UI).</summary>
+        public string? ScoreDescription { get; set; }
     }
 
     public class TenantCostDto

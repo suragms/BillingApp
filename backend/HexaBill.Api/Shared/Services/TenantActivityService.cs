@@ -1,6 +1,8 @@
 /*
  * Tenant Activity Service - In-memory request count per tenant for SuperAdmin Live Activity
  * Tracks API calls per tenant in last 60 minutes. Thread-safe.
+ * Data is held in process memory only: activity resets on server restart/deploy.
+ * UI shows "Activity resets on server restart." Optionally persist last N minutes to DB later.
  */
 using System.Collections.Concurrent;
 

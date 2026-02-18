@@ -4,9 +4,12 @@ Author: AI Assistant
 Date: 2026-02-11
 */
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using HexaBill.Api.Shared.Extensions;
+using Stripe;
+using Stripe.Checkout;
 
 namespace HexaBill.Api.Modules.Subscription
 {
@@ -15,7 +18,7 @@ namespace HexaBill.Api.Modules.Subscription
         Task<List<SubscriptionPlanDto>> GetPlansAsync();
         Task<SubscriptionPlanDto?> GetPlanByIdAsync(int planId);
         Task<SubscriptionDto?> GetTenantSubscriptionAsync(int tenantId);
-        Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle, SubscriptionStatus? initialStatus = null);
+        Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle, SubscriptionStatus? initialStatus = null, string? paymentGatewaySessionId = null, string? paymentMethod = null);
         Task<SubscriptionDto> UpdateSubscriptionAsync(int subscriptionId, int? planId, BillingCycle? billingCycle);
         Task<bool> CancelSubscriptionAsync(int subscriptionId, string reason);
         Task<bool> RenewSubscriptionAsync(int subscriptionId);
@@ -25,17 +28,31 @@ namespace HexaBill.Api.Modules.Subscription
         Task<bool> CheckLimitAsync(int tenantId, string limitType, int currentUsage);
         Task<List<SubscriptionDto>> GetExpiringSubscriptionsAsync(int daysAhead = 7);
         Task<SubscriptionMetricsDto> GetPlatformMetricsAsync();
+        /// <summary>Platform revenue report: MRR trend, new signups by month, churn. SystemAdmin only. (PRODUCTION_MASTER_TODO #45)</summary>
+        Task<PlatformRevenueReportDto> GetPlatformRevenueReportAsync();
+        /// <summary>Create a Stripe Checkout Session for subscription payment. Returns URL to redirect user to. (PRODUCTION_MASTER_TODO #43)</summary>
+        Task<StripeCheckoutResult?> CreateStripeCheckoutSessionAsync(int tenantId, int planId, BillingCycle billingCycle, string successUrl, string cancelUrl);
+        /// <summary>Activate subscription after successful Stripe payment (called from webhook).</summary>
+        Task<bool> ActivateSubscriptionFromStripePaymentAsync(int tenantId, int planId, BillingCycle billingCycle, string stripeSessionId);
+    }
+
+    public class StripeCheckoutResult
+    {
+        public string Url { get; set; } = string.Empty;
+        public string SessionId { get; set; } = string.Empty;
     }
 
     public class SubscriptionService : ISubscriptionService
     {
         private readonly AppDbContext _context;
         private readonly ILogger<SubscriptionService> _logger;
+        private readonly IConfiguration _configuration;
 
-        public SubscriptionService(AppDbContext context, ILogger<SubscriptionService> logger)
+        public SubscriptionService(AppDbContext context, ILogger<SubscriptionService> logger, IConfiguration configuration)
         {
             _context = context;
             _logger = logger;
+            _configuration = configuration;
         }
 
         public async Task<List<SubscriptionPlanDto>> GetPlansAsync()
@@ -112,7 +129,7 @@ namespace HexaBill.Api.Modules.Subscription
             return MapToDto(subscription);
         }
 
-        public async Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle, SubscriptionStatus? initialStatus = null)
+        public async Task<SubscriptionDto> CreateSubscriptionAsync(int tenantId, int planId, BillingCycle billingCycle, SubscriptionStatus? initialStatus = null, string? paymentGatewaySessionId = null, string? paymentMethod = null)
         {
             var plan = await _context.SubscriptionPlans.FindAsync(planId);
             if (plan == null)
@@ -142,21 +159,30 @@ namespace HexaBill.Api.Modules.Subscription
                 BillingCycle = billingCycle,
                 StartDate = DateTime.UtcNow,
                 TrialEndDate = trialEndDate,
-                NextBillingDate = isPaidActivation ? DateTime.UtcNow.AddMonths(1) : trialEndDate,
+                NextBillingDate = isPaidActivation ? (billingCycle == BillingCycle.Monthly ? DateTime.UtcNow.AddMonths(1) : DateTime.UtcNow.AddYears(1)) : trialEndDate,
                 Amount = billingCycle == BillingCycle.Monthly ? plan.MonthlyPrice : plan.YearlyPrice,
                 Currency = plan.Currency,
+                PaymentGatewaySubscriptionId = paymentGatewaySessionId,
+                PaymentMethod = paymentMethod ?? (isPaidActivation ? "stripe" : null),
                 CreatedAt = DateTime.UtcNow
             };
 
             _context.Subscriptions.Add(subscription);
             await _context.SaveChangesAsync();
 
-            // Update tenant status only when creating Trial subscription (preserve caller-set Active when isPaidActivation)
             var tenant = await _context.Tenants.FindAsync(tenantId);
-            if (tenant != null && !isPaidActivation)
+            if (tenant != null)
             {
-                tenant.Status = TenantStatus.Trial;
-                tenant.TrialEndDate = subscription.TrialEndDate;
+                if (!isPaidActivation)
+                {
+                    tenant.Status = TenantStatus.Trial;
+                    tenant.TrialEndDate = subscription.TrialEndDate;
+                }
+                else
+                {
+                    tenant.Status = TenantStatus.Active;
+                    tenant.TrialEndDate = null;
+                }
                 await _context.SaveChangesAsync();
             }
 
@@ -434,6 +460,126 @@ namespace HexaBill.Api.Modules.Subscription
             };
         }
 
+        public async Task<PlatformRevenueReportDto> GetPlatformRevenueReportAsync()
+        {
+            var now = DateTime.UtcNow;
+            var thirtyDaysAgo = now.AddDays(-30);
+            var months = new List<PlatformRevenueMonthDto>();
+            for (var i = 11; i >= 0; i--)
+            {
+                var startOfMonth = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-i);
+                var endOfMonth = startOfMonth.AddMonths(1).AddTicks(-1);
+
+                var mrrAtMonth = await _context.Subscriptions
+                    .AsNoTracking()
+                    .Where(s => s.StartDate <= endOfMonth &&
+                        (s.CancelledAt == null || s.CancelledAt > endOfMonth) &&
+                        (s.ExpiresAt == null || s.ExpiresAt > endOfMonth))
+                    .SumAsync(s => s.BillingCycle == BillingCycle.Monthly ? s.Amount : s.Amount / 12);
+
+                var newSignupsInMonth = await _context.Tenants
+                    .AsNoTracking()
+                    .CountAsync(t => t.CreatedAt >= startOfMonth && t.CreatedAt <= endOfMonth);
+
+                months.Add(new PlatformRevenueMonthDto
+                {
+                    Month = startOfMonth.ToString("yyyy-MM"),
+                    Mrr = mrrAtMonth,
+                    NewSignups = newSignupsInMonth
+                });
+            }
+
+            var churnedLast30Days = await _context.Subscriptions
+                .AsNoTracking()
+                .CountAsync(s => (s.CancelledAt >= thirtyDaysAgo && s.CancelledAt <= now) ||
+                    (s.ExpiresAt >= thirtyDaysAgo && s.ExpiresAt <= now));
+
+            var currentActive = await _context.Subscriptions.CountAsync(s => s.Status == SubscriptionStatus.Active);
+            var currentMrr = await _context.Subscriptions
+                .Where(s => s.Status == SubscriptionStatus.Active)
+                .SumAsync(s => s.BillingCycle == BillingCycle.Monthly ? s.Amount : s.Amount / 12);
+
+            return new PlatformRevenueReportDto
+            {
+                MrrByMonth = months,
+                CurrentMrr = currentMrr,
+                CurrentActiveSubscriptions = currentActive,
+                ChurnedLast30Days = churnedLast30Days,
+                ChurnRatePercent = currentActive + churnedLast30Days > 0
+                    ? (decimal)churnedLast30Days / (currentActive + churnedLast30Days) * 100
+                    : 0
+            };
+        }
+
+        public async Task<StripeCheckoutResult?> CreateStripeCheckoutSessionAsync(int tenantId, int planId, BillingCycle billingCycle, string successUrl, string cancelUrl)
+        {
+            var secretKey = _configuration["Stripe:SecretKey"];
+            if (string.IsNullOrWhiteSpace(secretKey))
+            {
+                _logger.LogWarning("Stripe:SecretKey not configured; checkout session skipped.");
+                return null;
+            }
+
+            var plan = await _context.SubscriptionPlans.FindAsync(planId);
+            if (plan == null) return null;
+
+            decimal amount = billingCycle == BillingCycle.Monthly ? plan.MonthlyPrice : plan.YearlyPrice;
+            string currency = (plan.Currency ?? "AED").ToLowerInvariant();
+            // Stripe expects amount in smallest unit (cents for USD, fils for AED - 100 fils = 1 AED)
+            long unitAmount = (long)Math.Round(amount * 100, 0);
+            if (unitAmount <= 0) unitAmount = 100;
+
+            StripeConfiguration.ApiKey = secretKey;
+            var options = new SessionCreateOptions
+            {
+                Mode = "payment",
+                SuccessUrl = successUrl,
+                CancelUrl = cancelUrl,
+                Metadata = new Dictionary<string, string>
+                {
+                    { "tenantId", tenantId.ToString() },
+                    { "planId", planId.ToString() },
+                    { "billingCycle", billingCycle.ToString() }
+                },
+                LineItems = new List<SessionLineItemOptions>
+                {
+                    new SessionLineItemOptions
+                    {
+                        PriceData = new SessionLineItemPriceDataOptions
+                        {
+                            Currency = currency,
+                            UnitAmount = unitAmount,
+                            ProductData = new SessionLineItemPriceDataProductDataOptions
+                            {
+                                Name = plan.Name + (billingCycle == BillingCycle.Monthly ? " (Monthly)" : " (Yearly)"),
+                                Description = plan.Description ?? "Subscription plan"
+                            }
+                        },
+                        Quantity = 1
+                    }
+                }
+            };
+
+            var service = new SessionService();
+            var session = await service.CreateAsync(options);
+            return new StripeCheckoutResult { Url = session.Url ?? "", SessionId = session.Id };
+        }
+
+        public async Task<bool> ActivateSubscriptionFromStripePaymentAsync(int tenantId, int planId, BillingCycle billingCycle, string stripeSessionId)
+        {
+            try
+            {
+                _ = await CreateSubscriptionAsync(tenantId, planId, billingCycle, SubscriptionStatus.Active, stripeSessionId, "stripe");
+                _logger.LogInformation("Subscription activated from Stripe payment for tenant {TenantId}, plan {PlanId}, session {SessionId}", tenantId, planId, stripeSessionId);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to activate subscription from Stripe for tenant {TenantId}, plan {PlanId}", tenantId, planId);
+                return false;
+            }
+        }
+
         private SubscriptionDto MapToDto(HexaBill.Api.Models.Subscription subscription)
         {
             return new SubscriptionDto
@@ -528,5 +674,21 @@ namespace HexaBill.Api.Modules.Subscription
         public int ExpiredSubscriptions { get; set; }
         public decimal MonthlyRecurringRevenue { get; set; }
         public decimal AnnualRecurringRevenue { get; set; }
+    }
+
+    public class PlatformRevenueReportDto
+    {
+        public List<PlatformRevenueMonthDto> MrrByMonth { get; set; } = new();
+        public decimal CurrentMrr { get; set; }
+        public int CurrentActiveSubscriptions { get; set; }
+        public int ChurnedLast30Days { get; set; }
+        public decimal ChurnRatePercent { get; set; }
+    }
+
+    public class PlatformRevenueMonthDto
+    {
+        public string Month { get; set; } = string.Empty;
+        public decimal Mrr { get; set; }
+        public int NewSignups { get; set; }
     }
 }

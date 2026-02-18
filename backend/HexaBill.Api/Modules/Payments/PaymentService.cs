@@ -321,13 +321,12 @@ namespace HexaBill.Api.Modules.Payments
                 Sale? updatedSale = null;
                 if (request.SaleId.HasValue && invoiceSale != null)
                 {
-                    // CRITICAL FIX: Calculate ACTUAL paid amount from Payments table (fresh after our insert)
-                    // This ensures we don't use stale Sale.PaidAmount
+                    // CLEARED only (PRODUCTION_MASTER_TODO #7): PaidAmount = cleared payments so invoice status matches customer balance
                     var freshPaidAmount = await _context.Payments
-                        .Where(p => p.SaleId == request.SaleId.Value && p.TenantId == tenantId && p.Status != PaymentStatus.VOID)
+                        .Where(p => p.SaleId == request.SaleId.Value && p.TenantId == tenantId && p.Status == PaymentStatus.CLEARED)
                         .SumAsync(p => p.Amount);
                     
-                    Console.WriteLine($"📊 Fresh PaidAmount calculated from Payments: {freshPaidAmount} (was {invoiceSale.PaidAmount})");
+                    Console.WriteLine($"📊 Fresh PaidAmount (cleared only) from Payments: {freshPaidAmount} (was {invoiceSale.PaidAmount})");
                     
                     // Update sale with FRESH paid amount
                     invoiceSale.PaidAmount = freshPaidAmount;
@@ -516,53 +515,46 @@ namespace HexaBill.Api.Modules.Payments
             // - CLEARED → VOID/RETURNED: Reverse both PaidAmount and Balance
             // - CLEARED → PENDING: Reverse Balance only (keep PaidAmount)
 
-            // If changing from PENDING to CLEARED - only affect Customer.Balance
-            // (Sale.PaidAmount was already updated when payment was created)
+            // If changing from PENDING to CLEARED - customer balance and sale PaidAmount (recalc after save)
             if (oldStatus == PaymentStatus.PENDING && status == PaymentStatus.CLEARED)
             {
                 Console.WriteLine($"📋 Status change: PENDING → CLEARED for payment {paymentId}");
-                
-                // Customer balance should now reflect this cleared payment
                 if (payment.CustomerId.HasValue)
                 {
                     var customer = await _context.Customers
                         .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
                     if (customer != null)
                     {
-                        customer.Balance -= payment.Amount; // Customer owes less now
+                        customer.Balance -= payment.Amount;
                         customer.LastActivity = DateTime.UtcNow;
                         customer.UpdatedAt = DateTime.UtcNow;
                         Console.WriteLine($"✅ Customer {customer.Name} balance updated: {customer.Balance}");
                     }
                 }
             }
-            // If voiding/returning from any non-VOID status
+            // If voiding/returning - recalc Sale.PaidAmount from CLEARED only (this payment excluded after save)
             else if ((status == PaymentStatus.VOID || status == PaymentStatus.RETURNED) && oldStatus != PaymentStatus.VOID)
             {
                 Console.WriteLine($"📋 Status change: {oldStatus} → {status} for payment {paymentId} - Reversing effects");
-                
-                // Always reverse Sale.PaidAmount (it was added for ALL payment types)
                 if (payment.SaleId.HasValue)
                 {
                     var sale = await _context.Sales
                         .FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
                     if (sale != null)
                     {
-                        sale.PaidAmount = Math.Max(0, sale.PaidAmount - payment.Amount);
+                        // Recalc from CLEARED only; exclude this payment (it is being set to VOID/RETURNED)
+                        var newPaidAmount = await _context.Payments
+                            .Where(p => p.SaleId == sale.Id && p.TenantId == tenantId && p.Status == PaymentStatus.CLEARED && p.Id != paymentId)
+                            .SumAsync(p => p.Amount);
+                        sale.PaidAmount = newPaidAmount;
                         sale.LastPaymentDate = await _context.Payments
                             .Where(p => p.SaleId == sale.Id && p.Status != PaymentStatus.VOID && p.Status != PaymentStatus.RETURNED && p.Id != paymentId)
                             .OrderByDescending(p => p.PaymentDate)
                             .Select(p => p.PaymentDate)
                             .FirstOrDefaultAsync();
-
-                        if (sale.PaidAmount >= sale.GrandTotal)
-                            sale.PaymentStatus = SalePaymentStatus.Paid;
-                        else if (sale.PaidAmount > 0)
-                            sale.PaymentStatus = SalePaymentStatus.Partial;
-                        else
-                            sale.PaymentStatus = SalePaymentStatus.Pending;
-                        
-                        Console.WriteLine($"✅ Sale {sale.InvoiceNo} PaidAmount reversed to: {sale.PaidAmount}, Status: {sale.PaymentStatus}");
+                        sale.PaymentStatus = sale.PaidAmount >= sale.GrandTotal ? SalePaymentStatus.Paid
+                            : sale.PaidAmount > 0 ? SalePaymentStatus.Partial : SalePaymentStatus.Pending;
+                        Console.WriteLine($"✅ Sale {sale.InvoiceNo} PaidAmount set to: {sale.PaidAmount}, Status: {sale.PaymentStatus}");
                     }
                 }
 
@@ -580,18 +572,27 @@ namespace HexaBill.Api.Modules.Payments
                     }
                 }
             }
-            // If changing from CLEARED to PENDING - reverse Customer.Balance only
+            // If changing from CLEARED to PENDING - reverse Customer.Balance and recalc Sale.PaidAmount (this payment no longer cleared)
             else if (oldStatus == PaymentStatus.CLEARED && status == PaymentStatus.PENDING)
             {
                 Console.WriteLine($"📋 Status change: CLEARED → PENDING for payment {paymentId}");
-                
+                if (payment.SaleId.HasValue)
+                {
+                    var sale = await _context.Sales.FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
+                    if (sale != null)
+                    {
+                        sale.PaidAmount = Math.Max(0, sale.PaidAmount - payment.Amount);
+                        sale.PaymentStatus = sale.PaidAmount >= sale.GrandTotal ? SalePaymentStatus.Paid
+                            : sale.PaidAmount > 0 ? SalePaymentStatus.Partial : SalePaymentStatus.Pending;
+                    }
+                }
                 if (payment.CustomerId.HasValue)
                 {
                     var customer = await _context.Customers
                         .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
                     if (customer != null)
                     {
-                        customer.Balance += payment.Amount; // Reverse: customer owes more
+                        customer.Balance += payment.Amount;
                         customer.LastActivity = DateTime.UtcNow;
                         customer.UpdatedAt = DateTime.UtcNow;
                         Console.WriteLine($"✅ Customer {customer.Name} balance reversed to: {customer.Balance}");
@@ -637,39 +638,13 @@ namespace HexaBill.Api.Modules.Payments
             var wasCleared = oldStatus == PaymentStatus.CLEARED;
             var wasNonVoid = oldStatus != PaymentStatus.VOID;
 
-            // CRITICAL FIX: Reverse old payment effects for ALL non-VOID payments
-            // Since CreatePaymentAsync updates PaidAmount for ALL payment types (including PENDING cheques),
-            // we must also reverse for ALL non-VOID payments when editing
-            if (wasNonVoid)
+            // Reverse Customer.Balance only if old status was CLEARED (balance uses CLEARED only)
+            if (wasCleared && payment.CustomerId.HasValue)
             {
-                // Always reverse Sale.PaidAmount for non-VOID payments
-                if (payment.SaleId.HasValue)
-                {
-                    var sale = await _context.Sales
-                        .FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
-                    if (sale != null)
-                    {
-                        sale.PaidAmount = Math.Max(0, sale.PaidAmount - oldAmount);
-                        if (sale.PaidAmount >= sale.GrandTotal)
-                            sale.PaymentStatus = SalePaymentStatus.Paid;
-                        else if (sale.PaidAmount > 0)
-                            sale.PaymentStatus = SalePaymentStatus.Partial;
-                        else
-                            sale.PaymentStatus = SalePaymentStatus.Pending;
-                        Console.WriteLine($"📋 UpdatePayment: Reversed old payment. Sale {sale.InvoiceNo} PaidAmount now: {sale.PaidAmount}");
-                    }
-                }
-
-                // Only reverse Customer.Balance for CLEARED payments (balance is only affected by cleared payments)
-                if (wasCleared && payment.CustomerId.HasValue)
-                {
-                    var customer = await _context.Customers
-                        .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
-                    if (customer != null)
-                    {
-                        customer.Balance += oldAmount; // Reverse: customer owes more
-                    }
-                }
+                var customer = await _context.Customers
+                    .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
+                if (customer != null)
+                    customer.Balance += oldAmount;
             }
 
             // Update payment fields
@@ -703,42 +678,32 @@ namespace HexaBill.Api.Modules.Payments
             var newStatus = payment.Status;
             var isNowCleared = newStatus == PaymentStatus.CLEARED;
 
-            // CRITICAL FIX: Apply new payment effects for ALL non-VOID payments
-            // Since CreatePaymentAsync updates PaidAmount for ALL payment types, we must do the same here
-            var isNonVoid = newStatus != PaymentStatus.VOID;
-            if (isNonVoid)
+            // Recalc Sale.PaidAmount from CLEARED only: other CLEARED payments + this one if now CLEARED (we've updated entity in memory)
+            if (payment.SaleId.HasValue)
             {
-                // Always update Sale.PaidAmount for non-VOID payments
-                if (payment.SaleId.HasValue)
+                var sale = await _context.Sales
+                    .FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
+                if (sale != null)
                 {
-                    var sale = await _context.Sales
-                        .FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
-                    if (sale != null)
-                    {
-                        sale.PaidAmount = sale.PaidAmount + newAmount;
-                        sale.LastPaymentDate = payment.PaymentDate;
-
-                        if (sale.PaidAmount >= sale.GrandTotal)
-                            sale.PaymentStatus = SalePaymentStatus.Paid;
-                        else if (sale.PaidAmount > 0)
-                            sale.PaymentStatus = SalePaymentStatus.Partial;
-                        else
-                            sale.PaymentStatus = SalePaymentStatus.Pending;
-                        Console.WriteLine($"📋 UpdatePayment: Applied new payment. Sale {sale.InvoiceNo} PaidAmount now: {sale.PaidAmount}");
-                    }
+                    var otherCleared = await _context.Payments
+                        .Where(p => p.SaleId == sale.Id && p.TenantId == tenantId && p.Status == PaymentStatus.CLEARED && p.Id != paymentId)
+                        .SumAsync(p => p.Amount);
+                    sale.PaidAmount = otherCleared + (isNowCleared ? newAmount : 0);
+                    sale.LastPaymentDate = payment.PaymentDate;
+                    sale.PaymentStatus = sale.PaidAmount >= sale.GrandTotal ? SalePaymentStatus.Paid
+                        : sale.PaidAmount > 0 ? SalePaymentStatus.Partial : SalePaymentStatus.Pending;
+                    Console.WriteLine($"📋 UpdatePayment: Sale {sale.InvoiceNo} PaidAmount now: {sale.PaidAmount}");
                 }
-
-                // Only update Customer.Balance for CLEARED payments
-                if (isNowCleared && payment.CustomerId.HasValue)
+            }
+            if (isNowCleared && payment.CustomerId.HasValue)
+            {
+                var customer = await _context.Customers
+                    .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
+                if (customer != null)
                 {
-                    var customer = await _context.Customers
-                        .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
-                    if (customer != null)
-                    {
-                        customer.Balance -= newAmount; // Customer owes less
-                        customer.LastActivity = DateTime.UtcNow;
-                        customer.UpdatedAt = DateTime.UtcNow;
-                    }
+                    customer.Balance -= newAmount;
+                    customer.LastActivity = DateTime.UtcNow;
+                    customer.UpdatedAt = DateTime.UtcNow;
                 }
             }
 
@@ -794,35 +759,29 @@ namespace HexaBill.Api.Modules.Payments
             var wasCleared = payment.Status == PaymentStatus.CLEARED;
             var wasNonVoid = payment.Status != PaymentStatus.VOID;
 
-            // CRITICAL FIX: Reverse payment effects for ALL non-VOID payments
-            // Since CreatePaymentAsync updates PaidAmount for ALL payment types (including PENDING cheques),
-            // we must also reverse for ALL non-VOID payments when deleting
+            // Recalc Sale.PaidAmount from CLEARED only (excluding this payment which is being deleted)
+            if (payment.SaleId.HasValue)
+            {
+                var sale = await _context.Sales
+                    .FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
+                if (sale != null)
+                {
+                    var newPaidAmount = await _context.Payments
+                        .Where(p => p.SaleId == sale.Id && p.TenantId == tenantId && p.Status == PaymentStatus.CLEARED && p.Id != paymentId)
+                        .SumAsync(p => p.Amount);
+                    sale.PaidAmount = newPaidAmount;
+                    sale.LastPaymentDate = await _context.Payments
+                        .Where(p => p.SaleId == sale.Id && p.Status != PaymentStatus.VOID && p.Id != paymentId)
+                        .OrderByDescending(p => p.PaymentDate)
+                        .Select(p => p.PaymentDate)
+                        .FirstOrDefaultAsync();
+                    sale.PaymentStatus = sale.PaidAmount >= sale.GrandTotal ? SalePaymentStatus.Paid
+                        : sale.PaidAmount > 0 ? SalePaymentStatus.Partial : SalePaymentStatus.Pending;
+                    Console.WriteLine($"📋 DeletePayment: Sale {sale.InvoiceNo} PaidAmount now: {sale.PaidAmount}, Status: {sale.PaymentStatus}");
+                }
+            }
             if (wasNonVoid)
             {
-                // Always reverse Sale.PaidAmount for non-VOID payments
-                if (payment.SaleId.HasValue)
-                {
-                    var sale = await _context.Sales
-                        .FirstOrDefaultAsync(s => s.Id == payment.SaleId.Value && s.TenantId == tenantId);
-                    if (sale != null)
-                    {
-                        sale.PaidAmount = Math.Max(0, sale.PaidAmount - payment.Amount);
-                        // Get last payment date from remaining non-VOID payments
-                        sale.LastPaymentDate = await _context.Payments
-                            .Where(p => p.SaleId == sale.Id && p.Status != PaymentStatus.VOID && p.Id != paymentId)
-                            .OrderByDescending(p => p.PaymentDate)
-                            .Select(p => p.PaymentDate)
-                            .FirstOrDefaultAsync();
-
-                        if (sale.PaidAmount >= sale.GrandTotal)
-                            sale.PaymentStatus = SalePaymentStatus.Paid;
-                        else if (sale.PaidAmount > 0)
-                            sale.PaymentStatus = SalePaymentStatus.Partial;
-                        else
-                            sale.PaymentStatus = SalePaymentStatus.Pending;
-                        Console.WriteLine($"📋 DeletePayment: Reversed payment. Sale {sale.InvoiceNo} PaidAmount now: {sale.PaidAmount}, Status: {sale.PaymentStatus}");
-                    }
-                }
 
                 // Only reverse Customer.Balance for CLEARED payments (balance is only affected by cleared payments)
                 if (wasCleared && payment.CustomerId.HasValue)

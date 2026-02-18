@@ -18,9 +18,11 @@ import {
   CheckCircle,
   Lock,
   Bookmark,
-  RotateCcw
+  RotateCcw,
+  Package,
+  RefreshCw
 } from 'lucide-react'
-import { productsAPI, salesAPI, customersAPI, branchesAPI, routesAPI, usersAPI } from '../../services'
+import { productsAPI, salesAPI, customersAPI, branchesAPI, routesAPI, usersAPI, settingsAPI } from '../../services'
 import { formatCurrency, formatBalance, formatBalanceWithColor } from '../../utils/currency'
 import { useAuth } from '../../hooks/useAuth'
 import { isAdminOrOwner } from '../../utils/roles'
@@ -28,8 +30,8 @@ import { useBranding } from '../../contexts/TenantBrandingContext'
 import toast from 'react-hot-toast'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
-const POS_HELD_KEY = 'hexabill_pos_held'
+import { getApiBaseUrl } from '../../services/apiConfig'
+const API_BASE_URL = getApiBaseUrl()
 
 const PosPage = () => {
   const navigate = useNavigate()
@@ -75,17 +77,13 @@ const PosPage = () => {
   const [selectedRouteId, setSelectedRouteId] = useState('')
   const [staffHasNoAssignments, setStaffHasNoAssignments] = useState(false)
   const [nextInvoiceNumberPreview, setNextInvoiceNumberPreview] = useState('')
+  // VAT from company settings; fallback only when settings unavailable (PRODUCTION_MASTER_TODO #4)
+  const FALLBACK_VAT_PERCENT = 5
+  const [vatPercent, setVatPercent] = useState(FALLBACK_VAT_PERCENT)
 
-  // Hold/Resume invoice — saved to localStorage
-  const [heldInvoices, setHeldInvoices] = useState(() => {
-    try {
-      const raw = localStorage.getItem(POS_HELD_KEY)
-      const parsed = raw ? JSON.parse(raw) : []
-      return Array.isArray(parsed) ? parsed : []
-    } catch {
-      return []
-    }
-  })
+  // Hold/Resume invoice — saved to server
+  const [heldInvoices, setHeldInvoices] = useState([])
+  const [loadingHeldInvoices, setLoadingHeldInvoices] = useState(false)
   const [showHoldModal, setShowHoldModal] = useState(false)
   const [showResumeModal, setShowResumeModal] = useState(false)
   const [holdNameInput, setHoldNameInput] = useState('')
@@ -243,6 +241,23 @@ const PosPage = () => {
     return () => { cancelled = true }
   }, [selectedCustomer?.id])
 
+  // Fetch VAT percentage from company settings (no hardcoded business rule)
+  useEffect(() => {
+    const fetchVatPercent = async () => {
+      try {
+        const response = await settingsAPI.getCompanySettings()
+        if (response?.success && response?.data?.vatPercent != null) {
+          const fromSettings = parseFloat(response.data.vatPercent)
+          if (!Number.isNaN(fromSettings) && fromSettings >= 0) setVatPercent(fromSettings)
+        }
+      } catch (error) {
+        if (!error?.isConnectionBlocked) console.error('Failed to fetch VAT percentage:', error)
+        // Keep FALLBACK_VAT_PERCENT on error (display only; backend uses company settings for sale creation)
+      }
+    }
+    fetchVatPercent()
+  }, [])
+
   // Fetch next invoice number for display (real number instead of "Auto-generated")
   useEffect(() => {
     if (!user) return
@@ -314,6 +329,7 @@ const PosPage = () => {
             unitType: item.unitType || '',
             qty: item.qty || 0,
             unitPrice: item.unitPrice || 0,
+            discount: item.discount || 0, // Per-item discount
             vatAmount: item.vatAmount || 0,
             lineTotal: item.lineTotal || 0
           }))
@@ -395,12 +411,7 @@ const PosPage = () => {
     }
   }, [loadProducts, loadCustomers, loadBranchesAndRoutes])
 
-  // Persist held invoices to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(POS_HELD_KEY, JSON.stringify(heldInvoices))
-    } catch (_) { /* quota exceeded */ }
-  }, [heldInvoices])
+  // Held invoices are now stored server-side - no localStorage needed
 
   // Check for editId in URL - load sale even if customers aren't loaded yet
   useEffect(() => {
@@ -412,6 +423,21 @@ const PosPage = () => {
       }
     }
   }, [searchParams, isEditMode, loadingSale, loadSaleForEdit])
+
+  // Explicit refresh for Phase 3: refetch products, customers, branches/routes (Staff: only assigned)
+  const [refreshingData, setRefreshingData] = useState(false)
+  const handleRefreshData = async () => {
+    if (refreshingData) return
+    setRefreshingData(true)
+    try {
+      await Promise.all([loadProducts(), loadCustomers(), loadBranchesAndRoutes()])
+      toast.success('Data refreshed')
+    } catch (_) {
+      toast.error('Refresh failed')
+    } finally {
+      setRefreshingData(false)
+    }
+  }
 
   // Listen for data update events to refresh when payments are made
   useEffect(() => {
@@ -491,8 +517,9 @@ const PosPage = () => {
 
     // OPTIMISTIC UI: Instant update - React state updates are already synchronous and instant
     const qty = 1
-    const rowTotal = qty * unitPrice
-    const vatAmount = Math.round((rowTotal * 0.05) * 100) / 100
+    const itemDiscount = 0 // Default discount per item
+    const rowTotal = (qty * unitPrice) - itemDiscount
+    const vatAmount = Math.round((rowTotal * (vatPercent / 100)) * 100) / 100
     const lineTotal = rowTotal + vatAmount
 
     // If rowIndex is provided, replace that specific row
@@ -505,6 +532,7 @@ const PosPage = () => {
         unitType: product.unitType || 'CRTN', // Fallback to CRTN if null
         qty: qty,
         unitPrice: unitPrice, // FIXED: Use calculated unitPrice
+        discount: itemDiscount, // Per-item discount
         vatAmount: vatAmount,
         lineTotal: lineTotal
       }
@@ -528,10 +556,11 @@ const PosPage = () => {
         setCart(cart.map((item, idx) => {
           if (idx === existingItemIndex) {
             const newQty = (typeof item.qty === 'number' ? item.qty : 0) + 1
-            const rowTotal = newQty * item.unitPrice
-            const vatAmount = Math.round((rowTotal * 0.05) * 100) / 100
+            const itemDiscount = typeof item.discount === 'number' ? item.discount : 0
+            const rowTotal = (newQty * item.unitPrice) - itemDiscount
+            const vatAmount = Math.round((rowTotal * (vatPercent / 100)) * 100) / 100
             const lineTotal = rowTotal + vatAmount
-            return { ...item, qty: newQty, vatAmount, lineTotal }
+            return { ...item, qty: newQty, discount: itemDiscount, vatAmount, lineTotal }
           }
           return item
         }))
@@ -545,6 +574,7 @@ const PosPage = () => {
           unitType: product.unitType || 'CRTN', // Fallback to CRTN if null
           qty: qty,
           unitPrice: unitPrice, // FIXED: Use calculated unitPrice
+          discount: itemDiscount, // Per-item discount
           vatAmount: vatAmount,
           lineTotal: lineTotal
         }])
@@ -566,6 +596,7 @@ const PosPage = () => {
       unitType: '',
       qty: '',
       unitPrice: '',
+      discount: 0,
       vatAmount: 0,
       lineTotal: 0
     }])
@@ -578,13 +609,14 @@ const PosPage = () => {
     const numValue = value === '' ? '' : (field === 'qty' || field === 'unitPrice' ? Number(value) : value)
     newCart[index] = { ...newCart[index], [field]: numValue }
 
-    // Calculate: Total = Qty × Price, VAT = Total × 5%, Amount = Total + VAT
+    // Calculate: Total = (Qty × Price) - Discount, VAT = Total × vatPercent%, Amount = Total + VAT
     const qty = typeof newCart[index].qty === 'number' ? newCart[index].qty : 0
     const unitPrice = typeof newCart[index].unitPrice === 'number' ? newCart[index].unitPrice : 0
+    const itemDiscount = typeof newCart[index].discount === 'number' ? newCart[index].discount : 0
 
     if (unitPrice > 0 && qty > 0) {
-      const rowTotal = qty * unitPrice
-      const vatAmount = Math.round((rowTotal * 0.05) * 100) / 100
+      const rowTotal = (qty * unitPrice) - itemDiscount
+      const vatAmount = Math.round((rowTotal * (vatPercent / 100)) * 100) / 100
       const lineTotal = rowTotal + vatAmount
 
       newCart[index].vatAmount = vatAmount
@@ -607,7 +639,8 @@ const PosPage = () => {
     const subtotal = cart.reduce((sum, item) => {
       const qty = typeof item.qty === 'number' ? item.qty : 0
       const unitPrice = typeof item.unitPrice === 'number' ? item.unitPrice : 0
-      const rowTotal = qty * unitPrice
+      const itemDiscount = typeof item.discount === 'number' ? item.discount : 0
+      const rowTotal = (qty * unitPrice) - itemDiscount
       return sum + rowTotal
     }, 0)
 
@@ -917,8 +950,9 @@ const PosPage = () => {
         document.body.removeChild(a)
       }, 100)
 
-      // Open WhatsApp Web with message (user will attach the downloaded PDF file)
-      const whatsappUrl = `https://wa.me/?text=${encodedMessage}`
+      // Open WhatsApp to customer when phone available (#56)
+      const { getWhatsAppShareUrl } = await import('../../utils/whatsapp')
+      const whatsappUrl = getWhatsAppShareUrl(message, selectedCustomer?.phone)
       window.open(whatsappUrl, '_blank')
 
       toast.dismiss('whatsapp-share')
@@ -1030,13 +1064,24 @@ const PosPage = () => {
       if (paymentStatus === 'paid' || paymentStatus === 'partial') {
         // Store data and show confirmation modal
         const totals = calculateTotals()
+        
+        // Validate payment amount before showing confirmation
+        if (paymentMethod !== 'Pending' && paymentAmount) {
+          const paymentAmountNum = parseFloat(paymentAmount)
+          if (!isNaN(paymentAmountNum) && paymentAmountNum > totals.grandTotal) {
+            toast.error(`Payment amount (${formatCurrency(paymentAmountNum)}) cannot exceed invoice total (${formatCurrency(totals.grandTotal)})`)
+            return
+          }
+        }
+        
         const saleData = {
           customerId: selectedCustomer?.id || null,
           items: validCart.map(item => ({
             productId: item.productId,
             unitType: item.unitType || 'CRTN',
             qty: Number(item.qty) || 0,
-            unitPrice: Number(item.unitPrice) || 0
+            unitPrice: Number(item.unitPrice) || 0,
+            discount: Number(item.discount) || 0 // Per-item discount
           })).filter(item => item.productId && item.qty > 0 && item.unitPrice > 0),
           discount: discount || 0,
           payments: (paymentMethod !== 'Pending') ? [{
@@ -1066,13 +1111,24 @@ const PosPage = () => {
         return
       }
 
+      // CRITICAL: Validate payment amount does not exceed grand total
+      if (paymentMethod !== 'Pending' && paymentAmount) {
+        const paymentAmountNum = parseFloat(paymentAmount)
+        if (!isNaN(paymentAmountNum) && paymentAmountNum > totals.grandTotal) {
+          toast.error(`Payment amount (${formatCurrency(paymentAmountNum)}) cannot exceed invoice total (${formatCurrency(totals.grandTotal)})`)
+          setLoading(false)
+          return
+        }
+      }
+
       const saleData = {
         customerId: selectedCustomer?.id || null,
         items: validCart.map(item => ({
           productId: item.productId,
           unitType: item.unitType || 'CRTN', // Default unit type
           qty: Number(item.qty) || 0,
-          unitPrice: Number(item.unitPrice) || 0
+          unitPrice: Number(item.unitPrice) || 0,
+          discount: Number(item.discount) || 0 // Per-item discount
         })).filter(item => item.productId && item.qty > 0 && item.unitPrice > 0), // Filter out invalid items
         discount: discount || 0,
         // Only include payment if method is not "Pending" - this prevents "Pending" method which causes Enum parse error
@@ -1291,6 +1347,10 @@ const PosPage = () => {
           } else {
             errorMsg = 'Bad request - please check product data, stock, and quantities'
           }
+        } else if (error.response?.status === 403) {
+          const apiMsg = error.response?.data?.message || ''
+          const noRouteCase = (Array.isArray(error.response?.data?.errors) && error.response.data.errors.includes('NO_ROUTE_ASSIGNED')) || staffHasNoAssignments || (user?.role?.toLowerCase() === 'staff' && !selectedRouteId)
+          errorMsg = apiMsg || (noRouteCase ? 'You have no route assigned. Ask your admin to assign you to a route before creating invoices.' : 'Access denied. You do not have permission to create this invoice.')
         } else if (error.response?.status === 500) {
           errorMsg = error.response?.data?.message || 'Server error. Check backend logs or try again.'
         } else if (error.response?.data?.message) {
@@ -1336,6 +1396,25 @@ const PosPage = () => {
     setInvoiceDate(today.toISOString().split('T')[0])
   }
 
+  const handleRepeatLastInvoice = async () => {
+    try {
+      setLoadingSale(true)
+      const response = await salesAPI.getLastInvoice()
+      if (response.success && response.data) {
+        const lastSale = response.data
+        // Load the sale for editing (reuse existing edit logic)
+        const saleId = lastSale.id
+        setSearchParams({ edit: saleId.toString() })
+      } else {
+        toast.error('No previous invoice found')
+      }
+    } catch (error) {
+      toast.error('Failed to load last invoice: ' + (error.response?.data?.message || error.message))
+    } finally {
+      setLoadingSale(false)
+    }
+  }
+
   const handleHold = () => {
     const validItems = cart.filter(item => item.productId && (item.qty > 0 || item.qty === ''))
     if (validItems.length === 0) {
@@ -1346,7 +1425,7 @@ const PosPage = () => {
     setShowHoldModal(true)
   }
 
-  const handleHoldConfirm = () => {
+  const handleHoldConfirm = async () => {
     const name = (holdNameInput || 'Held Invoice').trim()
     const validCart = cart.filter(item => item.productId && (Number(item.qty) > 0) && (Number(item.unitPrice) >= 0))
     if (validCart.length === 0) {
@@ -1354,23 +1433,32 @@ const PosPage = () => {
       setShowHoldModal(false)
       return
     }
-    const held = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-      name,
-      cart: validCart,
-      selectedCustomer: selectedCustomer ? { id: selectedCustomer.id, name: selectedCustomer.name } : null,
-      invoiceDate,
-      notes,
-      discount,
-      discountInput,
-      selectedBranchId,
-      selectedRouteId,
-      createdAt: new Date().toISOString()
+    try {
+      const invoiceData = {
+        cart: validCart,
+        selectedCustomer: selectedCustomer ? { id: selectedCustomer.id, name: selectedCustomer.name } : null,
+        invoiceDate,
+        notes,
+        discount,
+        discountInput,
+        selectedBranchId,
+        selectedRouteId
+      }
+      const response = await salesAPI.holdInvoice(name, invoiceData)
+      if (response.success) {
+        setHeldInvoices(prev => [{
+          id: response.data.id,
+          name: response.data.name,
+          ...response.data.invoiceData,
+          createdAt: response.data.createdAt
+        }, ...prev])
+        handleNewInvoice()
+        setShowHoldModal(false)
+        toast.success(`Invoice held as "${name}"`)
+      }
+    } catch (error) {
+      toast.error('Failed to hold invoice: ' + (error.response?.data?.message || error.message))
     }
-    setHeldInvoices(prev => [held, ...prev])
-    handleNewInvoice()
-    setShowHoldModal(false)
-    toast.success(`Invoice held as "${name}"`)
   }
 
   const handleResume = (held) => {
@@ -1391,8 +1479,14 @@ const PosPage = () => {
     toast.success(`Resumed "${held.name}"`)
   }
 
-  const handleRemoveHeld = (held) => {
-    setHeldInvoices(prev => prev.filter(h => h.id !== held.id))
+  const handleRemoveHeld = async (held) => {
+    try {
+      await salesAPI.deleteHeldInvoice(held.id)
+      setHeldInvoices(prev => prev.filter(h => h.id !== held.id))
+      toast.success('Held invoice removed')
+    } catch (error) {
+      toast.error('Failed to remove held invoice: ' + (error.response?.data?.message || error.message))
+    }
   }
 
   // Disable form inputs while saving or loading a sale for edit (fixes ReferenceError: isFormDisabled is not defined)
@@ -1429,7 +1523,7 @@ const PosPage = () => {
             </button>
             <button
               onClick={() => setShowResumeModal(true)}
-              disabled={isFormDisabled || heldInvoices.length === 0}
+              disabled={isFormDisabled || heldInvoices.length === 0 || loadingHeldInvoices}
               className={`px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium rounded-lg transition-colors shadow-md flex-shrink-0 flex items-center gap-1 relative ${heldInvoices.length > 0 ? 'bg-emerald-600 text-white border-2 border-emerald-700 hover:bg-emerald-700' : 'bg-gray-400 text-gray-200 border-2 border-gray-500 cursor-not-allowed'}`}
               title={heldInvoices.length > 0 ? `${heldInvoices.length} held invoice(s) - click to resume` : 'No held invoices'}
             >
@@ -1440,6 +1534,15 @@ const PosPage = () => {
                   {heldInvoices.length}
                 </span>
               )}
+            </button>
+            <button
+              onClick={handleRepeatLastInvoice}
+              disabled={isFormDisabled || loadingSale}
+              className="px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium bg-purple-600 text-white border-2 border-purple-700 rounded-lg hover:bg-purple-700 transition-colors shadow-md flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+              title="Repeat last invoice"
+            >
+              <RotateCcw className="h-3 w-3 sm:h-3.5" />
+              Repeat
             </button>
             <button
               onClick={handleNewInvoice}
@@ -1735,6 +1838,16 @@ const PosPage = () => {
                   className="px-3 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 font-semibold focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white"
                 />
               </div>
+              <button
+                type="button"
+                onClick={handleRefreshData}
+                disabled={refreshingData}
+                className="inline-flex items-center gap-1.5 px-2 py-1.5 text-sm border border-neutral-300 rounded-lg hover:bg-neutral-50 disabled:opacity-60"
+                title="Refresh products, customers, and branch/route list (Staff: only assigned)"
+              >
+                <RefreshCw className={`h-4 w-4 ${refreshingData ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Refresh</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1754,7 +1867,8 @@ const PosPage = () => {
                       <th className="px-2 sm:px-3 py-2 sm:py-3 text-center font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-24 text-xs sm:text-sm">Qty<br /><span className="text-xs sm:text-xs font-normal text-gray-600">الكمية</span></th>
                       <th className="px-2 sm:px-3 py-2 sm:py-3 text-right font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-32 text-xs sm:text-sm">Unit Price<br /><span className="text-xs sm:text-xs font-normal text-gray-600">سعر الوحدة</span></th>
                       <th className="px-2 sm:px-3 py-2 sm:py-3 text-right font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-28 text-xs sm:text-sm">Total<br /><span className="text-xs sm:text-xs font-normal text-gray-600">الإجمالي</span></th>
-                      <th className="px-2 sm:px-3 py-2 sm:py-3 text-right font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-28 text-xs sm:text-sm">Vat:5%<br /><span className="text-xs sm:text-xs font-normal text-gray-600">ضريبة 5%</span></th>
+                      <th className="px-2 sm:px-3 py-2 sm:py-3 text-right font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-24 text-xs sm:text-sm">Discount<br /><span className="text-xs sm:text-xs font-normal text-gray-600">خصم</span></th>
+                      <th className="px-2 sm:px-3 py-2 sm:py-3 text-right font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-28 text-xs sm:text-sm">Vat:{vatPercent}%<br /><span className="text-xs sm:text-xs font-normal text-gray-600">ضريبة {vatPercent}%</span></th>
                       <th className="px-2 sm:px-3 py-2 sm:py-3 text-right font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-32 text-xs sm:text-sm">Amount<br /><span className="text-xs sm:text-xs font-normal text-gray-600">المبلغ</span></th>
                       <th className="px-2 sm:px-3 py-2 sm:py-3 text-center font-bold text-gray-900 border-r-2 border-gray-300 whitespace-nowrap w-24 text-xs sm:text-sm">Actions<br /><span className="text-xs sm:text-xs font-normal text-gray-600">إجراءات</span></th>
                     </tr>
@@ -1762,7 +1876,7 @@ const PosPage = () => {
                   <tbody className="divide-y divide-gray-200">
                     {cart.length === 0 ? (
                       <tr>
-                        <td colSpan="9" className="px-4 py-12 text-center text-gray-500 text-base">
+                        <td colSpan="10" className="px-4 py-12 text-center text-gray-500 text-base">
                           No items in cart. Click + to add products
                         </td>
                       </tr>
@@ -1773,38 +1887,79 @@ const PosPage = () => {
                           <td className="px-2 sm:px-3 py-3 sm:py-4 border-r-2 border-gray-200 min-h-[80px] align-top" style={{ position: 'relative', overflow: 'visible' }}>
                             <div className="relative product-dropdown-container" style={{ zIndex: showProductDropdown[index] ? 9999 : 1 }}>
                               {item.productId ? (
-                                <div className="py-2">
-                                  <p className="font-semibold text-gray-900 text-base leading-snug break-words">{item.productName}</p>
-                                  <p className="text-xs text-gray-500 mt-1.5">{item.sku}</p>
+                                <div className="py-2 flex items-start gap-2">
+                                  {/* Product Image Thumbnail */}
+                                  {(() => {
+                                    const product = products.find(p => p.id === item.productId)
+                                    const imageUrl = product?.imageUrl || product?.image || null
+                                    return imageUrl ? (
+                                      <img 
+                                        src={imageUrl} 
+                                        alt={item.productName}
+                                        className="w-12 h-12 object-cover rounded border border-gray-200 flex-shrink-0"
+                                        onError={(e) => { e.target.style.display = 'none' }}
+                                      />
+                                    ) : (
+                                      <div className="w-12 h-12 bg-gray-100 rounded border border-gray-200 flex-shrink-0 flex items-center justify-center">
+                                        <Package className="h-6 w-6 text-gray-400" />
+                                      </div>
+                                    )
+                                  })()}
+                                  <div className="flex-1 min-w-0">
+                                    <p className="font-semibold text-gray-900 text-base leading-snug break-words">{item.productName}</p>
+                                    <p className="text-xs text-gray-500 mt-1.5">{item.sku}</p>
+                                  </div>
                                 </div>
                               ) : (
                                 <div className="relative product-dropdown-container">
-                                  <input
-                                    type="text"
-                                    ref={(el) => productSearchRefs.current[index] = el}
-                                    value={productSearchTerms[index] || ''}
-                                    disabled={isFormDisabled}
-                                    onChange={(e) => {
-                                      const searchValue = e.target.value
-                                      setProductSearchTerms(prev => ({ ...prev, [index]: searchValue }))
-                                      // Auto-open dropdown when user starts typing
-                                      if (searchValue.trim() && !showProductDropdown[index]) {
+                                  <div className="flex gap-1">
+                                    <input
+                                      type="text"
+                                      ref={(el) => productSearchRefs.current[index] = el}
+                                      value={productSearchTerms[index] || ''}
+                                      disabled={isFormDisabled}
+                                      onChange={(e) => {
+                                        const searchValue = e.target.value
+                                        setProductSearchTerms(prev => ({ ...prev, [index]: searchValue }))
+                                        // Auto-open dropdown when user starts typing OR when empty (to browse all)
+                                        if (!showProductDropdown[index]) {
+                                          setShowProductDropdown(prev => ({ ...prev, [index]: true }))
+                                        }
+                                      }}
+                                      onFocus={() => {
+                                        if (isFormDisabled) return
+                                        // Always show dropdown when focused (even if empty - allows browsing all products)
                                         setShowProductDropdown(prev => ({ ...prev, [index]: true }))
-                                      }
-                                    }}
-                                    onFocus={() => {
-                                      if (isFormDisabled) return
-                                      // Always show dropdown when focused
-                                      setShowProductDropdown(prev => ({ ...prev, [index]: true }))
-                                      // If no search term, show all products
-                                      if (!productSearchTerms[index] || !productSearchTerms[index].trim()) {
-                                        // Keep dropdown open to show all products
-                                      }
-                                    }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    placeholder="Type to search product..."
-                                    className="w-full px-3 py-3 border-2 border-blue-300 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white min-h-[52px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                  />
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      placeholder="Type to search product..."
+                                      className="flex-1 px-3 py-3 border-2 border-blue-300 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white min-h-[52px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                    />
+                                    {/* Barcode Scanner Input */}
+                                    <input
+                                      type="text"
+                                      disabled={isFormDisabled}
+                                      onKeyDown={async (e) => {
+                                        if (e.key === 'Enter' && e.target.value.trim()) {
+                                          const barcode = e.target.value.trim()
+                                          const product = products.find(p => 
+                                            p.barcode?.toLowerCase() === barcode.toLowerCase() ||
+                                            p.sku?.toLowerCase() === barcode.toLowerCase()
+                                          )
+                                          if (product) {
+                                            addToCart(product, index)
+                                            e.target.value = ''
+                                            toast.success(`Added ${product.nameEn}`)
+                                          } else {
+                                            toast.error(`Product not found for barcode: ${barcode}`)
+                                          }
+                                        }
+                                      }}
+                                      placeholder="📷 Scan"
+                                      className="w-20 px-2 py-3 border-2 border-purple-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 bg-purple-50 min-h-[52px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                      title="Scan barcode or enter product code"
+                                    />
+                                  </div>
                                   {showProductDropdown[index] && (
                                     <>
                                       {/* Arrow pointing down */}
@@ -1836,19 +1991,27 @@ const PosPage = () => {
 
                                           const filtered = getFilteredProducts(index)
                                           const searchTerm = productSearchTerms[index] || ''
-                                          const totalProducts = searchTerm.trim()
-                                            ? products.filter(p =>
-                                              p.nameEn?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                              p.nameAr?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                              p.sku?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                              p.barcode?.toLowerCase().includes(searchTerm.toLowerCase())
-                                            ).length
-                                            : products.length
+                                          const totalProducts = products.length
                                           const showingCount = filtered.length
                                           const hasMore = totalProducts > showingCount
+                                          
+                                          // Show "Browse All" message when no search term
+                                          const isBrowsingAll = !searchTerm.trim()
 
                                           return filtered.length > 0 ? (
                                             <>
+                                              {/* Show browse message when no search term */}
+                                              {isBrowsingAll && (
+                                                <div className="p-3 bg-blue-50 border-b border-blue-200">
+                                                  <p className="text-sm text-blue-700 font-medium">
+                                                    📦 Browsing all products ({showingCount} shown, {totalProducts} total)
+                                                  </p>
+                                                  <p className="text-xs text-blue-600 mt-1">
+                                                    Type to search or scroll to browse
+                                                  </p>
+                                                </div>
+                                              )}
+                                              
                                               {/* Product list */}
                                               {filtered.map((product) => (
                                                 <div
@@ -1916,23 +2079,29 @@ const PosPage = () => {
                               placeholder="1.5"
                             />
                           </td>
-                          {/* Qty Column: Editable unit type dropdown (CRTN, KG, PIECE, etc.) */}
+                          {/* Unit Type Column: Display product's UnitType (read-only to prevent stock calculation errors) */}
                           <td className="px-2 sm:px-3 py-3 sm:py-4 border-r-2 border-gray-200 align-middle">
-                            <select
-                              disabled={isFormDisabled}
-                              className="w-full px-3 py-3 border-2 border-gray-300 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500 text-base font-medium uppercase min-h-[52px] disabled:opacity-50 disabled:cursor-not-allowed"
-                              value={item.unitType || 'CRTN'}
-                              onChange={(e) => updateCartItem(index, 'unitType', e.target.value)}
-                            >
-                              <option value="CRTN">CRTN</option>
-                              <option value="KG">KG</option>
-                              <option value="PIECE">PIECE</option>
-                              <option value="BOX">BOX</option>
-                              <option value="PKG">PKG</option>
-                              <option value="BAG">BAG</option>
-                              <option value="PC">PC</option>
-                              <option value="UNIT">UNIT</option>
-                            </select>
+                            {item.productId ? (
+                              <div className="w-full px-3 py-3 border-2 border-gray-200 rounded-lg text-center text-base font-medium uppercase min-h-[52px] bg-gray-50">
+                                {item.unitType || 'CRTN'}
+                              </div>
+                            ) : (
+                              <select
+                                disabled={isFormDisabled}
+                                className="w-full px-3 py-3 border-2 border-gray-300 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500 text-base font-medium uppercase min-h-[52px] disabled:opacity-50 disabled:cursor-not-allowed"
+                                value={item.unitType || 'CRTN'}
+                                onChange={(e) => updateCartItem(index, 'unitType', e.target.value)}
+                              >
+                                <option value="CRTN">CRTN</option>
+                                <option value="KG">KG</option>
+                                <option value="PIECE">PIECE</option>
+                                <option value="BOX">BOX</option>
+                                <option value="PKG">PKG</option>
+                                <option value="BAG">BAG</option>
+                                <option value="PC">PC</option>
+                                <option value="UNIT">UNIT</option>
+                              </select>
+                            )}
                           </td>
                           <td className="px-2 sm:px-3 py-3 sm:py-4 border-r-2 border-gray-200 align-middle">
                             <input
@@ -1949,8 +2118,21 @@ const PosPage = () => {
                             {(() => {
                               const qty = typeof item.qty === 'number' ? item.qty : 0
                               const price = typeof item.unitPrice === 'number' ? item.unitPrice : 0
-                              return (qty * price).toFixed(2)
+                              const itemDiscount = typeof item.discount === 'number' ? item.discount : 0
+                              return ((qty * price) - itemDiscount).toFixed(2)
                             })()}
+                          </td>
+                          <td className="px-2 sm:px-3 py-3 sm:py-4 border-r-2 border-gray-200 align-middle">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              disabled={isFormDisabled}
+                              className="w-full px-2 py-2 border-2 border-gray-300 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-medium min-h-[40px] disabled:opacity-50 disabled:cursor-not-allowed"
+                              value={item.discount === '' || item.discount === undefined ? '' : item.discount}
+                              onChange={(e) => updateCartItem(index, 'discount', e.target.value)}
+                              placeholder="0.00"
+                            />
                           </td>
                           <td className="px-2 sm:px-3 py-3 sm:py-4 text-right border-r-2 border-gray-200 font-semibold text-base align-middle">
                             {item.vatAmount.toFixed(2)}
@@ -2000,110 +2182,130 @@ const PosPage = () => {
                 cart.map((item, index) => (
                   <div key={index} className="bg-white rounded-xl border border-neutral-200 p-4">
                     {/* Header: Product Name or Search */}
-                    <div className="bg-neutral-50 p-3 border-b border-neutral-200 flex items-center justify-between">
-                      <div className="flex-1">
-                        {item.productId ? (
-                          <div>
-                            <p className="font-bold text-neutral-900 text-sm">#{index + 1} {item.productName}</p>
-                            <p className="text-xs text-neutral-600">{item.sku}</p>
-                          </div>
-                        ) : (
-                          <div className="relative">
-                            <p className="text-xs text-neutral-600 mb-1">#{index + 1} Select Product:</p>
-                            <input
-                              type="text"
-                              ref={(el) => productSearchRefs.current[index] = el}
-                              value={productSearchTerms[index] || ''}
-                              disabled={isFormDisabled}
-                              onChange={(e) => {
-                                const searchValue = e.target.value
-                                setProductSearchTerms(prev => ({ ...prev, [index]: searchValue }))
-                                if (searchValue.trim() && !showProductDropdown[index]) {
-                                  setShowProductDropdown(prev => ({ ...prev, [index]: true }))
-                                }
-                              }}
-                              onFocus={() => {
-                                if (isFormDisabled) return
-                                setShowProductDropdown(prev => ({ ...prev, [index]: true }))
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                              placeholder="Search product name or code..."
-                              className="product-search w-full px-3 py-2.5 border border-neutral-300 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+                    <div className="bg-neutral-50 p-3 border-b border-neutral-200">
+                      <div className="flex items-start gap-2 mb-2">
+                        {/* Product Image Thumbnail */}
+                        {item.productId && (() => {
+                          const product = products.find(p => p.id === item.productId)
+                          const imageUrl = product?.imageUrl || product?.image || null
+                          return imageUrl ? (
+                            <img 
+                              src={imageUrl} 
+                              alt={item.productName}
+                              className="w-10 h-10 object-cover rounded border border-gray-200 flex-shrink-0"
+                              onError={(e) => { e.target.style.display = 'none' }}
                             />
-                            {showProductDropdown[index] && (
-                              <div
-                                className="fixed bg-white border border-neutral-200 rounded-lg shadow-md z-[9998]"
-                                style={{
-                                  maxHeight: '60vh',
-                                  width: 'calc(100vw - 32px)',
-                                  top: `${productSearchRefs.current[index]?.getBoundingClientRect().bottom + 4}px`,
-                                  left: '16px'
-                                }}
-                                onMouseDown={(e) => e.stopPropagation()}
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                {(() => {
-                                  if (loadingProducts) {
-                                    return (
-                                      <div className="p-4 text-center">
-                                        <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                                        <p className="text-sm text-gray-500 mt-2">Loading products...</p>
-                                      </div>
-                                    )
-                                  }
-
-                                  const filtered = getFilteredProducts(index)
-                                  return filtered.length > 0 ? (
-                                    <div className="divide-y divide-gray-200">
-                                      {filtered.map((product) => (
-                                        <div
-                                          key={product.id}
-                                          className="p-3 hover:bg-primary-50 active:bg-primary-100 cursor-pointer"
-                                          onMouseDown={(e) => {
-                                            e.preventDefault()
-                                            e.stopPropagation()
-                                          }}
-                                          onClick={(e) => {
-                                            e.preventDefault()
-                                            e.stopPropagation()
-                                            addToCart(product, index)
-                                          }}
-                                        >
-                                          <div className="flex items-start justify-between">
-                                            <div className="flex-1 min-w-0">
-                                              <p className="font-semibold text-sm text-gray-900 truncate">{product.nameEn}</p>
-                                              <p className="text-xs text-gray-600 mt-0.5">AED {product.sellPrice.toFixed(2)}</p>
-                                            </div>
-                                            <span className={`ml-2 text-xs font-medium px-2 py-0.5 rounded ${product.stockQty > (product.reorderLevel || 0) ? 'bg-success/10 text-success' : 'bg-error/10 text-error'
-                                              }`}>
-                                              Stock: {product.stockQty}
-                                            </span>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  ) : (
-                                    <div className="p-4 text-center text-neutral-500 text-sm">
-                                      No products found
+                          ) : (
+                            <div className="w-10 h-10 bg-gray-100 rounded border border-gray-200 flex-shrink-0 flex items-center justify-center">
+                              <Package className="h-5 w-5 text-gray-400" />
+                            </div>
+                          )
+                        })()}
+                        <div className="flex-1 min-w-0">
+                          {item.productId ? (
+                            <div>
+                              <p className="font-bold text-neutral-900 text-sm">#{index + 1} {item.productName}</p>
+                              <p className="text-xs text-neutral-600">{item.sku}</p>
+                            </div>
+                          ) : null}
+                        </div>
+                        <button
+                          onClick={() => removeFromCart(index)}
+                          disabled={isFormDisabled}
+                          className="text-error hover:text-error/90 p-2 rounded-lg hover:bg-error/10 min-w-[44px] min-h-[44px] flex items-center justify-center active:scale-95 transition-transform disabled:opacity-50 disabled:cursor-not-allowed"
+                          aria-label="Delete item"
+                        >
+                          <Trash2 className="h-5 w-5" />
+                        </button>
+                      </div>
+                      {!item.productId && (
+                        <div className="relative w-full mt-2">
+                          <p className="text-xs text-neutral-600 mb-1">#{index + 1} Select Product:</p>
+                          <input
+                            type="text"
+                            ref={(el) => productSearchRefs.current[index] = el}
+                            value={productSearchTerms[index] || ''}
+                            disabled={isFormDisabled}
+                            onChange={(e) => {
+                              const searchValue = e.target.value
+                              setProductSearchTerms(prev => ({ ...prev, [index]: searchValue }))
+                              if (searchValue.trim() && !showProductDropdown[index]) {
+                                setShowProductDropdown(prev => ({ ...prev, [index]: true }))
+                              }
+                            }}
+                            onFocus={() => {
+                              if (isFormDisabled) return
+                              setShowProductDropdown(prev => ({ ...prev, [index]: true }))
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            placeholder="Search product name or code..."
+                            className="product-search w-full px-3 py-2.5 border border-neutral-300 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+                          />
+                          {showProductDropdown[index] && (
+                            <div
+                              className="fixed bg-white border border-neutral-200 rounded-lg shadow-md z-[9998]"
+                              style={{
+                                maxHeight: '60vh',
+                                width: 'calc(100vw - 32px)',
+                                top: `${productSearchRefs.current[index]?.getBoundingClientRect().bottom + 4}px`,
+                                left: '16px'
+                              }}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {(() => {
+                                if (loadingProducts) {
+                                  return (
+                                    <div className="p-4 text-center">
+                                      <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                                      <p className="text-sm text-gray-500 mt-2">Loading products...</p>
                                     </div>
                                   )
-                                })()}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => removeFromCart(index)}
-                        disabled={isFormDisabled}
-                        className="ml-2 text-error hover:text-error/90 p-2 rounded-lg hover:bg-error/10 min-w-[44px] min-h-[44px] flex items-center justify-center active:scale-95 transition-transform disabled:opacity-50 disabled:cursor-not-allowed"
-                        aria-label="Delete item"
-                      >
-                        <Trash2 className="h-5 w-5" />
-                      </button>
+                                }
+
+                                const filtered = getFilteredProducts(index)
+                                return filtered.length > 0 ? (
+                                  <div className="divide-y divide-gray-200">
+                                    {filtered.map((product) => (
+                                      <div
+                                        key={product.id}
+                                        className="p-3 hover:bg-primary-50 active:bg-primary-100 cursor-pointer"
+                                        onMouseDown={(e) => {
+                                          e.preventDefault()
+                                          e.stopPropagation()
+                                        }}
+                                        onClick={(e) => {
+                                          e.preventDefault()
+                                          e.stopPropagation()
+                                          addToCart(product, index)
+                                        }}
+                                      >
+                                        <div className="flex items-start justify-between">
+                                          <div className="flex-1 min-w-0">
+                                            <p className="font-semibold text-sm text-gray-900 truncate">{product.nameEn}</p>
+                                            <p className="text-xs text-gray-600 mt-0.5">AED {product.sellPrice.toFixed(2)}</p>
+                                          </div>
+                                          <span className={`ml-2 text-xs font-medium px-2 py-0.5 rounded ${product.stockQty > (product.reorderLevel || 0) ? 'bg-success/10 text-success' : 'bg-error/10 text-error'
+                                            }`}>
+                                            Stock: {product.stockQty}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="p-4 text-center text-neutral-500 text-sm">
+                                    No products found
+                                  </div>
+                                )
+                              })()}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
-                    {/* Body: Input Fields - Large Touch Targets */}
+                    {/* Body: Input Fields - Large Touch Targets - Mobile Only */}
                     <div className="p-3 space-y-2">
                       {/* Row 1: Quantity and Unit - min-h-11 (44px) touch targets */}
                       <div className="grid grid-cols-2 gap-2">
@@ -2167,7 +2369,7 @@ const PosPage = () => {
                             })()}</p>
                           </div>
                           <div className="text-center">
-                            <p className="text-neutral-600 font-medium">VAT 5%</p>
+                            <p className="text-neutral-600 font-medium">VAT {vatPercent}%</p>
                             <p className="font-bold text-neutral-900">{item.vatAmount.toFixed(2)}</p>
                           </div>
                           <div className="text-center">
@@ -2209,7 +2411,7 @@ const PosPage = () => {
                   <span className="font-bold text-xs sm:text-sm text-gray-900 whitespace-nowrap">AED {totals.subtotal.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-xs font-medium text-gray-700">VAT 5%</span>
+                  <span className="text-xs font-medium text-gray-700">VAT {vatPercent}%</span>
                   <span className="font-bold text-xs sm:text-sm text-gray-900 whitespace-nowrap">AED {totals.vatTotal.toFixed(2)}</span>
                 </div>
                 {discount > 0 && (
@@ -2295,6 +2497,24 @@ const PosPage = () => {
                       value={paymentAmount}
                       onChange={(e) => setPaymentAmount(e.target.value)}
                     />
+                    {/* Quick Amount Buttons */}
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {[100, 500, 1000, 2000, 5000].map(amount => (
+                        <button
+                          key={amount}
+                          type="button"
+                          disabled={isFormDisabled}
+                          onClick={() => {
+                            const totals = calculateTotals()
+                            const maxAmount = Math.min(amount, totals.grandTotal)
+                            setPaymentAmount(maxAmount.toFixed(2))
+                          }}
+                          className="px-2 py-1 text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100 active:bg-blue-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {amount}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
 
@@ -2376,7 +2596,7 @@ const PosPage = () => {
                 <span className="font-medium text-[#0F172A]">AED {totals.subtotal.toFixed(2)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#475569]">VAT 5%</span>
+                <span className="text-[#475569]">VAT {vatPercent}%</span>
                 <span className="font-medium text-[#0F172A]">AED {totals.vatTotal.toFixed(2)}</span>
               </div>
               <div className="pt-2 border-t border-[#E5E7EB]">
@@ -2425,6 +2645,23 @@ const PosPage = () => {
                     value={paymentAmount}
                     onChange={(e) => setPaymentAmount(e.target.value)}
                   />
+                  {/* Quick Amount Buttons */}
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {[100, 500, 1000, 2000, 5000].map(amount => (
+                      <button
+                        key={amount}
+                        type="button"
+                        onClick={() => {
+                          const totals = calculateTotals()
+                          const maxAmount = Math.min(amount, totals.grandTotal)
+                          setPaymentAmount(maxAmount.toFixed(2))
+                        }}
+                        className="px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100 active:bg-blue-200 transition-colors"
+                      >
+                        {amount} AED
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
               <div>

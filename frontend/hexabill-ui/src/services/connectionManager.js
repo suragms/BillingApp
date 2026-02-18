@@ -11,6 +11,9 @@ class ConnectionManager {
     this.listeners = []
     this.retryQueue = []
     this.isRetrying = false
+    this.consecutiveHealthFailures = 0
+    this.HEALTH_CHECK_INTERVAL_MS = 15000
+    this.HEALTH_CHECK_BACKOFF_MS = 60000
   }
 
   // Subscribe to connection status changes
@@ -32,17 +35,21 @@ class ConnectionManager {
     })
   }
 
-  // Mark connection as failed
+  isLoginPage() {
+    if (typeof window === 'undefined') return false
+    const p = window.location.pathname
+    return p === '/login' || p === '/Admin26'
+  }
+
+  // Mark connection as failed. After first failure, block all requests to avoid flood of ERR_CONNECTION_REFUSED.
   markDisconnected() {
     if (this.isConnected) {
       this.isConnected = false
-      this.failedRequests++
+      this.failedRequests = this.maxFailedRequests // Block immediately so other components don't all hit the server
       this.notifyStatusChange(false)
-      
-      // Start checking for reconnection
-      this.startConnectionCheck()
+      if (!this.isLoginPage()) this.startConnectionCheck()
     } else {
-      this.failedRequests++
+      this.failedRequests = this.maxFailedRequests
     }
   }
 
@@ -52,6 +59,7 @@ class ConnectionManager {
     if (wasDisconnected) {
       this.isConnected = true
       this.failedRequests = 0
+      this.consecutiveHealthFailures = 0
       this.lastConnectionCheck = Date.now()
       this.notifyStatusChange(true)
       this.stopConnectionCheck()
@@ -64,69 +72,67 @@ class ConnectionManager {
     }
   }
 
-  // Check if server is available (same URL logic as api.js for production)
+  // Check if server is available (same URL as api.js via apiConfig)
   async checkConnection() {
+    if (this.isLoginPage()) return false
     try {
-      const envApi = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
-      const isProduction = typeof window !== 'undefined' && window.location?.hostname !== 'localhost' && window.location?.hostname !== '127.0.0.1'
-      const rawBase = envApi && envApi.startsWith('http') ? envApi : (isProduction ? 'https://hexabill.onrender.com/api' : 'http://localhost:5000/api')
-      const baseURL = rawBase.endsWith('/api') ? rawBase.replace(/\/api$/, '') : rawBase
+      const { getApiBaseUrl } = await import('./apiConfig')
+      const apiBase = getApiBaseUrl()
+      const baseURL = apiBase.endsWith('/api') ? apiBase.replace(/\/api$/, '') : apiBase
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 3000) // 3 second timeout
       
-      // Try health endpoint first, fallback to diagnostics/status
-      const endpoints = ['/health', '/status']
+      // Single health check to avoid multiple failed-request logs when backend is down
       let connected = false
-      
-      for (const endpoint of endpoints) {
-        try {
-          const response = await fetch(`${baseURL}${endpoint}`, {
-            method: 'GET',
-            signal: controller.signal,
-            headers: {
-              'Content-Type': 'application/json',
-            }
-          })
-          
-          // If we get any response (even 401/500), server is up
-          if (response && response.status !== 0) {
-            connected = true
-            break
-          }
-        } catch (e) {
-          // Try next endpoint
-          continue
-        }
+      try {
+        const response = await fetch(`${baseURL}/health`, {
+          method: 'GET',
+          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json' },
+        })
+        if (response && response.status !== 0) connected = true
+      } catch (_) {
+        // Backend down; avoid logging to reduce console noise
       }
       
       clearTimeout(timeoutId)
       
       if (connected) {
+        this.consecutiveHealthFailures = 0
         this.markConnected()
         return true
       } else {
+        this.consecutiveHealthFailures = (this.consecutiveHealthFailures || 0) + 1
         this.markDisconnected()
         return false
       }
     } catch (error) {
+      this.consecutiveHealthFailures = (this.consecutiveHealthFailures || 0) + 1
       this.markDisconnected()
       return false
     }
   }
 
-  // Start periodic connection checking
+  getHealthCheckIntervalMs() {
+    const failures = this.consecutiveHealthFailures || 0
+    if (failures >= 6) return this.HEALTH_CHECK_BACKOFF_MS
+    return this.HEALTH_CHECK_INTERVAL_MS
+  }
+
+  // Start periodic connection checking (never on login page). Backoff (15s → 60s after 6 failures) to reduce console spam.
   startConnectionCheck() {
-    if (this.connectionCheckInterval) {
+    if (this.connectionCheckInterval || this.isLoginPage()) {
       return
     }
-    
-    // Check immediately
-    this.checkConnection()
-    
-    // Then check every 10 seconds
-    this.connectionCheckInterval = setInterval(() => {
+    const runCheck = () => {
+      if (this.isLoginPage()) return
       this.checkConnection()
-    }, 10000)
+      const intervalMs = this.getHealthCheckIntervalMs()
+      if (this.connectionCheckInterval) clearInterval(this.connectionCheckInterval)
+      this.connectionCheckInterval = setInterval(runCheck, intervalMs)
+    }
+    this.checkConnection()
+    this.connectionCheckInterval = setInterval(runCheck, this.getHealthCheckIntervalMs())
   }
 
   // Stop connection checking
@@ -183,6 +189,7 @@ class ConnectionManager {
   reset() {
     this.isConnected = true
     this.failedRequests = 0
+    this.consecutiveHealthFailures = 0
     this.stopConnectionCheck()
     this.retryQueue = []
     this.notifyStatusChange(true)

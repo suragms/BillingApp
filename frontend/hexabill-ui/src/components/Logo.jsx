@@ -1,10 +1,25 @@
 import React from 'react'
 import { useBranding } from '../contexts/TenantBrandingContext'
+import { getApiBaseUrlNoSuffix } from '../services/apiConfig'
 
 const Logo = ({ className = '', showText = true, size = 'default' }) => {
   const { companyName, companyLogo } = useBranding()
   const [logoError, setLogoError] = React.useState(false)
-  React.useEffect(() => { setLogoError(false) }, [companyLogo])
+  const [logoKey, setLogoKey] = React.useState(0)
+  
+  React.useEffect(() => { 
+    setLogoError(false)
+    setLogoKey(prev => prev + 1) // Force re-render when logo changes
+  }, [companyLogo])
+
+  // Listen for logo update events
+  React.useEffect(() => {
+    const handleLogoUpdate = () => {
+      setLogoKey(prev => prev + 1)
+    }
+    window.addEventListener('logo-updated', handleLogoUpdate)
+    return () => window.removeEventListener('logo-updated', handleLogoUpdate)
+  }, [])
 
   const sizeClasses = {
     small: 'h-8 w-8',
@@ -20,8 +35,11 @@ const Logo = ({ className = '', showText = true, size = 'default' }) => {
     xl: 'text-3xl'
   }
 
-  const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/api\/?$/, '')
-  const logoSrc = companyLogo?.startsWith('http') ? companyLogo : companyLogo ? `${apiBase}${companyLogo.startsWith('/') ? '' : '/'}${companyLogo}` : null
+  const apiBase = getApiBaseUrlNoSuffix()
+  // Remove existing cache-busting params; ensure relative paths are under /uploads/ for static files
+  const logoUrlClean = companyLogo ? companyLogo.split('?')[0] : null
+  const pathForSrc = logoUrlClean?.startsWith('http') ? logoUrlClean : logoUrlClean ? (logoUrlClean.startsWith('/') ? logoUrlClean : `/uploads/${logoUrlClean}`) : null
+  const logoSrc = pathForSrc ? (pathForSrc.startsWith('http') ? `${pathForSrc}?t=${Date.now()}` : `${apiBase}${pathForSrc.startsWith('/') ? '' : '/'}${pathForSrc}?t=${Date.now()}`) : null
 
   return (
     <div className={`flex items-center space-x-3 ${className}`}>

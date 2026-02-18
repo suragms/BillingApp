@@ -714,6 +714,88 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
+        [HttpGet("users/{id:int}/activity")]
+        public async Task<ActionResult<ApiResponse<List<AuditLogDto>>>> GetUserActivity(int id, [FromQuery] int limit = 50)
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                var userExists = await _context.Users.AnyAsync(u => u.Id == id && u.TenantId == tenantId);
+                if (!userExists)
+                    return NotFound(new ApiResponse<List<AuditLogDto>> { Success = false, Message = "User not found" });
+
+                var logs = await _context.AuditLogs
+                    .Where(a => a.UserId == id && (a.TenantId == tenantId || a.OwnerId == tenantId))
+                    .OrderByDescending(a => a.CreatedAt)
+                    .Take(Math.Min(limit, 200))
+                    .Select(a => new AuditLogDto
+                    {
+                        Id = a.Id,
+                        UserName = a.User.Name,
+                        Action = a.Action,
+                        Details = a.Details,
+                        CreatedAt = a.CreatedAt
+                    })
+                    .ToListAsync();
+
+                return Ok(new ApiResponse<List<AuditLogDto>>
+                {
+                    Success = true,
+                    Message = "User activity retrieved",
+                    Data = logs
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<List<AuditLogDto>>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
+        [HttpGet("sessions")]
+        public async Task<ActionResult<ApiResponse<List<UserSessionDto>>>> GetSessions([FromQuery] int limit = 100)
+        {
+            try
+            {
+                var tenantId = CurrentTenantId;
+                var sessions = await _context.UserSessions
+                    .Where(s => s.TenantId == tenantId)
+                    .OrderByDescending(s => s.LoginAt)
+                    .Take(Math.Min(limit, 200))
+                    .Select(s => new UserSessionDto
+                    {
+                        Id = s.Id,
+                        UserId = s.UserId,
+                        UserName = s.User.Name,
+                        UserEmail = s.User.Email,
+                        LoginAt = s.LoginAt,
+                        UserAgent = s.UserAgent,
+                        IpAddress = s.IpAddress
+                    })
+                    .ToListAsync();
+
+                return Ok(new ApiResponse<List<UserSessionDto>>
+                {
+                    Success = true,
+                    Message = "Sessions retrieved",
+                    Data = sessions
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new ApiResponse<List<UserSessionDto>>
+                {
+                    Success = false,
+                    Message = "An error occurred",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
+        }
+
         [HttpGet("audit-logs")]
         public async Task<ActionResult<ApiResponse<PagedResponse<AuditLogDto>>>> GetAuditLogs(
             [FromQuery] int page = 1,
@@ -794,7 +876,11 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         Phone = u.Phone,
                         DashboardPermissions = u.DashboardPermissions,
                         CreatedAt = u.CreatedAt,
-                        OwnerId = u.TenantId ?? 0
+                        LastLoginAt = u.LastLoginAt,
+                        LastActiveAt = u.LastActiveAt,
+                        OwnerId = u.TenantId ?? 0,
+                        AssignedBranchIds = _context.BranchStaff.Where(bs => bs.UserId == u.Id).Select(bs => bs.BranchId).ToList(),
+                        AssignedRouteIds = _context.RouteStaff.Where(rs => rs.UserId == u.Id).Select(rs => rs.RouteId).ToList()
                     })
                     .ToListAsync();
 
@@ -1133,6 +1219,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
         public string Action { get; set; } = string.Empty;
         public string? Details { get; set; }
         public DateTime CreatedAt { get; set; }
+    }
+
+    public class UserSessionDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public string UserName { get; set; } = string.Empty;
+        public string UserEmail { get; set; } = string.Empty;
+        public DateTime LoginAt { get; set; }
+        public string? UserAgent { get; set; }
+        public string? IpAddress { get; set; }
     }
 
     public class BackupInfoDto

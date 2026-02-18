@@ -20,6 +20,7 @@ export const AuthProvider = ({ children }) => {
     const token = localStorage.getItem('token')
     const userData = localStorage.getItem('user')
     const savedTenantId = localStorage.getItem('selected_tenant_id')
+    const path = typeof window !== 'undefined' ? window.location.pathname : ''
 
     if (savedTenantId) {
       setImpersonatedTenantId(parseInt(savedTenantId, 10))
@@ -29,6 +30,12 @@ export const AuthProvider = ({ children }) => {
       try {
         const parsedUser = JSON.parse(userData)
         setUser(parsedUser)
+
+        // Skip validate on login page to avoid ERR_CONNECTION_REFUSED when backend is down
+        if (path === '/login' || path === '/Admin26') {
+          setLoading(false)
+          return
+        }
 
         // Validate token silently - don't show errors on initial load
         authAPI.validateToken()
@@ -107,9 +114,14 @@ export const AuthProvider = ({ children }) => {
         localStorage.setItem('user', JSON.stringify(userData))
         setUser(userData)
 
-        // Clear any previous impersonation
-        localStorage.removeItem('selected_tenant_id')
-        setImpersonatedTenantId(null)
+        // Phase 4: Set tenant context for API/branding (normal users only; System Admin has tenantId 0 and should not set)
+        if (tenantId != null && tenantId !== undefined && tenantId !== 0) {
+          localStorage.setItem('selected_tenant_id', String(tenantId))
+          setImpersonatedTenantId(parseInt(tenantId, 10))
+        } else {
+          localStorage.removeItem('selected_tenant_id')
+          setImpersonatedTenantId(null)
+        }
 
         return { success: true, data: response.data }
       } else {

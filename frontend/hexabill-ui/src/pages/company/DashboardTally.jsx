@@ -4,12 +4,13 @@ import {
     Package, ShoppingCart, Users, Truck, FileText,
     Settings, Database, BarChart3, DollarSign, TrendingUp,
     AlertTriangle, ChevronRight, BookOpen, Wallet,
-    Building2, MapPin
+    Building2, MapPin, RefreshCw
 } from 'lucide-react'
+import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from 'recharts'
 import { useAuth } from '../../hooks/useAuth'
 import { formatCurrency } from '../../utils/currency'
 import toast from 'react-hot-toast'
-import { reportsAPI, alertsAPI } from '../../services'
+import { reportsAPI, alertsAPI, usersAPI, branchesAPI } from '../../services'
 import { isAdminOrOwner, isOwner } from '../../utils/roles'
 import { useBranding } from '../../contexts/TenantBrandingContext'
 
@@ -18,6 +19,12 @@ const DashboardTally = () => {
     const { companyName } = useBranding()
     const navigate = useNavigate()
     const [loading, setLoading] = useState(true)
+    const [dateRange, setDateRange] = useState('today') // 'today' | 'week' | 'month' | 'custom'
+    const [customFromDate, setCustomFromDate] = useState('')
+    const [customToDate, setCustomToDate] = useState('')
+    const [selectedBranchId, setSelectedBranchId] = useState(null) // For Staff branch filtering
+    const [staffAssignedBranchIds, setStaffAssignedBranchIds] = useState([])
+    const [availableBranches, setAvailableBranches] = useState([])
     const [stats, setStats] = useState({
         salesToday: 0,
         expensesToday: 0,
@@ -28,6 +35,10 @@ const DashboardTally = () => {
         invoicesWeekly: 0,
         invoicesMonthly: 0
     })
+    const [branchBreakdown, setBranchBreakdown] = useState([])
+    const [dailySalesTrend, setDailySalesTrend] = useState([])
+    const [topCustomers, setTopCustomers] = useState([])
+    const [topProducts, setTopProducts] = useState([])
 
 
     // Request throttling for dashboard
@@ -84,12 +95,12 @@ const DashboardTally = () => {
         // Declare intervals at the top level
         let interval = null
 
-        // Auto-refresh every 2 minutes (increased from 30 seconds)
+        // Auto-refresh every 30 seconds (reduced from 2 minutes for better real-time updates)
         interval = setInterval(() => {
             if (document.visibilityState === 'visible' && !isFetchingRef.current) {
                 fetchStatsThrottled()
             }
-        }, 120000) // 2 minutes
+        }, 30000) // 30 seconds
 
         // Listen for global data update events (with debouncing)
         let debounceTimer = null
@@ -122,19 +133,95 @@ const DashboardTally = () => {
             window.removeEventListener('paymentCreated', handleDataUpdate)
             window.removeEventListener('customerCreated', handleDataUpdate)
         }
+    }, [user, dateRange, customFromDate, customToDate, selectedBranchId]) // Re-fetch when date range or branch changes
+
+    // Calculate date range based on selected period
+    const getDateRange = () => {
+        const today = new Date()
+        const todayStr = today.toISOString().split('T')[0]
+        
+        switch(dateRange) {
+            case 'today':
+                return { from: todayStr, to: todayStr }
+            case 'week':
+                const weekStart = new Date(today)
+                weekStart.setDate(today.getDate() - today.getDay()) // Start of week (Sunday = 0)
+                return { from: weekStart.toISOString().split('T')[0], to: todayStr }
+            case 'month':
+                const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+                return { from: monthStart.toISOString().split('T')[0], to: todayStr }
+            case 'custom':
+                if (customFromDate && customToDate) {
+                    return { from: customFromDate, to: customToDate }
+                }
+                // Fallback to today if custom dates not set
+                return { from: todayStr, to: todayStr }
+            default:
+                return { from: todayStr, to: todayStr }
+        }
+    }
+
+    // Load Staff assignments and branches
+    useEffect(() => {
+        const loadStaffAssignments = async () => {
+            if (!user || isAdminOrOwner(user)) {
+                setStaffAssignedBranchIds([])
+                setSelectedBranchId(null)
+                return
+            }
+
+            try {
+                // Fetch Staff assignments
+                const meRes = await usersAPI.getMyAssignedRoutes()
+                if (meRes?.success && meRes?.data) {
+                    const branchIds = meRes.data.assignedBranchIds || []
+                    setStaffAssignedBranchIds(branchIds)
+                    
+                    // Auto-select single branch if only one assigned
+                    if (branchIds.length === 1) {
+                        setSelectedBranchId(branchIds[0])
+                    } else if (branchIds.length > 1) {
+                        // If multiple branches, select first one by default
+                        setSelectedBranchId(branchIds[0])
+                    }
+                } else {
+                    setStaffAssignedBranchIds([])
+                    setSelectedBranchId(null)
+                }
+
+                // Fetch branches for selector dropdown
+                const bRes = await branchesAPI.getBranches()
+                if (bRes?.success && bRes?.data) {
+                    const branchList = bRes.data.filter(b => 
+                        staffAssignedBranchIds.length === 0 || staffAssignedBranchIds.includes(b.id)
+                    )
+                    setAvailableBranches(branchList)
+                }
+            } catch (error) {
+                console.error('Failed to load staff assignments:', error)
+                setStaffAssignedBranchIds([])
+                setSelectedBranchId(null)
+            }
+        }
+
+        loadStaffAssignments()
     }, [user])
 
     const fetchStats = async () => {
         try {
             setLoading(true)
-            // CRITICAL: Fetch real data for today with explicit date range
-            const today = new Date()
-            const todayStr = today.toISOString().split('T')[0]
+            const { from, to } = getDateRange()
 
-            const response = await reportsAPI.getSummaryReport({
-                fromDate: todayStr,
-                toDate: todayStr
-            })
+            // Pass branchId if Staff user has selected a branch
+            const params = {
+                fromDate: from,
+                toDate: to
+            }
+            if (selectedBranchId && !isAdminOrOwner(user)) {
+                params.branchId = selectedBranchId
+            }
+
+            const response = await reportsAPI.getSummaryReport(params)
 
             if (response?.success && response?.data) {
                 const data = response.data
@@ -158,6 +245,34 @@ const DashboardTally = () => {
                     invoicesWeekly: parseInt(data.invoicesWeekly || data.InvoicesWeekly) || 0,
                     invoicesMonthly: parseInt(data.invoicesMonthly || data.InvoicesMonthly) || 0
                 })
+                
+                // Set branch breakdown
+                if (data.branchBreakdown && Array.isArray(data.branchBreakdown)) {
+                    setBranchBreakdown(data.branchBreakdown)
+                } else {
+                    setBranchBreakdown([])
+                }
+                
+                // Set daily sales trend
+                if (data.dailySalesTrend && Array.isArray(data.dailySalesTrend)) {
+                    setDailySalesTrend(data.dailySalesTrend)
+                } else {
+                    setDailySalesTrend([])
+                }
+                
+                // Set top customers
+                if (data.topCustomersToday && Array.isArray(data.topCustomersToday)) {
+                    setTopCustomers(data.topCustomersToday)
+                } else {
+                    setTopCustomers([])
+                }
+                
+                // Set top products
+                if (data.topProductsToday && Array.isArray(data.topProductsToday)) {
+                    setTopProducts(data.topProductsToday)
+                } else {
+                    setTopProducts([])
+                }
             } else {
                 console.error('Dashboard API response invalid:', response)
                 toast.error('Failed to load dashboard data: Invalid response')
@@ -170,7 +285,15 @@ const DashboardTally = () => {
         }
     }
 
-
+    const handleRefresh = async () => {
+        if (isFetchingRef.current) return
+        isFetchingRef.current = true
+        try {
+            await fetchStats()
+        } finally {
+            isFetchingRef.current = false
+        }
+    }
 
     const gatewayMenu = [
         {
@@ -187,10 +310,12 @@ const DashboardTally = () => {
             title: 'TRANSACTIONS',
             items: [
                 { id: 'pos', icon: ShoppingCart, label: 'POS Billing', path: '/pos', shortcut: 'F3', primary: true },
-                ...(isAdminOrOwner(user) ? [
-                    { id: 'purchases', icon: Truck, label: 'Purchases', path: '/purchases', shortcut: 'F4' },
-                    { id: 'expenses', icon: Wallet, label: 'Expenses', path: '/expenses', shortcut: 'F5' }
-                ] : []),
+                ...(isAdminOrOwner(user)
+                    ? [
+                        { id: 'purchases', icon: Truck, label: 'Purchases', path: '/purchases', shortcut: 'F4' },
+                        { id: 'expenses', icon: Wallet, label: 'Expenses', path: '/expenses', shortcut: 'F5' }
+                    ]
+                    : [{ id: 'expenses', icon: Wallet, label: 'Add expense', path: '/expenses', shortcut: 'F5' }]),
                 { id: 'customerLedger', icon: FileText, label: 'Customer Ledger', path: '/ledger', shortcut: 'F10' },
                 { id: 'salesLedger', icon: BookOpen, label: 'Sales Ledger', path: '/sales-ledger', shortcut: 'F10' }
             ]
@@ -202,6 +327,7 @@ const DashboardTally = () => {
                     { id: 'salesTrend', icon: BarChart3, label: 'Sales Report', path: '/reports?tab=sales', shortcut: 'F7' },
                     { id: 'profitToday', icon: TrendingUp, label: 'Profit & Loss', path: '/reports?tab=profit-loss', shortcut: 'F8' },
                     { id: 'pendingBills', icon: DollarSign, label: 'Outstanding Bills', path: '/reports?tab=outstanding', shortcut: 'F9' },
+                    { id: 'staffPerformance', icon: Users, label: 'Staff Performance', path: '/reports?tab=staff', shortcut: '', adminOnly: true },
                     { id: 'routesSummary', icon: MapPin, label: 'Routes summary & ledger', path: '/routes', shortcut: '', adminOnly: true }
                 ] : [])
             ]
@@ -221,20 +347,118 @@ const DashboardTally = () => {
             <div className="flex flex-col lg:flex-row h-full gap-4">
                 {/* Central Content */}
                 <div className="flex-1 space-y-4">
+                    {/* Date Range Selector */}
+                    <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                        <div className="flex flex-wrap items-center gap-3">
+                            <span className="text-sm font-medium text-neutral-700">Period:</span>
+                            <button
+                                type="button"
+                                onClick={handleRefresh}
+                                disabled={loading}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-60"
+                                title="Refresh dashboard data"
+                            >
+                                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                                <span>Refresh</span>
+                            </button>
+                            <button
+                                onClick={() => setDateRange('today')}
+                                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                                    dateRange === 'today'
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
+                                }`}
+                            >
+                                Today
+                            </button>
+                            <button
+                                onClick={() => setDateRange('week')}
+                                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                                    dateRange === 'week'
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
+                                }`}
+                            >
+                                This Week
+                            </button>
+                            <button
+                                onClick={() => setDateRange('month')}
+                                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                                    dateRange === 'month'
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
+                                }`}
+                            >
+                                This Month
+                            </button>
+                            <button
+                                onClick={() => setDateRange('custom')}
+                                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                                    dateRange === 'custom'
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
+                                }`}
+                            >
+                                Custom
+                            </button>
+                            {dateRange === 'custom' && (
+                                <>
+                                    <input
+                                        type="date"
+                                        value={customFromDate}
+                                        onChange={(e) => setCustomFromDate(e.target.value)}
+                                        className="px-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="From"
+                                    />
+                                    <span className="text-neutral-500">to</span>
+                                    <input
+                                        type="date"
+                                        value={customToDate}
+                                        onChange={(e) => setCustomToDate(e.target.value)}
+                                        className="px-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="To"
+                                    />
+                                </>
+                            )}
+                            {/* Branch Selector for Staff with multiple branches */}
+                            {!isAdminOrOwner(user) && staffAssignedBranchIds.length > 1 && (
+                                <>
+                                    <span className="text-sm font-medium text-neutral-700 ml-2">Branch:</span>
+                                    <select
+                                        value={selectedBranchId || ''}
+                                        onChange={(e) => setSelectedBranchId(e.target.value ? parseInt(e.target.value) : null)}
+                                        className="px-3 py-1.5 text-sm border border-neutral-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        <option value="">All Branches</option>
+                                        {availableBranches.map(branch => (
+                                            <option key={branch.id} value={branch.id}>
+                                                {branch.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
                     {/* Stats Cards */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                         {canShow('salesToday') && (
                             <StatCard
-                                title="Sales Today"
+                                title={dateRange === 'today' ? 'Sales Today' : dateRange === 'week' ? 'Sales This Week' : dateRange === 'month' ? 'Sales This Month' : 'Sales'}
                                 value={stats.salesToday}
                                 icon={DollarSign}
                                 color="green"
                                 loading={loading}
                             />
                         )}
-                        {isAdminOrOwner(user) && canShow('expensesToday') && (
+                        {(isAdminOrOwner(user) || (!isAdminOrOwner(user) && selectedBranchId)) && canShow('expensesToday') && (
                             <StatCard
-                                title="Expenses Today"
+                                title={
+                                    dateRange === 'today' ? 'Expenses Today' : 
+                                    dateRange === 'week' ? 'Expenses This Week' : 
+                                    dateRange === 'month' ? 'Expenses This Month' : 'Expenses'
+                                }
                                 value={stats.expensesToday}
                                 icon={TrendingUp}
                                 color="red"
@@ -243,13 +467,138 @@ const DashboardTally = () => {
                         )}
                         {isAdminOrOwner(user) && canShow('profitToday') && (
                             <StatCard
-                                title="Profit Today"
+                                title={dateRange === 'today' ? 'Profit Today' : dateRange === 'week' ? 'Profit This Week' : dateRange === 'month' ? 'Profit This Month' : 'Profit'}
                                 value={stats.profitToday}
                                 icon={TrendingUp}
                                 color="blue"
                                 loading={loading}
                                 adminOnly
                             />
+                        )}
+                    </div>
+
+                    {/* Branch Breakdown Card */}
+                    {isAdminOrOwner(user) && branchBreakdown.length > 0 && (
+                        <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                            <h3 className="text-sm font-medium text-neutral-700 mb-3">
+                                Branch Breakdown {dateRange === 'today' ? '(Today)' : dateRange === 'week' ? '(This Week)' : dateRange === 'month' ? '(This Month)' : ''}
+                            </h3>
+                            <div className="space-y-2">
+                                {branchBreakdown.map(branch => (
+                                    <div 
+                                        key={branch.branchId} 
+                                        className="flex items-center justify-between text-sm p-2 hover:bg-neutral-50 rounded-md cursor-pointer"
+                                        onClick={() => navigate(`/branches/${branch.branchId}`)}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <span className="font-medium text-neutral-900">{branch.branchName}</span>
+                                            <span className="text-neutral-500">({branch.invoiceCount} invoices)</span>
+                                        </div>
+                                        <div className="flex items-center gap-4">
+                                            <span className="text-neutral-700">Sales: <span className="font-medium">{formatCurrency(branch.sales)}</span></span>
+                                            <span className="text-neutral-700">Expenses: <span className="font-medium">{formatCurrency(branch.expenses)}</span></span>
+                                            <span className={`font-medium ${branch.profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                Profit: {formatCurrency(branch.profit)}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Sales Trend Chart */}
+                    {dailySalesTrend.length > 0 && (
+                        <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                            <h3 className="text-sm font-medium text-neutral-700 mb-3">Sales Trend (Last 7 Days)</h3>
+                            <ResponsiveContainer width="100%" height={150}>
+                                <BarChart data={dailySalesTrend}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                                    <XAxis 
+                                        dataKey="date" 
+                                        tickFormatter={(d) => {
+                                            const date = new Date(d)
+                                            return date.toLocaleDateString('en', { weekday: 'short', day: 'numeric' })
+                                        }}
+                                        stroke="#6b7280"
+                                        fontSize={12}
+                                    />
+                                    <YAxis 
+                                        tickFormatter={(v) => {
+                                            if (v >= 1000) return `${(v/1000).toFixed(1)}k`
+                                            return v.toString()
+                                        }}
+                                        stroke="#6b7280"
+                                        fontSize={12}
+                                    />
+                                    <Tooltip 
+                                        formatter={(value) => formatCurrency(value)}
+                                        labelFormatter={(label) => {
+                                            const date = new Date(label)
+                                            return date.toLocaleDateString('en', { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' })
+                                        }}
+                                        contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '6px' }}
+                                    />
+                                    <Bar dataKey="sales" fill="#3B82F6" radius={[4, 4, 0, 0]} />
+                                </BarChart>
+                            </ResponsiveContainer>
+                        </div>
+                    )}
+
+                    {/* Top Customers and Products */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        {/* Top Customers */}
+                        {topCustomers.length > 0 && (
+                            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                                <h3 className="text-sm font-medium text-neutral-700 mb-3">
+                                    Top Customers {dateRange === 'today' ? 'Today' : dateRange === 'week' ? 'This Week' : dateRange === 'month' ? 'This Month' : ''}
+                                </h3>
+                                <div className="space-y-2">
+                                    {topCustomers.map((customer, idx) => (
+                                        <div 
+                                            key={customer.customerId} 
+                                            className="flex items-center justify-between text-sm p-2 hover:bg-neutral-50 rounded-md cursor-pointer"
+                                            onClick={() => navigate(`/ledger?customerId=${customer.customerId}`)}
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-neutral-400 font-medium">#{idx + 1}</span>
+                                                <span className="font-medium text-neutral-900">{customer.customerName}</span>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-neutral-600">{formatCurrency(customer.totalSales)}</span>
+                                                <span className="text-neutral-500 text-xs">({customer.invoiceCount} invoices)</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Top Products */}
+                        {topProducts.length > 0 && (
+                            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                                <h3 className="text-sm font-medium text-neutral-700 mb-3">
+                                    Top Products {dateRange === 'today' ? 'Today' : dateRange === 'week' ? 'This Week' : dateRange === 'month' ? 'This Month' : ''}
+                                </h3>
+                                <div className="space-y-2">
+                                    {topProducts.map((product, idx) => (
+                                        <div 
+                                            key={product.productId} 
+                                            className="flex items-center justify-between text-sm p-2 hover:bg-neutral-50 rounded-md cursor-pointer"
+                                            onClick={() => navigate(`/products?productId=${product.productId}`)}
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-neutral-400 font-medium">#{idx + 1}</span>
+                                                <span className="font-medium text-neutral-900">{product.productName}</span>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-neutral-600">{formatCurrency(product.totalSales)}</span>
+                                                <span className="text-neutral-500 text-xs">({product.totalQty} {product.unitType})</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
                         )}
                     </div>
 
@@ -307,14 +656,14 @@ const DashboardTally = () => {
                                 <p className="text-xs text-indigo-600 mt-1">Click to open →</p>
                             </div>
                         )}
-                        {isAdminOrOwner(user) && canShow('expenses') && (
+                        {(canShow('expenses') || !isAdminOrOwner(user)) && (
                             <div
                                 onClick={() => navigate('/expenses')}
                                 className="cursor-pointer bg-purple-50 rounded-lg shadow-md border-2 border-purple-300 p-4 lg:p-6 text-center hover:shadow-lg hover:border-purple-400 transition-all"
                             >
                                 <Wallet className="h-8 w-8 mx-auto mb-2 text-purple-600" />
-                                <p className="text-sm font-semibold text-gray-700 mb-1">Expenses</p>
-                                <p className="text-xl font-bold text-purple-700">Manage</p>
+                                <p className="text-sm font-semibold text-gray-700 mb-1">{isAdminOrOwner(user) ? 'Expenses' : 'Add expense'}</p>
+                                <p className="text-xl font-bold text-purple-700">{isAdminOrOwner(user) ? 'Manage' : 'Log expense'}</p>
                                 <p className="text-xs text-purple-600 mt-1">Click to open →</p>
                             </div>
                         )}

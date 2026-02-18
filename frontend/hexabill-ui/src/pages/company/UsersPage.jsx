@@ -25,7 +25,8 @@ import {
   Package,
   Zap,
   FileText,
-  Copy
+  Copy,
+  Monitor
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { LoadingCard } from '../../components/Loading'
@@ -169,6 +170,13 @@ const UsersPage = () => {
   const [createdCredentials, setCreatedCredentials] = useState(null)
   const [selectedUser, setSelectedUser] = useState(null)
   const [loadingAction, setLoadingAction] = useState(false)
+  const [showActivityModal, setShowActivityModal] = useState(false)
+  const [activityUser, setActivityUser] = useState(null)
+  const [activityLogs, setActivityLogs] = useState([])
+  const [activityLoading, setActivityLoading] = useState(false)
+  const [showSessionsModal, setShowSessionsModal] = useState(false)
+  const [sessions, setSessions] = useState([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
 
   const [userModalTab, setUserModalTab] = useState('details') // 'details' | 'access' | 'assignments'
   const [branches, setBranches] = useState([])
@@ -222,8 +230,28 @@ const UsersPage = () => {
     register: registerAdd,
     handleSubmit: handleSubmitAdd,
     reset: resetAdd,
+    watch: watchAdd,
     formState: { errors: errorsAdd }
   } = useForm()
+  const addFormRole = watchAdd('role')
+  const addFormPassword = watchAdd('password') ?? ''
+
+  const getPasswordStrength = (pwd) => {
+    if (!pwd || pwd.length === 0) return { score: 0, label: '', color: 'bg-gray-200' }
+    const weakList = ['123456', '12345678', '1234', 'password', 'qwerty', 'abc123', 'admin', 'letmein']
+    if (weakList.some(w => pwd.toLowerCase().includes(w)) || pwd.length < 6) return { score: 1, label: 'Too weak', color: 'bg-red-500' }
+    let score = 0
+    if (pwd.length >= 8) score++
+    if (pwd.length >= 10) score++
+    if (/[a-z]/.test(pwd) && /[A-Z]/.test(pwd)) score++
+    if (/\d/.test(pwd)) score++
+    if (/[^a-zA-Z0-9]/.test(pwd)) score++
+    if (score <= 1) return { score: 1, label: 'Weak', color: 'bg-red-500' }
+    if (score <= 3) return { score: 3, label: 'Fair', color: 'bg-amber-500' }
+    if (score <= 4) return { score: 4, label: 'Good', color: 'bg-lime-500' }
+    return { score: 5, label: 'Strong', color: 'bg-green-600' }
+  }
+  const passwordStrength = getPasswordStrength(addFormPassword)
 
   const {
     register: registerEdit,
@@ -426,6 +454,21 @@ const UsersPage = () => {
               Refresh
             </button>
             <button
+              onClick={() => {
+                setShowSessionsModal(true)
+                setSessionsLoading(true)
+                setSessions([])
+                adminAPI.getSessions().then((res) => {
+                  if (res?.success && Array.isArray(res.data)) setSessions(res.data)
+                  else setSessions([])
+                }).catch(() => setSessions([])).finally(() => setSessionsLoading(false))
+              }}
+              className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg transition flex items-center"
+            >
+              <Monitor className="h-4 w-4 mr-2" />
+              Sessions
+            </button>
+            <button
               onClick={openAddModal}
               className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition flex items-center"
             >
@@ -471,6 +514,9 @@ const UsersPage = () => {
                     Assigned (Branch / Route)
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                    Last login
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                     Created
                   </th>
                   <th className="px-6 py-3 text-right text-xs font-medium uppercase tracking-wider">
@@ -481,7 +527,7 @@ const UsersPage = () => {
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredUsers.length === 0 ? (
                   <tr>
-                    <td colSpan="7" className="px-6 py-8 text-center text-gray-500 text-sm">
+                    <td colSpan="8" className="px-6 py-8 text-center text-gray-500 text-sm">
                       {searchTerm ? 'No users found matching your search' : 'No users found. Add your first user.'}
                     </td>
                   </tr>
@@ -497,6 +543,17 @@ const UsersPage = () => {
                           ) : (
                             <User className="h-5 w-5 text-blue-500 mr-2" />
                           )}
+                          {/* Phase 6: Staff online indicator (green = active in last 5 min, else gray) */}
+                          {(() => {
+                            const last = user.lastActiveAt ? new Date(user.lastActiveAt).getTime() : 0
+                            const isOnline = last > 0 && (Date.now() - last) < 5 * 60 * 1000
+                            return (
+                              <span
+                                className={`inline-block w-2 h-2 rounded-full mr-2 flex-shrink-0 ${isOnline ? 'bg-green-500' : 'bg-gray-300'}`}
+                                title={isOnline ? 'Active in last 5 min' : (user.lastActiveAt ? `Last active ${new Date(user.lastActiveAt).toLocaleString()}` : 'No recent activity')}
+                              />
+                            )
+                          })()}
                           <span className="text-sm font-medium text-gray-900">{user.name}</span>
                         </div>
                       </td>
@@ -524,26 +581,58 @@ const UsersPage = () => {
                           )}
                         </div>
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-600 max-w-[200px]">
+                      <td className="px-6 py-4 text-sm text-gray-600 max-w-[280px]">
                         {user.role?.toLowerCase() === 'staff' ? (
                           (() => {
                             const branchIds = user.assignedBranchIds || []
                             const routeIds = user.assignedRouteIds || []
-                            const branchNames = branchIds.map(bid => branches.find(b => b.id === bid)?.name).filter(Boolean).join(', ') || '—'
-                            const routeNames = routeIds.map(rid => routes.find(r => r.id === rid)?.name).filter(Boolean).join(', ') || '—'
+                            const branchNames = branchIds.map(bid => branches.find(b => b.id === bid)?.name).filter(Boolean)
+                            const routeNames = routeIds.map(rid => routes.find(r => r.id === rid)?.name).filter(Boolean)
+                            const hasAny = branchNames.length > 0 || routeNames.length > 0
                             return (
-                              <span className="text-xs">
-                                {branchNames !== '—' || routeNames !== '—' ? (
-                                  <>Branch: {branchNames} · Route: {routeNames}</>
-                                ) : (
-                                  <span className="text-amber-600">Not assigned</span>
+                              <div className="flex flex-wrap gap-1">
+                                {!hasAny && <span className="text-amber-600 text-xs">Not assigned</span>}
+                                {branchNames.length > 0 && (
+                                  <span className="text-xs text-gray-500 mr-1">Branches:</span>
                                 )}
-                              </span>
+                                {branchNames.map((name, i) => (
+                                  <span key={`b-${i}`} className="inline-flex px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-800" title="Branch">{name}</span>
+                                ))}
+                                {routeNames.length > 0 && branchNames.length > 0 && <span className="text-gray-300">·</span>}
+                                {routeNames.length > 0 && (
+                                  <span className="text-xs text-gray-500 mr-1">Routes:</span>
+                                )}
+                                {routeNames.map((name, i) => (
+                                  <span key={`r-${i}`} className="inline-flex px-1.5 py-0.5 rounded text-xs bg-purple-100 text-purple-800" title="Route">{name}</span>
+                                ))}
+                              </div>
+                            )
+                          })()
+                        ) : user.role?.toLowerCase() === 'admin' ? (
+                          (() => {
+                            const branchIds = user.assignedBranchIds || []
+                            const routeIds = user.assignedRouteIds || []
+                            const branchNames = branchIds.map(bid => branches.find(b => b.id === bid)?.name).filter(Boolean)
+                            const routeNames = routeIds.map(rid => routes.find(r => r.id === rid)?.name).filter(Boolean)
+                            const hasAny = branchNames.length > 0 || routeNames.length > 0
+                            if (!hasAny) return <span className="text-neutral-400">—</span>
+                            return (
+                              <div className="flex flex-wrap gap-1">
+                                {branchNames.map((name, i) => (
+                                  <span key={`b-${i}`} className="inline-flex px-1.5 py-0.5 rounded text-xs bg-blue-100 text-blue-800">{name}</span>
+                                ))}
+                                {routeNames.map((name, i) => (
+                                  <span key={`r-${i}`} className="inline-flex px-1.5 py-0.5 rounded text-xs bg-purple-100 text-purple-800">{name}</span>
+                                ))}
+                              </div>
                             )
                           })()
                         ) : (
                           <span className="text-neutral-400">—</span>
                         )}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                        {user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : '—'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                         {new Date(user.createdAt).toLocaleDateString()}
@@ -559,6 +648,22 @@ const UsersPage = () => {
                             title="Copy email"
                           >
                             <Copy className="h-5 w-5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              setActivityUser(user)
+                              setShowActivityModal(true)
+                              setActivityLogs([])
+                              setActivityLoading(true)
+                              adminAPI.getUserActivity(user.id).then((res) => {
+                                if (res?.success && Array.isArray(res.data)) setActivityLogs(res.data)
+                                else setActivityLogs([])
+                              }).catch(() => setActivityLogs([])).finally(() => setActivityLoading(false))
+                            }}
+                            className="text-gray-500 hover:text-indigo-700 p-2 hover:bg-indigo-50 rounded transition"
+                            title="View activity"
+                          >
+                            <Activity className="h-5 w-5" />
                           </button>
                           {(isOwner(currentUser) || user.role?.toLowerCase() !== 'owner') && (
                             <button
@@ -656,6 +761,80 @@ const UsersPage = () => {
         </div>
       </Modal>
 
+      {/* User Activity Modal */}
+      <Modal
+        isOpen={showActivityModal}
+        onClose={() => { setShowActivityModal(false); setActivityUser(null); setActivityLogs([]) }}
+        title={activityUser ? `Activity: ${activityUser.name}` : 'User activity'}
+      >
+        <div className="min-h-[200px] max-h-[60vh] overflow-auto">
+          {activityLoading ? (
+            <div className="flex items-center justify-center py-8"><LoadingCard /></div>
+          ) : activityLogs.length === 0 ? (
+            <p className="text-sm text-gray-500 py-4">No activity recorded for this user.</p>
+          ) : (
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">Time</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">Action</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">Details</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {activityLogs.map((log) => (
+                  <tr key={log.id} className="hover:bg-gray-50">
+                    <td className="px-3 py-2 whitespace-nowrap text-gray-600">{log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}</td>
+                    <td className="px-3 py-2 font-medium text-gray-900">{log.action || '—'}</td>
+                    <td className="px-3 py-2 text-gray-600 max-w-xs truncate" title={log.details || ''}>{log.details || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </Modal>
+
+      {/* Sessions modal: who is logged in / recent logins */}
+      <Modal
+        isOpen={showSessionsModal}
+        onClose={() => { setShowSessionsModal(false); setSessions([]) }}
+        title="Recent sessions"
+      >
+        <p className="text-sm text-gray-500 mb-3">Recent logins for your company. Each row is one login event.</p>
+        <div className="min-h-[200px] max-h-[60vh] overflow-auto">
+          {sessionsLoading ? (
+            <div className="flex items-center justify-center py-8"><LoadingCard /></div>
+          ) : sessions.length === 0 ? (
+            <p className="text-sm text-gray-500 py-4">No sessions found.</p>
+          ) : (
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">User</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">Email</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">Login at</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-600 uppercase">Device / IP</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {sessions.map((s) => (
+                  <tr key={s.id} className="hover:bg-gray-50">
+                    <td className="px-3 py-2 whitespace-nowrap font-medium text-gray-900">{s.userName || '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-gray-600">{s.userEmail || '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-gray-600">{s.loginAt ? new Date(s.loginAt).toLocaleString() : '—'}</td>
+                    <td className="px-3 py-2 text-gray-600 max-w-[200px] truncate" title={s.userAgent || s.ipAddress || ''}>
+                      {s.ipAddress || '—'}
+                      {s.userAgent ? ` · ${String(s.userAgent).substring(0, 40)}${String(s.userAgent).length > 40 ? '…' : ''}` : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </Modal>
+
       <Modal
         isOpen={showAddModal}
         onClose={() => {
@@ -715,10 +894,34 @@ const UsersPage = () => {
                     type="password"
                     {...registerAdd('password', {
                       required: 'Password is required',
-                      minLength: { value: 6, message: 'At least 6 characters' }
+                      minLength: { value: 8, message: 'At least 8 characters' },
+                      validate: (v) => {
+                        if (!v) return true
+                        const weak = ['123456', '12345678', '1234', 'password', 'qwerty', 'abc123', 'admin', 'letmein']
+                        if (weak.some(w => v.toLowerCase().includes(w))) return 'Avoid common passwords (e.g. 1234, password)'
+                        if (v.length < 8) return 'At least 8 characters'
+                        if (!/[a-z]/.test(v) || !/[A-Z]/.test(v)) return 'Use both upper and lower case letters'
+                        if (!/\d/.test(v)) return 'Include at least one number'
+                        return true
+                      }
                     })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
                   />
+                  {addFormPassword.length > 0 && (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden flex gap-0.5">
+                        {[1, 2, 3, 4, 5].map(i => (
+                          <div
+                            key={i}
+                            className={`flex-1 rounded ${i <= passwordStrength.score ? passwordStrength.color : 'bg-gray-200'}`}
+                          />
+                        ))}
+                      </div>
+                      <span className={`text-xs font-medium ${passwordStrength.score <= 1 ? 'text-red-600' : passwordStrength.score <= 3 ? 'text-amber-600' : 'text-green-600'}`}>
+                        {passwordStrength.label}
+                      </span>
+                    </div>
+                  )}
                   {errorsAdd.password && <p className="text-red-500 text-xs mt-0.5">{errorsAdd.password.message}</p>}
                 </div>
                 <div>
@@ -733,6 +936,14 @@ const UsersPage = () => {
                     <option value="Staff">Staff</option>
                   </select>
                   {errorsAdd.role && <p className="text-red-500 text-xs mt-0.5">{errorsAdd.role.message}</p>}
+                  {addFormRole === 'Owner' && (
+                    <div className="mt-2 p-3 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2">
+                      <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="text-xs text-amber-800">
+                        <strong>Co-owner:</strong> This user will have full access, including the ability to manage or delete other users and all company data. Only create another Owner if you intend a co-owner.
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-0.5">Phone</label>

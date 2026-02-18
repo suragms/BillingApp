@@ -26,7 +26,7 @@ import { isAdminOrOwner } from '../../utils/roles'  // CRITICAL: Multi-tenant ro
 import { LoadingCard, LoadingButton } from '../../components/Loading'
 import { Input, Select, TextArea } from '../../components/Form'
 import Modal from '../../components/Modal'
-import { customersAPI } from '../../services'
+import { customersAPI, branchesAPI, routesAPI } from '../../services'
 import { TabNavigation } from '../../components/ui'
 import { useDebounce } from '../../hooks/useDebounce'
 import toast from 'react-hot-toast'
@@ -41,12 +41,20 @@ const CustomersPage = () => {
   const [filteredCustomers, setFilteredCustomers] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
   const [activeTab, setActiveTab] = useState('all')
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [totalCount, setTotalCount] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const PAGE_SIZE_OPTIONS = [25, 50, 100]
+  const [pageSize, setPageSize] = useState(100)
   const [showAddModal, setShowAddModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [showLedgerModal, setShowLedgerModal] = useState(false)
   const [selectedCustomer, setSelectedCustomer] = useState(null)
   const [ledgerData, setLedgerData] = useState([])
   const [saving, setSaving] = useState(false)
+  const [branches, setBranches] = useState([])
+  const [routes, setRoutes] = useState([])
   const [dangerModal, setDangerModal] = useState({
     isOpen: false,
     title: '',
@@ -55,6 +63,7 @@ const CustomersPage = () => {
     requireTypedText: null,
     onConfirm: () => { }
   })
+  const [duplicateConfirm, setDuplicateConfirm] = useState({ isOpen: false, data: null, existingName: '' })
 
   const debouncedSearchTerm = useDebounce(searchTerm, 300)
 
@@ -63,14 +72,33 @@ const CustomersPage = () => {
     handleSubmit,
     reset,
     setValue,
+    watch,
     formState: { errors }
   } = useForm()
 
+  const selectedBranchId = watch('branchId')
+
   useEffect(() => {
-    fetchCustomers()
-    // Auto-refresh DISABLED - prevents UI interruption during user actions
-    // User can manually refresh with refresh button
+    loadBranchesAndRoutes()
   }, [])
+
+  // Fetch page 1 on mount and when search or page size changes (PRODUCTION_MASTER_TODO #42: pagination)
+  useEffect(() => {
+    fetchCustomers(1)
+  }, [debouncedSearchTerm, pageSize])
+
+  const loadBranchesAndRoutes = async () => {
+    try {
+      const [branchesRes, routesRes] = await Promise.all([
+        branchesAPI.getBranches().catch(() => ({ success: false, data: [] })),
+        routesAPI.getRoutes().catch(() => ({ success: false, data: [] }))
+      ])
+      if (branchesRes.success) setBranches(branchesRes.data || [])
+      if (routesRes.success) setRoutes(routesRes.data || [])
+    } catch (error) {
+      console.error('Failed to load branches/routes:', error)
+    }
+  }
 
   // Handle ?edit=ID URL parameter from Customer Ledger
   useEffect(() => {
@@ -96,17 +124,31 @@ const CustomersPage = () => {
 
   useEffect(() => {
     filterCustomers()
-  }, [customers, debouncedSearchTerm, activeTab])
+  }, [customers, activeTab])
 
-  const fetchCustomers = async () => {
+  const fetchCustomers = async (page = 1, append = false) => {
     try {
       setLoading(true)
-      // Fetch all customers (filter client-side for better tab filtering)
-      const response = await customersAPI.getCustomers({ page: 1, pageSize: 100 })
+      // Server-side search: pass search term to API
+      const searchParam = debouncedSearchTerm || undefined
+      const response = await customersAPI.getCustomers({ 
+        page, 
+        pageSize,
+        search: searchParam
+      })
       if (response.success && response.data) {
-        setCustomers(response.data.items || [])
+        const newCustomers = response.data.items || []
+        if (append) {
+          setCustomers(prev => [...prev, ...newCustomers])
+        } else {
+          setCustomers(newCustomers)
+        }
+        setTotalPages(response.data.totalPages || 1)
+        setTotalCount(response.data.totalCount || 0)
+        setHasMore(page < (response.data.totalPages || 1))
+        setCurrentPage(page)
       } else {
-        setCustomers([])
+        if (!append) setCustomers([])
       }
     } catch (error) {
       console.error('Failed to load customers:', error)
@@ -114,38 +156,46 @@ const CustomersPage = () => {
       if (!error?._handledByInterceptor && (error.response || (!error.code || error.code !== 'ERR_NETWORK'))) {
         toast.error(error?.response?.data?.message || 'Failed to load customers')
       }
-      setCustomers([])
+      if (!append) setCustomers([])
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleLoadMore = () => {
+    if (!loading && hasMore) {
+      fetchCustomers(currentPage + 1, true)
     }
   }
 
   const filterCustomers = () => {
     let filtered = customers
 
-    // Apply tab filter
+    // Apply tab filter (client-side filtering for tabs, search is server-side)
     if (activeTab === 'outstanding') {
+      // Outstanding: customers with positive balance (owe money)
       filtered = filtered.filter(c => (c.balance || 0) > 0)
     } else if (activeTab === 'active') {
-      filtered = filtered.filter(c => (c.balance || 0) <= 0 && (c.balance || 0) >= -100) // Active: zero or small credit
-    } else if (activeTab === 'inactive') {
-      // Inactive: customers with no recent activity or very old balance
+      // Active: customers with transactions in last 90 days
+      const ninetyDaysAgo = new Date()
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
       filtered = filtered.filter(c => {
-        const balance = c.balance || 0
-        return Math.abs(balance) < 0.01 // Zero balance (inactive)
+        if (!c.lastActivity) return false
+        const lastActivityDate = new Date(c.lastActivity)
+        return lastActivityDate >= ninetyDaysAgo
+      })
+    } else if (activeTab === 'inactive') {
+      // Inactive: customers with no transactions in last 90 days
+      const ninetyDaysAgo = new Date()
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
+      filtered = filtered.filter(c => {
+        if (!c.lastActivity) return true // No activity = inactive
+        const lastActivityDate = new Date(c.lastActivity)
+        return lastActivityDate < ninetyDaysAgo
       })
     }
 
-    // Apply search filter
-    if (debouncedSearchTerm) {
-      filtered = filtered.filter(customer =>
-        customer.name.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-        customer.phone?.includes(debouncedSearchTerm) ||
-        customer.email?.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-        customer.trn?.includes(debouncedSearchTerm)
-      )
-    }
-
+    // Note: Search is now handled server-side via API, so we don't filter here
     setFilteredCustomers(filtered)
   }
 
@@ -155,13 +205,40 @@ const CustomersPage = () => {
       return
     }
 
+    // Payment terms required when credit limit > 0
+    const creditLimitNum = Number(data.creditLimit) || 0
+    if (creditLimitNum > 0 && !(data.paymentTerms || '').trim()) {
+      toast.error('Payment terms are required when credit limit is set')
+      return
+    }
+
+    // Duplicate phone/email warning (Add only)
+    if (!selectedCustomer) {
+      const phoneNorm = (data.phone || '').trim().replace(/\s/g, '')
+      const emailNorm = (data.email || '').trim().toLowerCase()
+      const duplicate = customers.find(c => {
+        const cPhone = (c.phone || '').replace(/\s/g, '')
+        const cEmail = (c.email || '').trim().toLowerCase()
+        return (phoneNorm && cPhone === phoneNorm) || (emailNorm && cEmail && cEmail === emailNorm)
+      })
+      if (duplicate) {
+        setDuplicateConfirm({ isOpen: true, data, existingName: duplicate.name })
+        return
+      }
+    }
+
     try {
       setSaving(true)
+      const payload = {
+        ...data,
+        branchId: data.branchId ? parseInt(data.branchId, 10) : null,
+        routeId: data.routeId ? parseInt(data.routeId, 10) : null
+      }
       let response
       if (selectedCustomer) {
-        response = await customersAPI.updateCustomer(selectedCustomer.id, data)
+        response = await customersAPI.updateCustomer(selectedCustomer.id, payload)
       } else {
-        response = await customersAPI.createCustomer(data)
+        response = await customersAPI.createCustomer(payload)
       }
 
       if (response.success) {
@@ -183,6 +260,36 @@ const CustomersPage = () => {
     }
   }
 
+  const handleDuplicateConfirmAdd = async () => {
+    if (!duplicateConfirm.data) {
+      setDuplicateConfirm({ isOpen: false, data: null, existingName: '' })
+      return
+    }
+    const data = duplicateConfirm.data
+    setDuplicateConfirm({ isOpen: false, data: null, existingName: '' })
+    const payload = {
+      ...data,
+      branchId: data.branchId ? parseInt(data.branchId, 10) : null,
+      routeId: data.routeId ? parseInt(data.routeId, 10) : null
+    }
+    try {
+      setSaving(true)
+      const response = await customersAPI.createCustomer(payload)
+      if (response.success) {
+        toast.success('Customer added successfully!')
+        await fetchCustomers()
+        reset()
+        setShowAddModal(false)
+      } else {
+        toast.error(response.message || 'Failed to save customer')
+      }
+    } catch (error) {
+      if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to save customer')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleEdit = (customer) => {
     setSelectedCustomer(customer)
     setValue('name', customer.name)
@@ -192,7 +299,147 @@ const CustomersPage = () => {
     setValue('address', customer.address)
     setValue('creditLimit', customer.creditLimit)
     setValue('customerType', customer.customerType || 'Credit')
+    setValue('branchId', customer.branchId || '')
+    setValue('routeId', customer.routeId || '')
+    setValue('paymentTerms', customer.paymentTerms || '')
     setShowEditModal(true)
+  }
+
+  const handleExportCustomers = () => {
+    try {
+      // Create CSV content
+      const headers = ['Name', 'Phone', 'Email', 'TRN', 'Address', 'Customer Type', 'Credit Limit', 'Payment Terms', 'Balance', 'Branch', 'Route']
+      const rows = customers.map(c => [
+        c.name || '',
+        c.phone || '',
+        c.email || '',
+        c.trn || '',
+        c.address || '',
+        c.customerType || 'Credit',
+        (c.creditLimit || 0).toString(),
+        c.paymentTerms || '',
+        (c.balance || 0).toString(),
+        branches.find(b => b.id === c.branchId)?.name || '',
+        routes.find(r => r.id === c.routeId)?.name || ''
+      ])
+      
+      const csvContent = [
+        headers.join(','),
+        ...rows.map(row => row.map(cell => `"${cell.toString().replace(/"/g, '""')}"`).join(','))
+      ].join('\n')
+      
+      // Download CSV
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `customers_export_${new Date().toISOString().split('T')[0]}.csv`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+      toast.success('Customers exported successfully')
+    } catch (error) {
+      console.error('Failed to export customers:', error)
+      toast.error('Failed to export customers')
+    }
+  }
+
+  const handleImportCustomers = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    try {
+      const text = await file.text()
+      const lines = text.split('\n').filter(line => line.trim())
+      if (lines.length < 2) {
+        toast.error('CSV file must have at least a header row and one data row')
+        return
+      }
+
+      const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''))
+      const nameIndex = headers.findIndex(h => h.toLowerCase().includes('name'))
+      const phoneIndex = headers.findIndex(h => h.toLowerCase().includes('phone'))
+      const emailIndex = headers.findIndex(h => h.toLowerCase().includes('email'))
+      
+      if (nameIndex === -1 || phoneIndex === -1) {
+        toast.error('CSV must have "Name" and "Phone" columns')
+        return
+      }
+
+      let successCount = 0
+      let errorCount = 0
+
+      for (let i = 1; i < lines.length; i++) {
+        const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''))
+        const name = values[nameIndex]
+        const phone = values[phoneIndex]
+        
+        if (!name || !phone) {
+          errorCount++
+          continue
+        }
+
+        const customerData = {
+          name,
+          phone,
+          email: values[emailIndex] || '',
+          trn: headers.includes('TRN') ? values[headers.findIndex(h => h.toLowerCase() === 'trn')] || '' : '',
+          address: headers.includes('Address') ? values[headers.findIndex(h => h.toLowerCase() === 'address')] || '' : '',
+          customerType: headers.includes('Customer Type') ? values[headers.findIndex(h => h.toLowerCase().includes('type'))] || 'Credit' : 'Credit',
+          creditLimit: headers.includes('Credit Limit') ? parseFloat(values[headers.findIndex(h => h.toLowerCase().includes('limit'))] || '0') : 0,
+          paymentTerms: headers.includes('Payment Terms') ? values[headers.findIndex(h => h.toLowerCase().includes('terms'))] || '' : '',
+          branchId: headers.includes('Branch') ? (() => {
+            const branchName = values[headers.findIndex(h => h.toLowerCase() === 'branch')] || ''
+            return branches.find(b => b.name === branchName)?.id || null
+          })() : null,
+          routeId: headers.includes('Route') ? (() => {
+            const routeName = values[headers.findIndex(h => h.toLowerCase() === 'route')] || ''
+            return routes.find(r => r.name === routeName)?.id || null
+          })() : null
+        }
+
+        try {
+          const response = await customersAPI.createCustomer(customerData)
+          if (response.success) {
+            successCount++
+          } else {
+            errorCount++
+          }
+        } catch (error) {
+          errorCount++
+        }
+      }
+
+      toast.success(`Import completed: ${successCount} successful, ${errorCount} failed`)
+      await fetchCustomers(1, false)
+      event.target.value = '' // Reset file input
+    } catch (error) {
+      console.error('Failed to import customers:', error)
+      toast.error('Failed to import customers')
+      event.target.value = ''
+    }
+  }
+
+  const handleSendStatement = async (customerId) => {
+    try {
+      const fromDate = new Date()
+      fromDate.setDate(fromDate.getDate() - 30) // Last 30 days
+      const toDate = new Date()
+      const blob = await customersAPI.getCustomerStatement(customerId, fromDate.toISOString().split('T')[0], toDate.toISOString().split('T')[0])
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `customer_statement_${customerId}_${new Date().toISOString().split('T')[0]}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+      toast.success('Statement downloaded successfully')
+    } catch (error) {
+      console.error('Failed to download statement:', error)
+      toast.error('Failed to download statement')
+    }
   }
 
   const handleDelete = (customerId) => {
@@ -347,7 +594,10 @@ const CustomersPage = () => {
               Refresh
             </button>
             <button
-              onClick={() => setShowAddModal(true)}
+              onClick={() => {
+                reset({ branchId: '', routeId: '', name: '', phone: '', email: '', trn: '', creditLimit: '', customerType: 'retail', paymentTerms: '', address: '' })
+                setShowAddModal(true)
+              }}
               className="inline-flex items-center px-3 sm:px-4 py-1.5 sm:py-2 border border-transparent rounded-lg shadow-sm text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 min-h-[44px]"
             >
               <Plus className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2" />
@@ -382,18 +632,27 @@ const CustomersPage = () => {
             </div>
           </div>
           <div className="flex space-x-3">
-            <Select
-              options={[
-                { value: '', label: 'All Status' },
-                { value: 'active', label: 'Active' },
-                { value: 'inactive', label: 'Inactive' }
-              ]}
-              className="w-32"
-            />
-            <button className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50">
-              <Filter className="h-4 w-4 mr-2" />
-              Filter
+            <button
+              onClick={handleExportCustomers}
+              className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Export
             </button>
+            <button
+              onClick={() => document.getElementById('csv-import-input')?.click()}
+              className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+            >
+              <Inbox className="h-4 w-4 mr-2" />
+              Import
+            </button>
+            <input
+              id="csv-import-input"
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={handleImportCustomers}
+            />
           </div>
         </div>
       </div>
@@ -434,7 +693,10 @@ const CustomersPage = () => {
                       <p className="text-gray-500 text-sm font-medium">No customers found</p>
                       <p className="text-gray-500 text-xs mt-1">Try adjusting your search or filters</p>
                       <button
-                        onClick={() => setShowAddModal(true)}
+                        onClick={() => {
+                        reset({ branchId: '', routeId: '', name: '', phone: '', email: '', trn: '', creditLimit: '', customerType: 'retail', paymentTerms: '', address: '' })
+                        setShowAddModal(true)
+                      }}
                         className="mt-4 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors"
                       >
                         <Plus className="h-4 w-4 mr-2" />
@@ -448,7 +710,12 @@ const CustomersPage = () => {
                   <tr key={customer.id} className="hover:bg-gray-50">
                     <td className="px-4 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
                       <div>
-                        <div className="text-xs sm:text-sm font-medium text-gray-900">{customer.name}</div>
+                        <button
+                          onClick={() => navigate(`/customers/${customer.id}`)}
+                          className="text-xs sm:text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                        >
+                          {customer.name}
+                        </button>
                         <div className="text-xs text-gray-500">{customer.trn}</div>
                       </div>
                     </td>
@@ -478,6 +745,15 @@ const CustomersPage = () => {
                         >
                           <Eye className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                           <span className="hidden sm:inline text-xs font-medium">View</span>
+                        </button>
+                        <button
+                          onClick={() => handleSendStatement(customer.id)}
+                          className="bg-green-50 text-green-600 hover:text-white hover:bg-green-600 border border-green-300 p-1.5 sm:p-2 rounded transition-colors shadow-sm flex items-center gap-1"
+                          title="Send Statement"
+                          aria-label="Send Statement"
+                        >
+                          <Mail className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                          <span className="hidden sm:inline text-xs font-medium">Statement</span>
                         </button>
                         <button
                           onClick={() => handleEdit(customer)}
@@ -514,7 +790,12 @@ const CustomersPage = () => {
             <div key={customer.id} className="p-4">
               <div className="flex justify-between items-start mb-2">
                 <div className="flex-1">
-                  <div className="text-sm font-medium text-gray-900">{customer.name}</div>
+                  <button
+                    onClick={() => navigate(`/customers/${customer.id}`)}
+                    className="text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                  >
+                    {customer.name}
+                  </button>
                   <div className="text-xs text-gray-500 mt-1">{customer.phone}</div>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -525,6 +806,14 @@ const CustomersPage = () => {
                   >
                     <Eye className="h-3.5 w-3.5" />
                     View
+                  </button>
+                  <button
+                    onClick={() => handleSendStatement(customer.id)}
+                    className="bg-green-50 text-green-600 hover:bg-green-600 hover:text-white border border-green-300 px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1"
+                    title="Send Statement"
+                  >
+                    <Mail className="h-3.5 w-3.5" />
+                    Statement
                   </button>
                   <button
                     onClick={() => handleEdit(customer)}
@@ -563,6 +852,89 @@ const CustomersPage = () => {
           ))}
         </div>
       </div>
+
+      {/* Pagination — page size and next/prev to avoid loading thousands at once (#42) */}
+      {totalCount > 0 && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm text-gray-700">
+                Showing <span className="font-medium">{customers.length}</span> of <span className="font-medium">{totalCount}</span> customers
+                {filteredCustomers.length !== customers.length && (
+                  <span className="ml-2 text-gray-500">
+                    ({filteredCustomers.length} after filters)
+                  </span>
+                )}
+              </span>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                Per page
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="border border-gray-300 rounded-md px-2 py-1 text-sm"
+                >
+                  {PAGE_SIZE_OPTIONS.map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {hasMore && (
+              <button
+                onClick={handleLoadMore}
+                disabled={loading}
+                className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  <>
+                    Load More ({totalCount - customers.length} remaining)
+                  </>
+                )}
+              </button>
+            )}
+            {totalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => fetchCustomers(1)}
+                  disabled={currentPage === 1 || loading}
+                  className="px-3 py-1 text-sm border border-gray-300 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  First
+                </button>
+                <button
+                  onClick={() => fetchCustomers(currentPage - 1)}
+                  disabled={currentPage === 1 || loading}
+                  className="px-3 py-1 text-sm border border-gray-300 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-gray-700">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  onClick={() => fetchCustomers(currentPage + 1)}
+                  disabled={currentPage >= totalPages || loading}
+                  className="px-3 py-1 text-sm border border-gray-300 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Next
+                </button>
+                <button
+                  onClick={() => fetchCustomers(totalPages)}
+                  disabled={currentPage >= totalPages || loading}
+                  className="px-3 py-1 text-sm border border-gray-300 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Last
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Add Customer Modal */}
       <Modal
@@ -631,6 +1003,62 @@ const CustomersPage = () => {
               <p className="mt-1 text-xs text-gray-500">Credit customers can have outstanding balance, Cash customers must pay immediately</p>
             </div>
 
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Payment Terms</label>
+              <select
+                {...register('paymentTerms')}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">Select payment terms</option>
+                <option value="Cash on Delivery">Cash on Delivery</option>
+                <option value="Net 7">Net 7</option>
+                <option value="Net 15">Net 15</option>
+                <option value="Net 30">Net 30</option>
+                <option value="Net 60">Net 60</option>
+                <option value="Net 90">Net 90</option>
+                <option value="Custom">Custom</option>
+              </select>
+              <p className="mt-1 text-xs text-amber-600">Required when Credit Limit &gt; 0</p>
+            </div>
+
+            {/* Branch and Route (PRODUCTION_MASTER_TODO #10) */}
+            {branches.length > 0 && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                  <select
+                    className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${errors.branchId ? 'border-red-500' : 'border-gray-300'}`}
+                    {...register('branchId', {
+                      onChange: (e) => {
+                        setValue('branchId', e.target.value)
+                        setValue('routeId', '')
+                      }
+                    })}
+                  >
+                    <option value="">Select branch (optional)</option>
+                    {branches.map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Route</label>
+                  <select
+                    className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed ${errors.routeId ? 'border-red-500' : 'border-gray-300'}`}
+                    {...register('routeId')}
+                    disabled={!selectedBranchId}
+                  >
+                    <option value="">
+                      {selectedBranchId ? 'Select route (optional)' : 'Select branch first'}
+                    </option>
+                    {(selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : []).map(r => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            )}
+
             <div className="md:col-span-2">
               <TextArea
                 label="Address"
@@ -659,6 +1087,36 @@ const CustomersPage = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Duplicate phone/email confirm */}
+      {duplicateConfirm.isOpen && (
+        <Modal
+          isOpen
+          title="Duplicate phone or email"
+          onClose={() => setDuplicateConfirm({ isOpen: false, data: null, existingName: '' })}
+        >
+          <p className="text-sm text-gray-600 mb-4">
+            A customer named <strong>{duplicateConfirm.existingName}</strong> already has this phone number or email. Add anyway?
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setDuplicateConfirm({ isOpen: false, data: null, existingName: '' })}
+              className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleDuplicateConfirmAdd}
+              disabled={saving}
+              className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? 'Adding...' : 'Add anyway'}
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {/* Edit Customer Modal */}
       <Modal
@@ -736,6 +1194,76 @@ const CustomersPage = () => {
                 error={errors.address?.message}
                 {...register('address')}
               />
+            </div>
+
+            {/* Branch and Route Assignment */}
+            {branches.length > 0 && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Branch {branches.length > 0 && <span className="text-red-500">*</span>}
+                  </label>
+                  <select
+                    className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${errors.branchId ? 'border-red-500' : 'border-gray-300'}`}
+                    {...register('branchId', {
+                      required: branches.length > 0 ? 'Branch is required when company has branches' : false,
+                      onChange: (e) => {
+                        setValue('branchId', e.target.value)
+                        setValue('routeId', '') // Clear route when branch changes
+                      }
+                    })}
+                  >
+                    <option value="">Select branch</option>
+                    {branches.map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                  {errors.branchId && (
+                    <p className="mt-1 text-sm text-red-600">{errors.branchId.message}</p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Route {selectedBranchId && <span className="text-red-500">*</span>}
+                  </label>
+                  <select
+                    className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed ${errors.routeId ? 'border-red-500' : 'border-gray-300'}`}
+                    {...register('routeId', {
+                      required: selectedBranchId ? 'Route is required when branch is selected' : false
+                    })}
+                    disabled={!selectedBranchId}
+                  >
+                    <option value="">
+                      {selectedBranchId ? 'Select route' : 'Select branch first'}
+                    </option>
+                    {(selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : []).map(r => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
+                  </select>
+                  {errors.routeId && (
+                    <p className="mt-1 text-sm text-red-600">{errors.routeId.message}</p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* Payment Terms */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Payment Terms</label>
+              <select
+                {...register('paymentTerms')}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">Select payment terms</option>
+                <option value="Cash on Delivery">Cash on Delivery</option>
+                <option value="Net 7">Net 7</option>
+                <option value="Net 15">Net 15</option>
+                <option value="Net 30">Net 30</option>
+                <option value="Net 60">Net 60</option>
+                <option value="Net 90">Net 90</option>
+                <option value="Custom">Custom</option>
+              </select>
+              <p className="mt-1 text-xs text-gray-500">Required when credit limit &gt; 0</p>
             </div>
           </div>
 

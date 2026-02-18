@@ -42,14 +42,16 @@ namespace HexaBill.Api.Modules.Reports
         [Authorize(Roles = "Admin,Owner")]
         public async Task<ActionResult<ApiResponse<List<StaffPerformanceDto>>>> GetStaffPerformance(
             [FromQuery] DateTime? fromDate = null,
-            [FromQuery] DateTime? toDate = null)
+            [FromQuery] DateTime? toDate = null,
+            [FromQuery] int? routeId = null) // FIX: Add route filter parameter
         {
             try
             {
                 var tenantId = CurrentTenantId;
                 var from = fromDate ?? DateTime.UtcNow.Date.AddDays(-30);
                 var to = toDate ?? DateTime.UtcNow.Date;
-                var result = await _reportService.GetStaffPerformanceAsync(tenantId, from, to);
+                // FIX: Pass routeId filter to service (if provided, filter by route)
+                var result = await _reportService.GetStaffPerformanceAsync(tenantId, from, to, routeId);
                 return Ok(new ApiResponse<List<StaffPerformanceDto>>
                 {
                     Success = true,

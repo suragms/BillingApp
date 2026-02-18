@@ -39,6 +39,7 @@ import BottomNav from './BottomNav'
 import Logo from './Logo'
 import AlertNotifications from './AlertNotifications'
 import { SubscriptionGraceBanner } from './SubscriptionGraceBanner'
+import { connectionManager } from '../services/connectionManager'
 import { isAdminOrOwner, isStaff } from '../utils/roles'  // CRITICAL: Multi-tenant role checking
 import { isSystemAdmin } from '../utils/superAdmin'  // Super Admin checking
 import { useBranding } from '../contexts/TenantBrandingContext'
@@ -53,6 +54,26 @@ const Layout = () => {
     return localStorage.getItem('sidebar_collapsed') === 'true'
   })
   const [showProfileDropdown, setShowProfileDropdown] = useState(false)
+  const [backendUnavailable, setBackendUnavailable] = useState(() => !connectionManager.isConnected)
+
+  useEffect(() => {
+    const unsub = connectionManager.onStatusChange((connected) => setBackendUnavailable(!connected))
+    setBackendUnavailable(!connectionManager.isConnected)
+    return () => { if (unsub) unsub() }
+  }, [])
+
+  // Phase 6: Ping to update LastActiveAt for staff online indicator (when app is in foreground)
+  useEffect(() => {
+    if (!user?.id) return
+    const ping = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        import('../services').then(({ usersAPI }) => usersAPI.pingMe().catch(() => {}))
+      }
+    }
+    ping()
+    const interval = setInterval(ping, 90000)
+    return () => clearInterval(interval)
+  }, [user?.id])
 
   const toggleSidebar = () => {
     const newState = !isSidebarCollapsed
@@ -104,6 +125,7 @@ const Layout = () => {
     { name: 'Sales Ledger', href: '/sales-ledger', icon: FileText },
     { name: 'Expenses', href: '/expenses', icon: Receipt },
     ...(isAdminOrOwner(user) ? [{ name: 'Reports', href: '/reports', icon: BarChart3 }] : []),
+    // Staff: Branches & Routes hidden (App.jsx also redirects /branches and /routes for Staff)
     ...(isAdminOrOwner(user) ? [{ name: 'Branches & Routes', href: '/branches', icon: LayoutGrid }] : []),
     ...(isAdminOrOwner(user) ? [{ name: 'Users', href: '/users', icon: Shield }] : []),
     ...(isAdminOrOwner(user) ? [{ name: 'Settings', href: '/settings', icon: Settings }] : []),
@@ -285,6 +307,12 @@ const Layout = () => {
 
       {/* Main content - Full viewport after sidebar (Task 11: 240px sidebar) */}
       <div className={`flex flex-col min-h-screen w-full transition-all duration-300 ${isSidebarCollapsed ? 'lg:pl-20' : 'lg:pl-60'}`}>
+        {backendUnavailable && (
+          <div className="flex items-center justify-center gap-2 px-4 py-2 bg-amber-100 border-b border-amber-200 text-amber-900 text-sm text-left">
+            <span className="font-medium">Service temporarily unavailable.</span>
+            <span>Service is temporarily unavailable. Please try again in a moment or contact your administrator.</span>
+          </div>
+        )}
         <SubscriptionGraceBanner />
         {/* Top Header Bar for Other Pages - Similar to Dashboard */}
         <div className={`hidden lg:block fixed top-0 right-0 h-16 bg-primary-900 text-white border-b border-primary-800 z-30 transition-all duration-300 ${isSidebarCollapsed ? 'left-20' : 'left-60'}`}>
@@ -419,10 +447,10 @@ const Layout = () => {
             </div>
           </div>
         </div>
-        {/* Page content — full width max 1400px, 8px grid padding */}
+        {/* Page content — full width max 1400px; Reports use full width (production plan Phase 2) */}
         <main id="main-content" className="flex-1 w-full min-w-0 flex flex-col overflow-hidden pb-20 lg:pb-6 pt-14 lg:pt-20 bg-[#F8FAFC]">
           <div className="flex-1 overflow-auto">
-            <div className="w-full max-w-[1280px] min-h-full mx-auto px-4 sm:px-6 lg:px-6 py-4 lg:py-6">
+            <div className={`w-full min-h-full mx-auto px-4 sm:px-6 lg:px-6 py-4 lg:py-6 ${location.pathname === '/reports' ? 'max-w-full' : 'max-w-[1280px]'}`}>
               <Outlet />
             </div>
           </div>

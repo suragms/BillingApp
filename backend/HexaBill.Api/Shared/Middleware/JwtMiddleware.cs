@@ -73,7 +73,7 @@ namespace HexaBill.Api.Shared.Middleware
 
                 if (user != null)
                 {
-                    // Force Logout: session_version must match. Old tokens without the claim are allowed.
+                    // Force Logout: session_version must match. Primary enforcement is in JWT Bearer OnTokenValidated (SecurityConfiguration.cs); this middleware is optional if used.
                     var tokenSessionVersion = jwtToken.Claims.FirstOrDefault(x => x.Type == "session_version")?.Value;
                     if (tokenSessionVersion != null && int.TryParse(tokenSessionVersion, out var tokVer) && tokVer != user.SessionVersion)
                     {

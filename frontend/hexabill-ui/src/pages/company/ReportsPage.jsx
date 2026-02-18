@@ -18,7 +18,8 @@ import {
   ChevronDown,
   ChevronRight,
   Users,
-  MapPin
+  MapPin,
+  Phone
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { isAdminOrOwner } from '../../utils/roles'
@@ -43,16 +44,37 @@ import {
   Legend
 } from 'recharts'
 
+const REPORTS_DATE_RANGE_KEY = 'hexabill_reports_date_range'
+
+function getDefaultDateRange() {
+  return {
+    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    to: new Date().toISOString().split('T')[0]
+  }
+}
+
+function loadDateRangeFromStorage() {
+  try {
+    const raw = localStorage.getItem(REPORTS_DATE_RANGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed.from === 'string' && typeof parsed.to === 'string') return parsed
+  } catch (_) { /* ignore */ }
+  return null
+}
+
 const ReportsPage = () => {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const initialTab = searchParams.get('tab') || 'summary'
   const [activeTab, setActiveTab] = useState(initialTab)
-  const [dateRange, setDateRange] = useState({
-    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-    to: new Date().toISOString().split('T')[0]
-  })
+  // Shared date range across all report tabs; persisted so last range is restored (PRODUCTION_MASTER_TODO #40)
+  const [dateRange, setDateRange] = useState(() => loadDateRangeFromStorage() || getDefaultDateRange())
+  // FIX: Add "as of date" for aging report (defaults to today, can be set to past date)
+  const [agingAsOfDate, setAgingAsOfDate] = useState(new Date().toISOString().split('T')[0])
+  // FIX: Add days overdue filter for Outstanding Bills
+  const [outstandingDaysFilter, setOutstandingDaysFilter] = useState('') // '', '30', '60', '90'
   const [filters, setFilters] = useState({
     branch: '',
     route: '',
@@ -81,6 +103,8 @@ const ReportsPage = () => {
     agingReport: null,
     profitLoss: null,
     outstandingBills: [],
+    collectionsList: [], // Customers with balance > 0 and phone for collection calls (#53)
+    chequeReport: [], // FIX: Add cheque report data
     staffReport: [],
     aiSuggestions: null,
   })
@@ -90,6 +114,13 @@ const ReportsPage = () => {
   const [customersList, setCustomersList] = useState([])
   const [branchesList, setBranchesList] = useState([])
   const [routesList, setRoutesList] = useState([])
+
+  // Persist shared date range so last used range is restored on next visit (#40)
+  useEffect(() => {
+    try {
+      localStorage.setItem(REPORTS_DATE_RANGE_KEY, JSON.stringify(dateRange))
+    } catch (_) { /* ignore */ }
+  }, [dateRange])
 
   // Request throttling and cancellation - AGGRESSIVE THROTTLING
   const fetchAbortControllerRef = useRef(null)
@@ -118,7 +149,10 @@ const ReportsPage = () => {
     { id: 'route', name: 'Route Report', icon: MapPin },
     { id: 'aging', name: 'Customer Aging', icon: Clock },
     { id: 'profit-loss', name: 'Profit & Loss', icon: TrendingUp, adminOnly: true },
+    { id: 'branch-profit', name: 'Branch Profit', icon: Building2, adminOnly: true },
     { id: 'outstanding', name: 'Outstanding Bills', icon: DollarSign },
+    { id: 'collections', name: 'Collections (with phone)', icon: Phone },
+    { id: 'cheque', name: 'Cheque Report', icon: ShieldCheck, adminOnly: true }, // FIX: Add Cheque Report tab
     { id: 'staff', name: 'Staff Performance', icon: Users, adminOnly: true },
     { id: 'ai', name: 'AI Insights', icon: Eye, adminOnly: true }
   ].filter(tab => !tab.adminOnly || isAdminOrOwner(user))
@@ -263,6 +297,8 @@ const ReportsPage = () => {
         const salesToday = summary.salesToday || summary.SalesToday || 0
         const purchasesToday = summary.purchasesToday || summary.PurchasesToday || 0
         const expensesToday = summary.expensesToday || summary.ExpensesToday || 0
+        // FIX: Use profit from summary (which uses ProfitService calculation) instead of manual calculation
+        // The backend GetSummaryReportAsync already calculates profit correctly using COGS
         const profitToday = summary.profitToday || summary.ProfitToday || 0
 
         setReportData(prev => ({
@@ -271,7 +307,7 @@ const ReportsPage = () => {
             totalSales: salesToday,
             totalPurchases: purchasesToday,
             totalExpenses: expensesToday,
-            netProfit: profitToday,
+            netProfit: profitToday, // FIX: Use backend-calculated profit (matches P&L tab logic)
             salesGrowth: 0, // Calculate from previous period if needed
             profitMargin: (profitToday && salesToday && salesToday > 0)
               ? (profitToday / salesToday) * 100
@@ -495,7 +531,7 @@ const ReportsPage = () => {
           }
         } catch (err) {
           const msg = err?.response?.status === 404
-            ? 'Branch report API not found. Restart the backend to enable this report.'
+            ? 'This report is currently unavailable. Please try again later or contact support.'
             : (err?.response?.data?.message || 'Failed to load branch report')
           if (!err?._handledByInterceptor) toast.error(msg)
           setReportData(prev => ({ ...prev, branchComparison: [] }))
@@ -505,8 +541,9 @@ const ReportsPage = () => {
       } else if (activeTab === 'aging') {
         try {
           setLoading(true)
+          // FIX: Use agingAsOfDate instead of dateRange.to for historical aging analysis
           const agingRes = await reportsAPI.getAgingReport({
-            asOfDate: dateRange.to || new Date().toISOString().split('T')[0]
+            asOfDate: agingAsOfDate || new Date().toISOString().split('T')[0]
           })
           if (agingRes?.success && agingRes?.data) {
             setReportData(prev => ({ ...prev, agingReport: agingRes.data }))
@@ -516,6 +553,25 @@ const ReportsPage = () => {
         } catch (err) {
           if (!err?._handledByInterceptor) toast.error(err?.response?.data?.message || 'Failed to load aging report')
           setReportData(prev => ({ ...prev, agingReport: null }))
+        } finally {
+          setLoading(false)
+        }
+      } else if (activeTab === 'cheque') {
+        // FIX: Add Cheque Report tab data loading
+        try {
+          setLoading(true)
+          const chequeRes = await reportsAPI.getChequeReport({
+            fromDate: dateRange.from,
+            toDate: dateRange.to
+          })
+          if (chequeRes?.success && chequeRes?.data) {
+            setReportData(prev => ({ ...prev, chequeReport: chequeRes.data || [] }))
+          } else {
+            setReportData(prev => ({ ...prev, chequeReport: [] }))
+          }
+        } catch (err) {
+          if (!err?._handledByInterceptor) toast.error(err?.response?.data?.message || 'Failed to load cheque report')
+          setReportData(prev => ({ ...prev, chequeReport: [] }))
         } finally {
           setLoading(false)
         }
@@ -573,6 +629,21 @@ const ReportsPage = () => {
         } finally {
           setLoading(false)
         }
+      } else if (activeTab === 'branch-profit') {
+        try {
+          setLoading(true)
+          const res = await profitAPI.getBranchProfit(dateRange.from, dateRange.to)
+          if (res?.success && Array.isArray(res?.data)) {
+            setReportData(prev => ({ ...prev, branchProfit: res.data }))
+          } else {
+            setReportData(prev => ({ ...prev, branchProfit: [] }))
+          }
+        } catch (err) {
+          if (!err?._handledByInterceptor) toast.error('Failed to load branch profit')
+          setReportData(prev => ({ ...prev, branchProfit: [] }))
+        } finally {
+          setLoading(false)
+        }
       } else if (activeTab === 'outstanding') {
         try {
           setLoading(true)
@@ -618,12 +689,26 @@ const ReportsPage = () => {
         } finally {
           setLoading(false)
         }
+      } else if (activeTab === 'collections') {
+        try {
+          setLoading(true)
+          const res = await reportsAPI.getOutstandingCustomers({ days: 365 })
+          const list = (res?.success && res?.data) ? res.data : (Array.isArray(res?.data) ? res.data : [])
+          setReportData(prev => ({ ...prev, collectionsList: list }))
+        } catch (error) {
+          if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load collections list')
+          setReportData(prev => ({ ...prev, collectionsList: [] }))
+        } finally {
+          setLoading(false)
+        }
       } else if (activeTab === 'staff') {
         try {
           setLoading(true)
+          // FIX: Pass route filter if applied
           const staffRes = await reportsAPI.getStaffPerformance({
             fromDate: dateRange.from,
-            toDate: dateRange.to
+            toDate: dateRange.to,
+            routeId: appliedFilters.route ? parseInt(appliedFilters.route, 10) : undefined
           })
           if (staffRes?.success && staffRes?.data) {
             setReportData(prev => ({ ...prev, staffReport: staffRes.data || [] }))
@@ -633,7 +718,7 @@ const ReportsPage = () => {
         } catch (error) {
           console.error('Error loading staff performance:', error)
           const msg = error?.response?.status === 404
-            ? 'Staff performance API not found. Restart the backend to enable this report.'
+            ? 'This report is currently unavailable. Please try again later or contact support.'
             : (error?.response?.data?.message || 'Failed to load staff performance')
           if (!error?._handledByInterceptor) toast.error(msg)
           setReportData(prev => ({ ...prev, staffReport: [] }))
@@ -713,8 +798,8 @@ const ReportsPage = () => {
         return
       }
 
-      // Only log error once, don't flood console
-      if (!error._logged) {
+      // Skip logging when backend is down (connection blocked) to avoid console flood
+      if (!error?.isConnectionBlocked && !error._logged) {
         console.error('Error loading report data:', error)
         error._logged = true
       }
@@ -926,12 +1011,19 @@ const ReportsPage = () => {
 
   const COLORS = ['#10B981', '#3B82F6', '#F59E0B', '#EF4444', '#8B5CF6']
 
-  if (loading) {
-    return <LoadingCard message="Loading reports..." />
-  }
+  // Per-tab loading: show layout always; skeleton only in tab content area (Phase 2)
+  const TabContentSkeleton = () => (
+    <div className="animate-pulse space-y-4 rounded-lg border border-[#E5E7EB] bg-white p-6">
+      <div className="h-6 bg-[#E5E7EB] rounded w-1/3" />
+      <div className="h-4 bg-[#E5E7EB] rounded w-full" />
+      <div className="h-4 bg-[#E5E7EB] rounded w-5/6" />
+      <div className="h-32 bg-[#E5E7EB] rounded w-full" />
+      <div className="h-4 bg-[#E5E7EB] rounded w-2/3" />
+    </div>
+  )
 
   return (
-    <div className="w-full space-y-6">
+    <div className="w-full max-w-full space-y-6">
       {/* Header — full width */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -964,75 +1056,74 @@ const ReportsPage = () => {
           <h3 className="text-base lg:text-lg font-semibold text-neutral-900">Filters</h3>
         </div>
 
-        {/* Date Range Presets */}
-        {activeTab === 'sales' && (
-          <div className="mb-3 sm:mb-4 flex flex-wrap gap-2">
-            <button
-              onClick={() => {
-                const today = new Date().toISOString().split('T')[0]
-                setDateRange({ from: today, to: today })
-              }}
-              className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
-            >
-              Today
-            </button>
-            <button
-              onClick={() => {
-                const yesterday = new Date()
-                yesterday.setDate(yesterday.getDate() - 1)
-                const yesterdayStr = yesterday.toISOString().split('T')[0]
-                setDateRange({ from: yesterdayStr, to: yesterdayStr })
-              }}
-              className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
-            >
-              Yesterday
-            </button>
-            <button
-              onClick={() => {
-                const to = new Date().toISOString().split('T')[0]
-                const from = new Date()
-                from.setDate(from.getDate() - 7)
-                setDateRange({ from: from.toISOString().split('T')[0], to })
-              }}
-              className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
-            >
-              Last 7 Days
-            </button>
-            <button
-              onClick={() => {
-                const to = new Date()
-                const from = new Date(to)
-                from.setDate(from.getDate() - from.getDay()) // Start of week (Sunday)
-                setDateRange({ from: from.toISOString().split('T')[0], to: to.toISOString().split('T')[0] })
-              }}
-              className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
-            >
-              This Week
-            </button>
-            <button
-              onClick={() => {
-                const to = new Date().toISOString().split('T')[0]
-                const from = new Date()
-                from.setDate(1) // First day of month
-                setDateRange({ from: from.toISOString().split('T')[0], to })
-              }}
-              className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
-            >
-              This Month
-            </button>
-            <button
-              onClick={() => {
-                const to = new Date().toISOString().split('T')[0]
-                const from = new Date()
-                from.setFullYear(from.getFullYear(), 0, 1) // First day of year
-                setDateRange({ from: from.toISOString().split('T')[0], to })
-              }}
-              className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
-            >
-              This Year
-            </button>
-          </div>
-        )}
+        {/* Shared date range: applies to all report tabs (PRODUCTION_MASTER_TODO #40). Aging tab uses "As of" separately. */}
+        <p className="text-sm text-neutral-600 mb-3">Date range applies to all tabs below.</p>
+        <div className="mb-3 sm:mb-4 flex flex-wrap gap-2">
+          <button
+            onClick={() => {
+              const today = new Date().toISOString().split('T')[0]
+              setDateRange({ from: today, to: today })
+            }}
+            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+          >
+            Today
+          </button>
+          <button
+            onClick={() => {
+              const yesterday = new Date()
+              yesterday.setDate(yesterday.getDate() - 1)
+              const yesterdayStr = yesterday.toISOString().split('T')[0]
+              setDateRange({ from: yesterdayStr, to: yesterdayStr })
+            }}
+            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+          >
+            Yesterday
+          </button>
+          <button
+            onClick={() => {
+              const to = new Date().toISOString().split('T')[0]
+              const from = new Date()
+              from.setDate(from.getDate() - 7)
+              setDateRange({ from: from.toISOString().split('T')[0], to })
+            }}
+            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+          >
+            Last 7 Days
+          </button>
+          <button
+            onClick={() => {
+              const to = new Date()
+              const from = new Date(to)
+              from.setDate(from.getDate() - from.getDay()) // Start of week (Sunday)
+              setDateRange({ from: from.toISOString().split('T')[0], to: to.toISOString().split('T')[0] })
+            }}
+            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+          >
+            This Week
+          </button>
+          <button
+            onClick={() => {
+              const to = new Date().toISOString().split('T')[0]
+              const from = new Date()
+              from.setDate(1) // First day of month
+              setDateRange({ from: from.toISOString().split('T')[0], to })
+            }}
+            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+          >
+            This Month
+          </button>
+          <button
+            onClick={() => {
+              const to = new Date().toISOString().split('T')[0]
+              const from = new Date()
+              from.setFullYear(from.getFullYear(), 0, 1) // First day of year
+              setDateRange({ from: from.toISOString().split('T')[0], to })
+            }}
+            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+          >
+            This Year
+          </button>
+        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 lg:gap-4">
           <Input
@@ -1109,17 +1200,18 @@ const ReportsPage = () => {
         </div>
       </div>
 
-      {/* Tabs — scrollable horizontal pills (no overflow/overlap) */}
-      <div className="bg-white rounded-lg border border-[#E5E7EB]">
-        <div className="px-2 sm:px-4 py-2">
+      {/* Tabs — full width, scrollable with affordance (Phase 2: Collections visible) */}
+      <div className="bg-white rounded-lg border border-[#E5E7EB] w-full">
+        <div className="px-2 sm:px-4 py-2 w-full">
           <nav
-            className="flex gap-2 overflow-x-auto scrollbar-hide pb-1 -mx-1"
+            className="flex gap-2 overflow-x-auto scrollbar-hide pb-1 -mx-1 w-full"
             role="tablist"
-            aria-label="Report sections"
+            aria-label="Report sections; scroll horizontally for more tabs"
           >
             {tabs.map((tab) => {
               const Icon = tab.icon
               const active = activeTab === tab.id
+              const label = tab.id === 'collections' ? 'Collections' : tab.name.split(' ')[0]
               return (
                 <button
                   key={tab.id}
@@ -1132,14 +1224,19 @@ const ReportsPage = () => {
                     }`}
                 >
                   <Icon className="h-4 w-4 flex-shrink-0" />
-                  <span>{tab.name.split(' ')[0]}</span>
+                  <span>{label}</span>
                 </button>
               )
             })}
+            <span className="flex-shrink-0 self-center text-xs text-[#94A3B8] ml-1" aria-hidden>Scroll for more</span>
           </nav>
         </div>
 
         <div className="p-6">
+          {loading ? (
+            <TabContentSkeleton />
+          ) : (
+          <>
           {/* Summary Tab */}
           {activeTab === 'summary' && reportData.summary && (
             <div className="space-y-6">
@@ -1573,20 +1670,66 @@ const ReportsPage = () => {
           {/* Branch Report Tab */}
           {activeTab === 'branch' && (
             <div className="space-y-6">
+              {/* FIX: Add export button for Branch Report */}
+              <div className="bg-white border border-gray-200 rounded-lg p-4 flex items-center justify-between">
+                <p className="text-sm text-gray-600">Branch comparison with profitability metrics</p>
+                <button
+                  onClick={async () => {
+                    try {
+                      toast.loading('Exporting branch report...')
+                      // TODO: Add export endpoint for branch report
+                      toast.dismiss()
+                      toast.info('Branch report export coming soon')
+                    } catch (error) {
+                      console.error('Failed to export:', error)
+                      toast.dismiss()
+                      if (!error?._handledByInterceptor) toast.error('Failed to export branch report')
+                    }
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 transition-colors"
+                  disabled={!reportData.branchComparison || reportData.branchComparison.length === 0}
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Export Excel</span>
+                </button>
+              </div>
               {reportData.branchComparison?.length > 0 ? (
                 <>
-                  {reportData.branchComparison[0] && (
-                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 rounded-xl p-6 border-2 border-amber-200">
-                      <p className="text-sm font-medium text-amber-700">🏆 Top Branch</p>
-                      <p className="text-xl font-bold text-amber-900 mt-1">{reportData.branchComparison[0].branchName}</p>
-                      <p className="text-2xl font-bold text-amber-800 mt-2">{formatCurrency(reportData.branchComparison[0].totalSales || 0)}</p>
-                      {reportData.branchComparison[0].growthPercent != null && (
-                        <span className={`inline-flex items-center mt-2 text-sm font-medium ${(reportData.branchComparison[0].growthPercent || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                          {(reportData.branchComparison[0].growthPercent || 0) >= 0 ? '↑' : '↓'} {Math.abs(reportData.branchComparison[0].growthPercent || 0).toFixed(1)}% vs previous period
-                        </span>
-                      )}
-                    </div>
-                  )}
+                  {reportData.branchComparison[0] && (() => {
+                    const topBranch = reportData.branchComparison[0]
+                    // FIX: Use profitability (margin %) instead of just sales volume for "Top Performer"
+                    const branchesWithMargin = reportData.branchComparison.map(b => ({
+                      ...b,
+                      marginPercent: b.totalSales > 0 ? ((b.profit || 0) / b.totalSales * 100) : 0
+                    }))
+                    const topByMargin = branchesWithMargin.reduce((top, b) => 
+                      b.marginPercent > top.marginPercent ? b : top, branchesWithMargin[0]
+                    )
+                    const isTopByMargin = topBranch.branchId === topByMargin.branchId
+                    return (
+                      <div className={`rounded-xl p-6 border-2 ${isTopByMargin ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-green-200' : 'bg-gradient-to-r from-amber-50 to-yellow-50 border-amber-200'}`}>
+                        <p className="text-sm font-medium text-amber-700">🏆 Top Branch {isTopByMargin ? '(by Profitability)' : '(by Sales Volume)'}</p>
+                        <p className="text-xl font-bold text-amber-900 mt-1">{topBranch.branchName}</p>
+                        <p className="text-2xl font-bold text-amber-800 mt-2">{formatCurrency(topBranch.totalSales || 0)}</p>
+                        {topBranch.totalSales > 0 && (
+                          <p className="text-sm text-gray-600 mt-1">
+                            Profit Margin: <span className={`font-semibold ${
+                              ((topBranch.profit || 0) / topBranch.totalSales * 100) >= 20 ? 'text-green-600' :
+                              ((topBranch.profit || 0) / topBranch.totalSales * 100) >= 10 ? 'text-yellow-600' :
+                              'text-red-600'
+                            }`}>
+                              {((topBranch.profit || 0) / topBranch.totalSales * 100).toFixed(1)}%
+                            </span>
+                          </p>
+                        )}
+                        {topBranch.growthPercent != null && (
+                          <span className={`inline-flex items-center mt-2 text-sm font-medium ${(topBranch.growthPercent || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                            {(topBranch.growthPercent || 0) >= 0 ? '↑' : '↓'} {Math.abs(topBranch.growthPercent || 0).toFixed(1)}% vs previous period
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })()}
                   <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                     <div className="overflow-x-auto">
                       <table className="min-w-full divide-y divide-gray-200">
@@ -1599,6 +1742,7 @@ const ReportsPage = () => {
                             <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">COGS</th>
                             <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Expenses</th>
                             <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Profit</th>
+                            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Margin %</th>
                             <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Growth</th>
                           </tr>
                         </thead>
@@ -1629,6 +1773,20 @@ const ReportsPage = () => {
                                   <td className="px-4 py-3 text-sm text-right text-red-600">{formatCurrency(row.totalExpenses || 0)}</td>
                                   <td className={`px-4 py-3 text-sm text-right font-medium ${(row.profit || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                                     {formatCurrency(row.profit || 0)}
+                                  </td>
+                                  <td className="px-4 py-3 text-right text-sm">
+                                    {/* FIX: Add profitability/margin metric instead of just sales volume */}
+                                    {row.totalSales > 0 ? (
+                                      <span className={`font-medium ${
+                                        ((row.profit || 0) / row.totalSales * 100) >= 20 ? 'text-green-600' :
+                                        ((row.profit || 0) / row.totalSales * 100) >= 10 ? 'text-yellow-600' :
+                                        'text-red-600'
+                                      }`}>
+                                        {((row.profit || 0) / row.totalSales * 100).toFixed(1)}%
+                                      </span>
+                                    ) : (
+                                      <span className="text-gray-400">—</span>
+                                    )}
                                   </td>
                                   <td className="px-4 py-3 text-right">
                                     {row.growthPercent != null ? (
@@ -1750,6 +1908,63 @@ const ReportsPage = () => {
           {/* Customer Aging Tab */}
           {activeTab === 'aging' && (
             <div className="space-y-6">
+              {/* FIX: Add "as of date" selector for historical aging analysis */}
+              <div className="bg-white border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center gap-4 flex-wrap justify-between">
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <label className="text-sm font-medium text-gray-700">As of Date:</label>
+                    <Input
+                      type="date"
+                      value={agingAsOfDate}
+                      onChange={(e) => {
+                        setAgingAsOfDate(e.target.value)
+                        tabDataCacheRef.current = {} // Clear cache to force reload
+                      }}
+                      className="max-w-xs"
+                    />
+                    <button
+                      onClick={() => {
+                        const today = new Date().toISOString().split('T')[0]
+                        setAgingAsOfDate(today)
+                        tabDataCacheRef.current = {}
+                      }}
+                      className="px-3 py-1 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+                    >
+                      Reset to Today
+                    </button>
+                    <button
+                      onClick={() => fetchReportData(true)}
+                      className="px-3 py-1 text-xs bg-green-50 text-green-700 rounded hover:bg-green-100 flex items-center gap-1"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Refresh
+                    </button>
+                  </div>
+                  {/* FIX: Add export button for Customer Aging */}
+                  <button
+                    onClick={async () => {
+                      try {
+                        toast.loading('Exporting aging report...')
+                        // TODO: Add export endpoint for aging report
+                        toast.dismiss()
+                        toast.info('Aging report export coming soon')
+                      } catch (error) {
+                        console.error('Failed to export:', error)
+                        toast.dismiss()
+                        if (!error?._handledByInterceptor) toast.error('Failed to export aging report')
+                      }
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 transition-colors"
+                    disabled={!reportData.agingReport || !reportData.agingReport.invoices || reportData.agingReport.invoices.length === 0}
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Export Excel</span>
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Set a past date to see historical aging (e.g., "What was our aging on Dec 31?")
+                </p>
+              </div>
               {reportData.agingReport ? (
                 <>
                   <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
@@ -1824,6 +2039,36 @@ const ReportsPage = () => {
             <div className="space-y-6">
               {reportData.profitLoss ? (
                 <>
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <h3 className="text-lg font-semibold text-gray-900">Profit & Loss</h3>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          toast.loading('Generating P&L PDF...')
+                          const blob = await profitAPI.exportProfitLossPdf(dateRange.from, dateRange.to)
+                          const url = window.URL.createObjectURL(blob)
+                          const a = document.createElement('a')
+                          a.href = url
+                          a.download = `profit_loss_${dateRange.from}_${dateRange.to}.pdf`
+                          document.body.appendChild(a)
+                          a.click()
+                          a.remove()
+                          window.URL.revokeObjectURL(url)
+                          toast.dismiss()
+                          toast.success('P&L PDF downloaded successfully!')
+                        } catch (error) {
+                          console.error('Failed to export P&L PDF:', error)
+                          toast.dismiss()
+                          if (!error?._handledByInterceptor) toast.error(error?.message || 'Failed to export P&L PDF')
+                        }
+                      }}
+                      className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2 transition-colors"
+                    >
+                      <Download className="h-4 w-4" />
+                      <span>Export PDF</span>
+                    </button>
+                  </div>
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     <div className="bg-green-50 rounded-lg p-6 border border-green-200">
                       <p className="text-sm font-medium text-green-600">Total Sales</p>
@@ -1960,14 +2205,98 @@ const ReportsPage = () => {
             </div>
           )}
 
+          {/* Branch Profit Tab (#57) */}
+          {activeTab === 'branch-profit' && (
+            <div className="space-y-6">
+              <p className="text-sm text-gray-600">Profit by branch for the selected date range. Net = Sales − COGS − Expenses.</p>
+              {reportData.branchProfit && reportData.branchProfit.length > 0 ? (
+                <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[800px] divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-100">
+                        <tr>
+                          <th className="px-4 py-3 text-left font-semibold text-gray-700">Branch</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">Invoices</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">Sales</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">COGS</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">Gross Profit</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">Expenses</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">Net Profit</th>
+                          <th className="px-4 py-3 text-right font-semibold text-gray-700">Net Margin %</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {reportData.branchProfit.map((row) => (
+                          <tr key={row.branchId} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 font-medium text-gray-900">{row.branchName}</td>
+                            <td className="px-4 py-3 text-right text-gray-600">{row.invoiceCount ?? 0}</td>
+                            <td className="px-4 py-3 text-right font-medium text-green-700">{formatCurrency(row.sales ?? 0)}</td>
+                            <td className="px-4 py-3 text-right text-red-600">{formatCurrency(row.costOfGoodsSold ?? 0)}</td>
+                            <td className="px-4 py-3 text-right font-medium text-blue-700">{formatCurrency(row.grossProfit ?? 0)}</td>
+                            <td className="px-4 py-3 text-right text-red-600">{formatCurrency(row.expenses ?? 0)}</td>
+                            <td className={`px-4 py-3 text-right font-bold ${(row.netProfit ?? 0) >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                              {formatCurrency(row.netProfit ?? 0)}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-600">
+                              {(row.netProfitMarginPercent ?? 0).toFixed(1)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-64 text-gray-500 bg-white border border-gray-200 rounded-lg">
+                  <Building2 className="h-12 w-12 mb-2 text-gray-400" />
+                  <p>{loading ? 'Loading branch profit...' : 'No branch profit data. Add branches and ensure sales/expenses have a branch assigned.'}</p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Outstanding Bills Tab */}
           {activeTab === 'outstanding' && (
             <div className="space-y-6">
+              {/* FIX: Add days overdue filter */}
+              <div className="bg-white border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <label className="text-sm font-medium text-gray-700">Filter by Days Overdue:</label>
+                  <Select
+                    options={[
+                      { value: '', label: 'All Outstanding Bills' },
+                      { value: '30', label: '30+ Days Overdue' },
+                      { value: '60', label: '60+ Days Overdue' },
+                      { value: '90', label: '90+ Days Overdue' }
+                    ]}
+                    value={outstandingDaysFilter}
+                    onChange={(e) => {
+                      setOutstandingDaysFilter(e.target.value)
+                      tabDataCacheRef.current = {} // Clear cache to force reload
+                    }}
+                    className="max-w-xs"
+                  />
+                  <button
+                    onClick={() => fetchReportData(true)}
+                    className="px-3 py-1 text-xs bg-green-50 text-green-700 rounded hover:bg-green-100 flex items-center gap-1"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Apply Filter
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Filter bills by days overdue to prioritize collection calls
+                </p>
+              </div>
               <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                 <div className="bg-gradient-to-r from-red-50 to-orange-50 px-6 py-4 border-b border-gray-200 flex items-center justify-between">
                   <div>
                     <h3 className="text-lg font-semibold text-gray-900">Pending Bills & Outstanding Invoices</h3>
-                    <p className="text-sm text-gray-600 mt-1">Invoices with unpaid or partially paid balances</p>
+                    <p className="text-sm text-gray-600 mt-1">
+                      {outstandingDaysFilter
+                        ? `Invoices with ${outstandingDaysFilter}+ days overdue`
+                        : 'Invoices with unpaid or partially paid balances'}
+                    </p>
                   </div>
                   <button
                     onClick={async () => {
@@ -2110,11 +2439,244 @@ const ReportsPage = () => {
             </div>
           )}
 
+          {/* Collections list (customers with balance > 0 and phone) – #53 */}
+          {activeTab === 'collections' && (
+            <div className="space-y-6">
+              <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                <div className="bg-gradient-to-r from-amber-50 to-orange-50 px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Outstanding Collections</h3>
+                    <p className="text-sm text-gray-600 mt-1">
+                      Customers with balance &gt; 0 — use for collection calls. Export or print to take on the go.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const list = reportData.collectionsList || []
+                        if (list.length === 0) {
+                          toast.error('No data to export')
+                          return
+                        }
+                        const headers = ['Name', 'Phone', 'Balance', 'Address']
+                        const rows = list.map(c => [
+                          (c.name || '').replace(/"/g, '""'),
+                          (c.phone || '').replace(/"/g, '""'),
+                          String(Number(c.pendingBalance ?? c.balance ?? 0).toFixed(2)),
+                          (c.address || '').replace(/"/g, '""')
+                        ])
+                        const csv = [headers.join(','), ...rows.map(r => r.map(cell => `"${cell}"`).join(','))].join('\r\n')
+                        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+                        const url = URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = `collections_${new Date().toISOString().slice(0, 10)}.csv`
+                        a.click()
+                        URL.revokeObjectURL(url)
+                        toast.success('CSV downloaded')
+                      }}
+                      className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 flex items-center gap-2"
+                      disabled={!reportData.collectionsList?.length}
+                    >
+                      <Download className="h-4 w-4" />
+                      Export CSV
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => window.print()}
+                      className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2"
+                    >
+                      <FileText className="h-4 w-4" />
+                      Print
+                    </button>
+                  </div>
+                </div>
+                {loading ? (
+                  <LoadingCard />
+                ) : reportData.collectionsList && reportData.collectionsList.length > 0 ? (
+                  <div className="overflow-x-auto" id="collections-print">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Customer</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Phone</th>
+                          <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase">Balance</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase hidden sm:table-cell">Address</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {reportData.collectionsList.map((c) => (
+                          <tr key={c.id} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 whitespace-nowrap font-medium text-gray-900">{c.name || '—'}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-gray-700">{c.phone || '—'}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-right font-semibold text-red-700">
+                              {formatCurrency(c.pendingBalance ?? c.balance ?? 0)}
+                            </td>
+                            <td className="px-6 py-4 text-gray-600 hidden sm:table-cell max-w-xs truncate">{c.address || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-gray-50">
+                        <tr>
+                          <td className="px-6 py-4 font-semibold text-gray-900">Total</td>
+                          <td></td>
+                          <td className="px-6 py-4 text-right font-bold text-red-700">
+                            {formatCurrency((reportData.collectionsList || []).reduce((s, c) => s + (Number(c.pendingBalance ?? c.balance) || 0), 0))}
+                          </td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                    <Phone className="h-12 w-12 mb-2 text-gray-400" />
+                    <p>No customers with outstanding balance</p>
+                    <p className="text-sm mt-1">All customer balances are settled</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Staff Performance Tab */}
+          {/* Cheque Report Tab */}
+          {activeTab === 'cheque' && (
+            <div className="space-y-6">
+              <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Cheque Report</h3>
+                    <p className="text-sm text-gray-600 mt-1">All cheque payments and their status</p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        toast.loading('Exporting cheque report...')
+                        // TODO: Add export endpoint for cheque report
+                        toast.dismiss()
+                        toast.info('Cheque report export coming soon')
+                      } catch (error) {
+                        console.error('Failed to export:', error)
+                        toast.dismiss()
+                        if (!error?._handledByInterceptor) toast.error('Failed to export cheque report')
+                      }
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 transition-colors"
+                    disabled={!reportData.chequeReport || reportData.chequeReport.length === 0}
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Export Excel</span>
+                  </button>
+                </div>
+                {reportData.chequeReport && reportData.chequeReport.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Cheque No</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Customer</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Invoice</th>
+                          <th className="px-6 py-3 text-right text-xs font-medium text-gray-700 uppercase">Amount</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Cheque Date</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Status</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {reportData.chequeReport.map((cheque) => (
+                          <tr key={cheque.id} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                              {cheque.chequeNumber || cheque.referenceNumber || '-'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                              {cheque.customerName || 'Cash Customer'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                              {cheque.invoiceNo || '-'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                              {formatCurrency(cheque.amount || 0)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                              {cheque.chequeDate ? new Date(cheque.chequeDate).toLocaleDateString('en-GB') : '-'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                cheque.status === 'CLEARED' ? 'bg-green-100 text-green-800' :
+                                cheque.status === 'BOUNCED' ? 'bg-red-100 text-red-800' :
+                                'bg-yellow-100 text-yellow-800'
+                              }`}>
+                                {cheque.status || 'PENDING'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                              {cheque.status === 'PENDING' && isAdminOrOwner(user) && (
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        const response = await paymentsAPI.updatePaymentStatus(cheque.id, 'CLEARED')
+                                        if (response?.success) {
+                                          toast.success('Cheque marked as cleared')
+                                          fetchReportData(true)
+                                        } else {
+                                          toast.error(response?.message || 'Failed to update cheque status')
+                                        }
+                                      } catch (error) {
+                                        console.error('Failed to clear cheque:', error)
+                                        toast.error(error?.response?.data?.message || 'Failed to clear cheque')
+                                      }
+                                    }}
+                                    className="text-green-600 hover:text-green-800 font-medium"
+                                  >
+                                    Clear
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        const response = await paymentsAPI.updatePaymentStatus(cheque.id, 'BOUNCED')
+                                        if (response?.success) {
+                                          toast.success('Cheque marked as bounced')
+                                          fetchReportData(true)
+                                        } else {
+                                          toast.error(response?.message || 'Failed to update cheque status')
+                                        }
+                                      } catch (error) {
+                                        console.error('Failed to bounce cheque:', error)
+                                        toast.error(error?.response?.data?.message || 'Failed to bounce cheque')
+                                      }
+                                    }}
+                                    className="text-red-600 hover:text-red-800 font-medium"
+                                  >
+                                    Bounce
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                    <ShieldCheck className="h-12 w-12 mb-2 text-gray-400" />
+                    <p>No cheque payments found</p>
+                    <p className="text-sm mt-1">No cheques recorded for the selected period</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === 'staff' && (
             <div className="space-y-6">
               <h3 className="text-lg font-semibold text-gray-900">Staff Performance Report</h3>
-              <p className="text-sm text-gray-600">Sales and collection metrics per staff member for the selected date range</p>
+              <p className="text-sm text-gray-600">
+                Per-staff sales and collection metrics (Owner view). Uses the shared date range above; filter by route to see performance for a single route.
+              </p>
               {reportData.staffReport && reportData.staffReport.length > 0 ? (
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
@@ -2215,6 +2777,8 @@ const ReportsPage = () => {
                 )}
               </div>
             </div>
+          )}
+          </>
           )}
         </div>
       </div>

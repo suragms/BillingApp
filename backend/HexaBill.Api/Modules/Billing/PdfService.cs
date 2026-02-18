@@ -360,6 +360,15 @@ namespace HexaBill.Api.Modules.Billing
                                         });
                                     });
                                     
+                                    // Edit Reason - show if invoice was edited
+                                    if (!string.IsNullOrWhiteSpace(sale.EditReason))
+                                    {
+                                        footerCol.Item().PaddingTop(1).BorderTop(0.5f).PaddingTop(1).Text(text => {
+                                            text.Span("Edit Reason: ").FontSize(7).Bold();
+                                            text.Span(sale.EditReason).FontSize(7).FontColor(Colors.Orange.Medium);
+                                        });
+                                    }
+                                    
                                     // COMPACT: Customer Balance - single line, minimal spacing
                                     if (sale.CustomerId.HasValue && customerPendingInfo.TotalPendingBills > 0)
                                     {
@@ -1411,6 +1420,57 @@ namespace HexaBill.Api.Modules.Billing
             {
                 Console.WriteLine($"? Error generating pending bills PDF: {ex.Message}");
                 Console.WriteLine($"? Stack Trace: {ex.StackTrace}");
+                throw;
+            }
+        }
+
+        /// <summary>Monthly P&amp;L PDF for accountant (#58).</summary>
+        public async Task<byte[]> GenerateProfitLossPdfAsync(ProfitReportDto report, DateTime fromDate, DateTime toDate, int tenantId)
+        {
+            try
+            {
+                var settings = await GetCompanySettingsAsync(tenantId);
+                var currency = settings.Currency ?? "AED";
+                var document = Document.Create(container =>
+                {
+                    container.Page(page =>
+                    {
+                        page.Size(PageSizes.A4);
+                        page.Margin(15, Unit.Millimetre);
+                        page.PageColor(Colors.White);
+                        page.DefaultTextStyle(x => x.FontFamily(_englishFont).FontSize(10));
+                        page.Content().Column(column =>
+                        {
+                            column.Item().AlignCenter().Text(settings.CompanyNameEn.ToUpper()).FontSize(18).Bold();
+                            column.Item().AlignCenter().Text("Profit & Loss Statement").FontSize(16).Bold();
+                            column.Item().AlignCenter().Text($"{fromDate:dd-MMM-yyyy} to {toDate:dd-MMM-yyyy}").FontSize(11);
+                            column.Item().PaddingTop(8).PaddingBottom(5).Text($"Generated: {DateTime.UtcNow:dd-MMM-yyyy HH:mm} UTC").FontSize(9).FontColor(Colors.Grey.Medium);
+                            column.Item().PaddingTop(12).Table(table =>
+                            {
+                                table.ColumnsDefinition(columns => { columns.RelativeColumn(2); columns.ConstantColumn(90); });
+                                table.Cell().Border(1).Background(Colors.Grey.Lighten3).Padding(4).Text("Total Sales").Bold();
+                                table.Cell().Border(1).Background(Colors.Grey.Lighten3).Padding(4).AlignRight().Text($"{report.TotalSales:N2} {currency}");
+                                table.Cell().Border(1).Padding(4).Text("Cost of Goods Sold");
+                                table.Cell().Border(1).Padding(4).AlignRight().Text($"-{report.CostOfGoodsSold:N2} {currency}");
+                                table.Cell().Border(1).Background(Colors.Green.Lighten4).Padding(4).Text("Gross Profit").Bold();
+                                table.Cell().Border(1).Background(Colors.Green.Lighten4).Padding(4).AlignRight().Text($"{report.GrossProfit:N2} {currency}").Bold();
+                                table.Cell().Border(1).Padding(4).Text($"Margin: {report.GrossProfitMargin:F1}%").FontSize(9).FontColor(Colors.Grey.Medium);
+                                table.Cell().Border(1).Padding(4);
+                                table.Cell().Border(1).Padding(4).Text("Total Expenses");
+                                table.Cell().Border(1).Padding(4).AlignRight().Text($"-{report.TotalExpenses:N2} {currency}");
+                                table.Cell().Border(1).Background(report.NetProfit >= 0 ? Colors.Green.Lighten3 : Colors.Red.Lighten3).Padding(6).Text("Net Profit / Loss").Bold().FontSize(12);
+                                table.Cell().Border(1).Background(report.NetProfit >= 0 ? Colors.Green.Lighten3 : Colors.Red.Lighten3).Padding(6).AlignRight().Text($"{report.NetProfit:N2} {currency}").Bold().FontSize(12);
+                                table.Cell().Border(1).Padding(4).Text($"Net Margin: {report.NetProfitMargin:F2}%").FontSize(9).FontColor(Colors.Grey.Medium);
+                                table.Cell().Border(1).Padding(4);
+                            });
+                        });
+                    });
+                });
+                return document.GeneratePdf();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"? Error generating P&L PDF: {ex.Message}");
                 throw;
             }
         }

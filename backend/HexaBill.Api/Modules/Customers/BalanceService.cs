@@ -42,8 +42,10 @@ namespace HexaBill.Api.Modules.Customers
         }
 
         /// <summary>
-        /// Recalculate customer balance from scratch using actual database data
-        /// CRITICAL: Counts ALL payments (including PENDING) to match invoice PaidAmount
+        /// Recalculate customer balance from scratch using actual database data.
+        /// UNIFIED WITH INVOICE (PRODUCTION_MASTER_TODO #7): TotalPayments = CLEARED only, so PendingBalance
+        /// matches "amount still owed" and aligns with Sale.PaidAmount (also CLEARED only). Pending cheques
+        /// do not reduce customer balance until cleared.
         /// </summary>
         public async Task RecalculateCustomerBalanceAsync(int customerId)
         {
@@ -62,19 +64,12 @@ namespace HexaBill.Api.Modules.Customers
                     .Where(s => s.CustomerId == customerId && !s.IsDeleted)
                     .SumAsync(s => (decimal?)s.GrandTotal) ?? 0m;
 
-                // CRITICAL FIX: Count ALL payments (including PENDING) to match invoice PaidAmount updates
-                // This ensures consistency - invoice shows PaidAmount for all payments, so balance should too
-                // VOIDED payments are excluded as they don't count
+                // CLEARED only: so customer balance = what they really still owe; matches invoice (PaidAmount = cleared only)
                 var totalPayments = await _context.Payments
-                    .Where(p => p.CustomerId == customerId && p.Status != PaymentStatus.VOID)
-                    .SumAsync(p => (decimal?)p.Amount) ?? 0m;
-                    
-                // Also track cleared-only payments for reporting (real money received)
-                var clearedPayments = await _context.Payments
                     .Where(p => p.CustomerId == customerId && p.Status == PaymentStatus.CLEARED)
                     .SumAsync(p => (decimal?)p.Amount) ?? 0m;
 
-                // Calculate PendingBalance (what customer still owes)
+                // Calculate PendingBalance (what customer still owes; pending cheques not counted)
                 var pendingBalance = totalSales - totalPayments;
 
                 // Update customer record
@@ -95,8 +90,8 @@ namespace HexaBill.Api.Modules.Customers
                 await transaction.CommitAsync();
 
                 _logger.LogInformation(
-                    "Customer {CustomerId} balance recalculated: TotalSales={TotalSales}, TotalPayments={TotalPayments}, Cleared={Cleared}, Pending={Pending}",
-                    customerId, totalSales, totalPayments, clearedPayments, pendingBalance);
+                    "Customer {CustomerId} balance recalculated: TotalSales={TotalSales}, TotalPayments(Cleared)={TotalPayments}, PendingBalance={Pending}",
+                    customerId, totalSales, totalPayments, pendingBalance);
             }
             catch (Exception ex)
             {
@@ -230,9 +225,9 @@ namespace HexaBill.Api.Modules.Customers
                 .Where(s => s.CustomerId == customerId && !s.IsDeleted)
                 .SumAsync(s => (decimal?)s.GrandTotal) ?? 0m;
 
-            // CRITICAL FIX: Match RecalculateCustomerBalanceAsync - count ALL non-VOID payments
+            // Match RecalculateCustomerBalanceAsync: CLEARED only (unified with invoice PaidAmount)
             var actualTotalPayments = await _context.Payments
-                .Where(p => p.CustomerId == customerId && p.Status != PaymentStatus.VOID)
+                .Where(p => p.CustomerId == customerId && p.Status == PaymentStatus.CLEARED)
                 .SumAsync(p => (decimal?)p.Amount) ?? 0m;
 
             var actualPendingBalance = actualTotalSales - actualTotalPayments;

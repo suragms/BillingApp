@@ -75,16 +75,8 @@ namespace HexaBill.Api.Modules.Branches
             };
             _context.Branches.Add(branch);
             await _context.SaveChangesAsync();
-            return new BranchDto
-            {
-                Id = branch.Id,
-                TenantId = branch.TenantId,
-                Name = branch.Name,
-                CreatedAt = branch.CreatedAt,
-                RouteCount = 0,
-                AssignedStaffIds = request.AssignedStaffIds ?? new List<int>()
-            };
 
+            // Assign staff to branch if provided
             if (request.AssignedStaffIds != null && request.AssignedStaffIds.Any())
             {
                 foreach (var staffId in request.AssignedStaffIds)
@@ -212,6 +204,48 @@ namespace HexaBill.Api.Modules.Branches
             var totalExpenses = routeExpensesTotal + branchExpensesTotal;
             var totalSales = routes.Sum(r => r.TotalSales);
             var totalCogs = routes.Sum(r => r.CostOfGoodsSold);
+
+            // Performance metrics
+            var invoiceCount = saleIdsInBranch.Count;
+            var averageInvoiceSize = invoiceCount > 0 ? totalSales / invoiceCount : 0m;
+
+            // Calculate total payments for this branch's customers in the period
+            var branchCustomerIds = await _context.Customers
+                .Where(c => c.BranchId == branchId && (tenantId <= 0 || c.TenantId == tenantId))
+                .Select(c => c.Id)
+                .ToListAsync();
+            
+            var totalPayments = 0m;
+            if (branchCustomerIds.Any())
+            {
+                totalPayments = await _context.Payments
+                    .Where(p => p.CustomerId != null && branchCustomerIds.Contains(p.CustomerId.Value) && 
+                                (tenantId <= 0 || p.TenantId == tenantId) && 
+                                p.PaymentDate >= from && p.PaymentDate <= to)
+                    .SumAsync(p => p.Amount);
+            }
+
+            // Collections ratio: Payments / Total Sales (for credit customers)
+            var collectionsRatio = totalSales > 0 ? (totalPayments / totalSales * 100) : (decimal?)null;
+
+            // Calculate growth percent (compare with previous period of same duration)
+            decimal? growthPercent = null;
+            var periodDays = (int)(to - from).TotalDays;
+            if (periodDays > 0)
+            {
+                var prevTo = from.AddDays(-1);
+                var prevFrom = prevTo.AddDays(-periodDays);
+                var prevSummary = await GetBranchSummaryAsync(branch.Id, tenantId, prevFrom, prevTo.AddDays(1));
+                if (prevSummary != null && prevSummary.TotalSales > 0)
+                {
+                    growthPercent = ((totalSales - prevSummary.TotalSales) / prevSummary.TotalSales * 100);
+                }
+                else if (prevSummary != null && totalSales > 0)
+                {
+                    growthPercent = 100; // 100% growth if no previous sales
+                }
+            }
+
             return new BranchSummaryDto
             {
                 BranchId = branch.Id,
@@ -220,7 +254,12 @@ namespace HexaBill.Api.Modules.Branches
                 TotalExpenses = totalExpenses,
                 CostOfGoodsSold = totalCogs,
                 Profit = totalSales - totalCogs - totalExpenses,
-                Routes = routes
+                Routes = routes,
+                GrowthPercent = growthPercent,
+                CollectionsRatio = collectionsRatio,
+                AverageInvoiceSize = averageInvoiceSize,
+                InvoiceCount = invoiceCount,
+                TotalPayments = totalPayments
             };
         }
     }
