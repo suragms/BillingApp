@@ -208,8 +208,12 @@ const PosPage = () => {
   }, [branches, routes, user, selectedBranchId, selectedRouteId])
 
   // Auto-fill Branch and Route from selected customer (Owner/Staff see customer's assigned branch/route)
+  // BUG #4 FIX: Wait for branches/routes to load before setting (prevents race condition)
   useEffect(() => {
     if (!selectedCustomer?.id) return
+    // Wait for branches and routes to be loaded before auto-selecting
+    if (branches.length === 0 || routes.length === 0) return
+    
     const bid = selectedCustomer.branchId != null ? Number(selectedCustomer.branchId) : null
     const rid = selectedCustomer.routeId != null ? Number(selectedCustomer.routeId) : null
     if (bid != null && branches.some(b => b.id === bid)) {
@@ -1152,6 +1156,16 @@ const PosPage = () => {
         return
       }
 
+      // BUG #4 FIX: Validate branch and route are selected before checkout (prevents revenue misattribution)
+      if (!selectedBranchId || !selectedRouteId) {
+        toast.error('Please select Branch and Route before checkout. This ensures proper revenue attribution.', {
+          duration: 6000,
+          id: 'branch-route-required'
+        })
+        setLoading(false)
+        return
+      }
+
       // Only admins and owners can edit invoices
       if (isEditMode && user?.role?.toLowerCase() !== 'admin' && user?.role?.toLowerCase() !== 'owner') {
         toast.error('Only Administrators and Owners can edit invoices')
@@ -1787,7 +1801,7 @@ const PosPage = () => {
                 </div>
               )}
               {/* Branch Selector */}
-              {!staffHasNoAssignments && branches.length > 0 && (
+              {!staffHasNoAssignments && (
                 <div className="flex items-center gap-2">
                   <label className="font-medium text-neutral-600 hidden sm:inline">Branch:</label>
                   <select
@@ -1797,10 +1811,10 @@ const PosPage = () => {
                       // Reset route when branch changes
                       setSelectedRouteId('')
                     }}
-                    disabled={(!isAdminOrOwner(user) && branches.length === 1)} // Allow admins to edit even if single branch
-                    className="px-2 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white"
+                    disabled={branches.length === 0 || (!isAdminOrOwner(user) && branches.length === 1)} // BUG #4 FIX: Disable while loading
+                    className="px-2 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="">Select Branch</option>
+                    <option value="">{branches.length === 0 ? 'Loading...' : 'Select Branch'}</option>
                     {branches.map(b => (
                       <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
@@ -1809,16 +1823,16 @@ const PosPage = () => {
               )}
 
               {/* Route Selector */}
-              {!staffHasNoAssignments && routes.length > 0 && (
+              {!staffHasNoAssignments && (
                 <div className="flex items-center gap-2">
                   <label className="font-medium text-neutral-600 hidden sm:inline">Route:</label>
                   <select
                     value={selectedRouteId}
                     onChange={(e) => setSelectedRouteId(e.target.value)}
-                    disabled={(!isAdminOrOwner(user) && !selectedBranchId) || (!isAdminOrOwner(user) && (selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : routes).length <= 1)}
-                    className="px-2 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white"
+                    disabled={routes.length === 0 || !selectedBranchId || (!isAdminOrOwner(user) && (selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : routes).length <= 1)} // BUG #4 FIX: Disable while loading or no branch selected
+                    className="px-2 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="">Select Route</option>
+                    <option value="">{routes.length === 0 ? 'Loading...' : (selectedBranchId ? 'Select Route' : 'Select Branch first')}</option>
                     {routes
                       // Filter routes by selected branch if a branch is selected
                       .filter(r => !selectedBranchId || r.branchId === parseInt(selectedBranchId))

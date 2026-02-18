@@ -1,7 +1,8 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import { isSystemAdmin } from './utils/superAdmin'
+import { getApiBaseUrl } from './services/apiConfig'
 import Login from './pages/Login'
 import Dashboard from './pages/company/DashboardTally'
 import ProductsPage from './pages/company/ProductsPage'
@@ -51,6 +52,33 @@ import { MaintenanceOverlay } from './components/MaintenanceOverlay'
 function App() {
   const { user, loading, impersonatedTenantId } = useAuth()
   const location = useLocation()
+
+  // BUG #3 FIX: Keep-alive ping every 9 minutes to prevent Render cold starts
+  // Render Starter plan sleeps after 15 minutes, so ping at 9 minutes keeps it awake
+  useEffect(() => {
+    if (!user) return // Only ping when user is logged in
+
+    const pingHealth = async () => {
+      try {
+        const apiBaseUrl = getApiBaseUrl()
+        await fetch(`${apiBaseUrl}/health`, {
+          method: 'GET',
+          cache: 'no-cache',
+          signal: AbortSignal.timeout(5000) // 5 second timeout
+        }).catch(() => {
+          // Silently fail - don't show errors for keep-alive pings
+        })
+      } catch {
+        // Silently fail - keep-alive is best-effort
+      }
+    }
+
+    // Ping immediately, then every 9 minutes (540000ms)
+    pingHealth()
+    const interval = setInterval(pingHealth, 540000)
+
+    return () => clearInterval(interval)
+  }, [user])
 
   if (loading) {
     return (

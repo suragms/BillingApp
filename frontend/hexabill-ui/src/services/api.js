@@ -262,6 +262,31 @@ api.interceptors.response.use(
       error.message?.includes('NetworkError')
     )
 
+    // BUG #3 FIX: Automatic retry with exponential backoff for transient errors (500/503/network)
+    const retryableStatuses = [500, 503, 502, 504]
+    const isRetryable = isNetworkError || (error.response && retryableStatuses.includes(error.response.status))
+    const retryCount = error.config?._retryCount || 0
+    const maxRetries = 3
+    const isRetryableMethod = !error.config?.method || ['GET', 'POST', 'PUT', 'PATCH'].includes(error.config.method.toUpperCase())
+    const shouldRetry = isRetryable && retryCount < maxRetries && isRetryableMethod && !error.config?._skipRetry
+
+    if (shouldRetry) {
+      // Exponential backoff: 2s, 4s, 8s
+      const delay = Math.pow(2, retryCount) * 1000
+      console.log(`🔄 Retrying request (attempt ${retryCount + 1}/${maxRetries}) after ${delay}ms: ${error.config?.method} ${error.config?.url}`)
+      
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          const retryConfig = {
+            ...error.config,
+            _retryCount: retryCount + 1,
+            _isRetry: true
+          }
+          resolve(api.request(retryConfig))
+        }, delay)
+      })
+    }
+
     if (isNetworkError) {
       // Mark connection as failed
       connectionManager.markDisconnected()
@@ -447,6 +472,13 @@ api.interceptors.response.use(
       // If no token: silent fail (e.g. BrandingProvider on login page) - no toast, no redirect
     } else if (error.response?.status >= 500) {
       connectionManager.markConnected()
+      
+      // BUG #3 FIX: Retry 500 errors automatically (handled above, but ensure we don't show error on retry)
+      if (error.config?._isRetry) {
+        // Don't show error toast for retries - they're automatic
+        error._handledByInterceptor = true
+        return Promise.reject(error)
+      }
       // Duplicate payment check failure: do not show scary error; caller proceeds with payment
       const url = (error.config?.url || '').toLowerCase()
       if (url.includes('duplicate-check')) {
