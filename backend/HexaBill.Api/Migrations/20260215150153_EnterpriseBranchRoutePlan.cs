@@ -10,62 +10,19 @@ namespace HexaBill.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // Use idempotent SQL for PostgreSQL to prevent "column already exists" errors
+            // Use PostgreSQL native IF NOT EXISTS syntax (PostgreSQL 9.6+)
             if (migrationBuilder.ActiveProvider == "Npgsql.EntityFrameworkCore.PostgreSQL")
             {
-                // Routes.IsActive - try to add, catch and ignore "column already exists" errors (SQLSTATE 42701)
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        ALTER TABLE ""Routes"" ADD COLUMN ""IsActive"" boolean NOT NULL DEFAULT false;
-                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
-                    END $$");
+                // PostgreSQL 9.6+ supports ADD COLUMN IF NOT EXISTS natively
+                migrationBuilder.Sql(@"ALTER TABLE ""Routes"" ADD COLUMN IF NOT EXISTS ""IsActive"" boolean NOT NULL DEFAULT false;");
                 
-                // Customers.BranchId
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Customers') AND LOWER(column_name)=LOWER('BranchId')) THEN
-                            ALTER TABLE ""Customers"" ADD COLUMN ""BranchId"" integer NULL;
-                        END IF;
-                    END $$");
-                
-                // Customers.RouteId
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Customers') AND LOWER(column_name)=LOWER('RouteId')) THEN
-                            ALTER TABLE ""Customers"" ADD COLUMN ""RouteId"" integer NULL;
-                        END IF;
-                    END $$");
-                
-                // Branches.IsActive - try to add, catch and ignore "column already exists" errors (SQLSTATE 42701)
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        ALTER TABLE ""Branches"" ADD COLUMN ""IsActive"" boolean NOT NULL DEFAULT false;
-                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
-                    END $$");
-                
-                // Branches.Location
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Branches') AND LOWER(column_name)=LOWER('Location')) THEN
-                            ALTER TABLE ""Branches"" ADD COLUMN ""Location"" character varying(200) NULL;
-                        END IF;
-                    END $$");
-                
-                // Branches.ManagerId
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Branches') AND LOWER(column_name)=LOWER('ManagerId')) THEN
-                            ALTER TABLE ""Branches"" ADD COLUMN ""ManagerId"" integer NULL;
-                        END IF;
-                    END $$");
-                
-                // Branches.ManagerUserId
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Branches') AND LOWER(column_name)=LOWER('ManagerUserId')) THEN
-                            ALTER TABLE ""Branches"" ADD COLUMN ""ManagerUserId"" integer NULL;
-                        END IF;
-                    END $$");
+                // PostgreSQL 9.6+ supports ADD COLUMN IF NOT EXISTS natively
+                migrationBuilder.Sql(@"ALTER TABLE ""Customers"" ADD COLUMN IF NOT EXISTS ""BranchId"" integer NULL;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Customers"" ADD COLUMN IF NOT EXISTS ""RouteId"" integer NULL;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Branches"" ADD COLUMN IF NOT EXISTS ""IsActive"" boolean NOT NULL DEFAULT false;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Branches"" ADD COLUMN IF NOT EXISTS ""Location"" character varying(200) NULL;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Branches"" ADD COLUMN IF NOT EXISTS ""ManagerId"" integer NULL;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Branches"" ADD COLUMN IF NOT EXISTS ""ManagerUserId"" integer NULL;");
                 
                 // Create indexes (idempotent)
                 migrationBuilder.Sql(@"CREATE INDEX IF NOT EXISTS ""IX_Customers_BranchId"" ON ""Customers"" (""BranchId"")");

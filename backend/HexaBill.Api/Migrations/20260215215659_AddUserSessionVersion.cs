@@ -10,33 +10,14 @@ namespace HexaBill.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // Use idempotent SQL for PostgreSQL to prevent "column already exists" errors
+            // Use PostgreSQL native IF NOT EXISTS syntax (PostgreSQL 9.6+)
             if (migrationBuilder.ActiveProvider == "Npgsql.EntityFrameworkCore.PostgreSQL")
             {
-                // Try to add columns, catch and ignore "column already exists" errors (SQLSTATE 42701)
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        ALTER TABLE ""Users"" ADD COLUMN ""SessionVersion"" integer NOT NULL DEFAULT 0;
-                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
-                    END $$");
-                
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        ALTER TABLE ""Users"" ADD COLUMN ""LastLoginAt"" timestamp with time zone NULL;
-                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
-                    END $$");
-                
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        ALTER TABLE ""Users"" ADD COLUMN ""LastActiveAt"" timestamp with time zone NULL;
-                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
-                    END $$");
-                
-                migrationBuilder.Sql(@"
-                    DO $$ BEGIN
-                        ALTER TABLE ""Customers"" ADD COLUMN ""PaymentTerms"" character varying(100) NULL;
-                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
-                    END $$");
+                // PostgreSQL 9.6+ supports ADD COLUMN IF NOT EXISTS natively
+                migrationBuilder.Sql(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""SessionVersion"" integer NOT NULL DEFAULT 0;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""LastLoginAt"" timestamp with time zone NULL;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""LastActiveAt"" timestamp with time zone NULL;");
+                migrationBuilder.Sql(@"ALTER TABLE ""Customers"" ADD COLUMN IF NOT EXISTS ""PaymentTerms"" character varying(100) NULL;");
             }
             else
             {
