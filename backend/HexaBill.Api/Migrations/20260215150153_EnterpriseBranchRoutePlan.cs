@@ -13,12 +13,13 @@ namespace HexaBill.Api.Migrations
             // Use idempotent SQL for PostgreSQL to prevent "column already exists" errors
             if (migrationBuilder.ActiveProvider == "Npgsql.EntityFrameworkCore.PostgreSQL")
             {
-                // Routes.IsActive
+                // Routes.IsActive - wrap in exception handling to catch "column already exists" errors (42701)
                 migrationBuilder.Sql(@"
                     DO $$ BEGIN
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Routes') AND LOWER(column_name)=LOWER('IsActive')) THEN
                             ALTER TABLE ""Routes"" ADD COLUMN ""IsActive"" boolean NOT NULL DEFAULT false;
                         END IF;
+                    EXCEPTION WHEN duplicate_column THEN NULL;
                     END $$");
                 
                 // Customers.BranchId
@@ -37,12 +38,13 @@ namespace HexaBill.Api.Migrations
                         END IF;
                     END $$");
                 
-                // Branches.IsActive
+                // Branches.IsActive - wrap in exception handling to catch "column already exists" errors (SQLSTATE 42701)
                 migrationBuilder.Sql(@"
                     DO $$ BEGIN
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Branches') AND LOWER(column_name)=LOWER('IsActive')) THEN
                             ALTER TABLE ""Branches"" ADD COLUMN ""IsActive"" boolean NOT NULL DEFAULT false;
                         END IF;
+                    EXCEPTION WHEN SQLSTATE '42701' THEN NULL;
                     END $$");
                 
                 // Branches.Location
