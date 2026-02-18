@@ -56,11 +56,25 @@ namespace HexaBill.Api.Modules.Branches
         [HttpGet("{id}/summary")]
         public async Task<ActionResult<ApiResponse<BranchSummaryDto>>> GetBranchSummary(int id, [FromQuery] DateTime? fromDate, [FromQuery] DateTime? toDate)
         {
-            var tenantId = CurrentTenantId;
-            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
-            var summary = await _branchService.GetBranchSummaryAsync(id, tenantId, fromDate, toDate);
-            if (summary == null) return NotFound(new ApiResponse<BranchSummaryDto> { Success = false, Message = "Branch not found." });
-            return Ok(new ApiResponse<BranchSummaryDto> { Success = true, Data = summary });
+            try
+            {
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+                var summary = await _branchService.GetBranchSummaryAsync(id, tenantId, fromDate, toDate);
+                if (summary == null) return NotFound(new ApiResponse<BranchSummaryDto> { Success = false, Message = "Branch not found." });
+                return Ok(new ApiResponse<BranchSummaryDto> { Success = true, Data = summary });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ GetBranchSummary Error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                return StatusCode(500, new ApiResponse<BranchSummaryDto>
+                {
+                    Success = false,
+                    Message = "An error occurred while generating branch summary",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
         }
 
         [HttpPost]

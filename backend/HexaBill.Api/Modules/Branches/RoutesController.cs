@@ -48,21 +48,49 @@ namespace HexaBill.Api.Modules.Branches
         [HttpGet("{id}")]
         public async Task<ActionResult<ApiResponse<RouteDetailDto>>> GetRoute(int id)
         {
-            var tenantId = CurrentTenantId;
-            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
-            var route = await _routeService.GetRouteByIdAsync(id, tenantId);
-            if (route == null) return NotFound(new ApiResponse<RouteDetailDto> { Success = false, Message = "Route not found." });
-            return Ok(new ApiResponse<RouteDetailDto> { Success = true, Data = route });
+            try
+            {
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+                var route = await _routeService.GetRouteByIdAsync(id, tenantId);
+                if (route == null) return NotFound(new ApiResponse<RouteDetailDto> { Success = false, Message = "Route not found." });
+                return Ok(new ApiResponse<RouteDetailDto> { Success = true, Data = route });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ GetRoute Error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                return StatusCode(500, new ApiResponse<RouteDetailDto>
+                {
+                    Success = false,
+                    Message = "An error occurred while retrieving route",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
         }
 
         [HttpGet("{id}/summary")]
         public async Task<ActionResult<ApiResponse<RouteSummaryDto>>> GetRouteSummary(int id, [FromQuery] DateTime? fromDate, [FromQuery] DateTime? toDate)
         {
-            var tenantId = CurrentTenantId;
-            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
-            var summary = await _routeService.GetRouteSummaryAsync(id, tenantId, fromDate, toDate);
-            if (summary == null) return NotFound(new ApiResponse<RouteSummaryDto> { Success = false, Message = "Route not found." });
-            return Ok(new ApiResponse<RouteSummaryDto> { Success = true, Data = summary });
+            try
+            {
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+                var summary = await _routeService.GetRouteSummaryAsync(id, tenantId, fromDate, toDate);
+                if (summary == null) return NotFound(new ApiResponse<RouteSummaryDto> { Success = false, Message = "Route not found." });
+                return Ok(new ApiResponse<RouteSummaryDto> { Success = true, Data = summary });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ GetRouteSummary Error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                return StatusCode(500, new ApiResponse<RouteSummaryDto>
+                {
+                    Success = false,
+                    Message = "An error occurred while generating route summary",
+                    Errors = new List<string> { ex.Message }
+                });
+            }
         }
 
         [HttpGet("{id}/collection-sheet")]

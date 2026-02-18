@@ -157,14 +157,36 @@ namespace HexaBill.Api.Modules.Branches
             var cogsByRouteList = new List<(int RouteId, decimal Cogs)>();
             if (saleIdsInBranch.Count > 0)
             {
-                var cogsQuery = await (from si in _context.SaleItems
-                    join p in _context.Products on si.ProductId equals p.Id
-                    join s in _context.Sales on si.SaleId equals s.Id
-                    where saleIdsInBranch.Contains(si.SaleId) && s.RouteId != null
-                    group new { si.Qty, p.CostPrice } by s.RouteId!.Value into g
-                    select new { RouteId = g.Key, Cogs = g.Sum(x => x.Qty * x.CostPrice) })
-                    .ToListAsync();
-                cogsByRouteList = cogsQuery.Select(x => (x.RouteId, x.Cogs)).ToList();
+                try
+                {
+                    // Use explicit Select to only get CostPrice (avoid loading entire Product entity with missing columns)
+                    var cogsQuery = await (from si in _context.SaleItems
+                        join s in _context.Sales on si.SaleId equals s.Id
+                        where saleIdsInBranch.Contains(si.SaleId) && s.RouteId != null
+                        select new { si.SaleId, si.Qty, si.ProductId, s.RouteId })
+                        .ToListAsync();
+                    
+                    // Get CostPrice separately to avoid loading entire Product entity
+                    var productIds = cogsQuery.Select(x => x.ProductId).Distinct().ToList();
+                    var productCosts = await _context.Products
+                        .Where(p => productIds.Contains(p.Id))
+                        .Select(p => new { p.Id, p.CostPrice })
+                        .ToDictionaryAsync(p => p.Id, p => p.CostPrice);
+                    
+                    var cogsByRoute = cogsQuery
+                        .Where(x => x.RouteId.HasValue && productCosts.ContainsKey(x.ProductId))
+                        .GroupBy(x => x.RouteId!.Value)
+                        .Select(g => new { RouteId = g.Key, Cogs = g.Sum(x => x.Qty * productCosts[x.ProductId]) })
+                        .ToList();
+                    
+                    cogsByRouteList = cogsByRoute.Select(x => (x.RouteId, x.Cogs)).ToList();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Error calculating branch COGS: {ex.Message}");
+                    // Return empty list - COGS will be 0 for all routes
+                    cogsByRouteList = new List<(int RouteId, decimal Cogs)>();
+                }
             }
             var expensesByRoute = await _context.RouteExpenses
                 .Where(e => routeIds.Contains(e.RouteId) && (tenantId <= 0 || e.TenantId == tenantId) && e.ExpenseDate >= from && e.ExpenseDate <= to)

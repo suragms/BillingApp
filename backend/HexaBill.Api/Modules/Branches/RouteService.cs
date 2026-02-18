@@ -330,13 +330,34 @@ namespace HexaBill.Api.Modules.Branches
                 .Select(s => s.Id)
                 .ToListAsync();
             var invoiceCount = saleIds.Count;
-            var costOfGoodsSold = invoiceCount > 0
-                ? await (from si in _context.SaleItems
-                    join p in _context.Products on si.ProductId equals p.Id
-                    where saleIds.Contains(si.SaleId)
-                    select si.Qty * p.CostPrice)
-                    .SumAsync()
-                : 0m;
+            decimal costOfGoodsSold = 0m;
+            if (invoiceCount > 0)
+            {
+                try
+                {
+                    // Get SaleItems with ProductId only (avoid loading entire Product entity)
+                    var saleItems = await _context.SaleItems
+                        .Where(si => saleIds.Contains(si.SaleId))
+                        .Select(si => new { si.SaleId, si.Qty, si.ProductId })
+                        .ToListAsync();
+                    
+                    // Get CostPrice separately for products that exist
+                    var productIds = saleItems.Select(si => si.ProductId).Distinct().ToList();
+                    var productCosts = await _context.Products
+                        .Where(p => productIds.Contains(p.Id))
+                        .Select(p => new { p.Id, p.CostPrice })
+                        .ToDictionaryAsync(p => p.Id, p => p.CostPrice);
+                    
+                    costOfGoodsSold = saleItems
+                        .Where(si => productCosts.ContainsKey(si.ProductId))
+                        .Sum(si => si.Qty * productCosts[si.ProductId]);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Error calculating route COGS: {ex.Message}");
+                    costOfGoodsSold = 0m;
+                }
+            }
             var visitCount = await _context.CustomerVisits
                 .Where(v => v.RouteId == routeId && v.VisitDate >= from && v.VisitDate <= to && (tenantId <= 0 || v.TenantId == tenantId))
                 .CountAsync();

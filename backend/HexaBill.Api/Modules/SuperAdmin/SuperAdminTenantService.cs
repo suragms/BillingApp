@@ -1534,18 +1534,29 @@ namespace HexaBill.Api.Modules.SuperAdmin
             try
             {
                 // Delete all tenant data in correct order (respecting foreign keys)
-                // 1. Delete dependent records first
+                // 1. Delete dependent records first (child tables)
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""SaleItems"" WHERE ""SaleId"" IN (SELECT ""Id"" FROM ""Sales"" WHERE ""TenantId"" = {0})", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""SaleReturnItems"" WHERE ""SaleReturnId"" IN (SELECT ""Id"" FROM ""SaleReturns"" WHERE ""TenantId"" = {0})", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PurchaseItems"" WHERE ""PurchaseId"" IN (SELECT ""Id"" FROM ""Purchases"" WHERE ""TenantId"" = {0})", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PurchaseReturnItems"" WHERE ""PurchaseReturnId"" IN (SELECT ""Id"" FROM ""PurchaseReturns"" WHERE ""TenantId"" = {0})", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Payments"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Expenses"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RecurringExpenses"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""InventoryTransactions"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""ProductCategories"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""UserSessions"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""CustomerVisits"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""HeldInvoices"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Alerts"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""BranchStaff"" WHERE ""BranchId"" IN (SELECT ""Id"" FROM ""Branches"" WHERE ""TenantId"" = {0})", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RouteStaff"" WHERE ""RouteId"" IN (SELECT ""Id"" FROM ""Routes"" WHERE ""TenantId"" = {0})", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RouteExpenses"" WHERE ""TenantId"" = {0}", tenantId);
                 
-                // 2. Delete main records
+                // 2. Delete main records (parent tables)
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Sales"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""SaleReturns"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Purchases"" WHERE ""TenantId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PurchaseReturns"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Customers"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Products"" WHERE ""TenantId"" = {0}", tenantId);
                 await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Branches"" WHERE ""TenantId"" = {0}", tenantId);

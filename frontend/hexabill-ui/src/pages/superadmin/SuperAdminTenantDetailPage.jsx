@@ -309,7 +309,9 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to clear company data')
       }
     } catch (error) {
-      if (!error?._handledByInterceptor) toast.error('An error occurred while clearing data')
+      const errorMsg = error?.response?.data?.errors?.[0] || error?.response?.data?.message || error?.message || 'An error occurred while clearing data'
+      if (!error?._handledByInterceptor) toast.error(errorMsg)
+      console.error('Clear data error:', error)
     } finally {
       setLoadingAction(false)
     }

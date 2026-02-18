@@ -63,7 +63,22 @@ If your repo is **Private** (HexaBillAd is private), Vercel needs GitHub app ins
 
 ---
 
-## Deploy with Vercel token (no GitHub — fixes "commit author" / auto-deploy)
+## Use only GitHub push for Vercel (source = GitHub, no "vercel deploy")
+
+Do this **once** so every `git push origin main` updates the frontend and Source shows **GitHub**:
+
+1. **Vercel** → your project (**hexabill-ui** or the one with www.hexabill.company) → **Settings** → **Git**.
+2. If it says **Not connected** or wrong repo:
+   - Click **Connect Git Repository** (or **Change**).
+   - Choose **GitHub** → select **ANANDU-2000/HexaBillAd** → **Connect**.
+3. Set **Production Branch** to **main**. Save.
+4. **GitHub** → **Settings** → **Applications** → **Vercel** → **Configure** → add **HexaBillAd** to Repository access. Save.
+
+**After this:** Push to main → Vercel auto-deploys → Source = GitHub. You don’t need the CLI or `deploy-vercel-direct.ps1`.
+
+---
+
+## Deploy with Vercel token (backup — only if GitHub connect fails)
 
 Use this when GitHub → Vercel keeps failing. **Do not put your token in chat or in the repo.**
 
@@ -167,9 +182,21 @@ After push, Render will rebuild and deploy. First request after free-tier spin-d
 
 ---
 
+## 500 on /api/auth/login — fix on backend (Render)
+
+If **hexabill.onrender.com/api/auth/login** returns **500**, the backend (Render) needs the latest code that adds `LastActiveAt` / `LastLoginAt` columns.
+
+1. **Render** → your HexaBill **web service** → **Manual Deploy** → **Deploy latest commit** (or ensure repo is **HexaBillAd**, branch **main**, and push to trigger auto-deploy).
+2. After deploy finishes, try login again.
+
+The frontend (Vercel) does not cause this; it’s the API on Render.
+
+---
+
 ## 6. Errors / risks (already addressed)
 
 - **Ping 404:** Handled; ping is best-effort, no disconnect/toast.
+- **feature_collector.js "deprecated parameters" warning:** From a third-party script (e.g. browser or Vercel). Safe to ignore; not from our app.
 - **Connection spam:** Health check backoff (15s → 60s) when backend is down.
 - **API base:** Production uses `VITE_API_BASE_URL`; localhost only when host is localhost/127.0.0.1.
 

@@ -162,50 +162,58 @@ namespace HexaBill.Api.Modules.Reports
                 try
                 {
                     // CRITICAL: Super admin (TenantId = 0) sees ALL owners
-                    var saleItemsQuery = _context.SaleItems
-                        .Include(si => si.Sale)
-                        .Include(si => si.Product)
-                        .Where(si => si.Sale.InvoiceDate >= startDate 
-                            && si.Sale.InvoiceDate < endDate 
-                            && !si.Sale.IsDeleted);
+                    // Avoid loading entire Product entity (may have missing columns like Barcode)
+                    // Use join and select only needed fields
+                    var saleItemsQuery = from si in _context.SaleItems
+                                        join s in _context.Sales on si.SaleId equals s.Id
+                                        where s.InvoiceDate >= startDate 
+                                            && s.InvoiceDate < endDate 
+                                            && !s.IsDeleted
+                                        select new { si.SaleId, si.Qty, si.ProductId, s.TenantId, s.BranchId, s.RouteId };
                     
                     if (tenantId > 0)
                     {
-                        saleItemsQuery = saleItemsQuery.Where(si => si.Sale.TenantId == tenantId);
+                        saleItemsQuery = saleItemsQuery.Where(x => x.TenantId == tenantId);
                     }
                     if (branchId.HasValue)
                     {
-                        saleItemsQuery = saleItemsQuery.Where(si => si.Sale.BranchId == branchId.Value);
+                        saleItemsQuery = saleItemsQuery.Where(x => x.BranchId == branchId.Value);
                     }
                     if (routeId.HasValue)
                     {
-                        saleItemsQuery = saleItemsQuery.Where(si => si.Sale.RouteId == routeId.Value);
+                        saleItemsQuery = saleItemsQuery.Where(x => x.RouteId == routeId.Value);
                     }
                     if (tenantId > 0 && userIdForStaff.HasValue && string.Equals(roleForStaff, "Staff", StringComparison.OrdinalIgnoreCase))
                     {
                         var restrictedRouteIds = await _routeScopeService.GetRestrictedRouteIdsAsync(userIdForStaff.Value, tenantId, roleForStaff ?? "");
                         if (restrictedRouteIds != null && restrictedRouteIds.Length > 0)
-                            saleItemsQuery = saleItemsQuery.Where(si => si.Sale.RouteId != null && restrictedRouteIds.Contains(si.Sale.RouteId.Value));
+                            saleItemsQuery = saleItemsQuery.Where(x => x.RouteId != null && restrictedRouteIds.Contains(x.RouteId.Value));
                         else if (restrictedRouteIds != null && restrictedRouteIds.Length == 0)
-                            saleItemsQuery = saleItemsQuery.Where(si => false);
+                            saleItemsQuery = saleItemsQuery.Where(x => false);
                     }
                     
-                    var saleItems = await saleItemsQuery.ToListAsync();
+                    var saleItemsData = await saleItemsQuery.ToListAsync();
+                    
+                    // Get Product CostPrice and ConversionToBase separately (avoid loading entire entity)
+                    var productIds = saleItemsData.Select(si => si.ProductId).Distinct().ToList();
+                    var productData = await _context.Products
+                        .Where(p => productIds.Contains(p.Id))
+                        .Select(p => new { p.Id, p.CostPrice, p.ConversionToBase })
+                        .ToDictionaryAsync(p => p.Id, p => new { p.CostPrice, p.ConversionToBase });
                     
                     // Calculate COGS: Convert sale quantity to base units, then multiply by cost price per base unit
-                    cogsToday = saleItems.Sum(si =>
-                    {
-                        // Convert sale quantity to base units using ConversionToBase
-                        var conversionFactor = si.Product.ConversionToBase > 0 ? si.Product.ConversionToBase : 1m;
-                        var baseQty = si.Qty * conversionFactor;
-                        
-                        // COGS = base quantity × cost price per base unit
-                        // CostPrice is already per base unit (stored when purchase is recorded)
-                        var cogs = baseQty * si.Product.CostPrice;
-                        return cogs;
-                    });
+                    cogsToday = saleItemsData
+                        .Where(si => productData.ContainsKey(si.ProductId))
+                        .Sum(si =>
+                        {
+                            var product = productData[si.ProductId];
+                            var conversionFactor = product.ConversionToBase > 0 ? product.ConversionToBase : 1m;
+                            var baseQty = si.Qty * conversionFactor;
+                            var cogs = baseQty * product.CostPrice;
+                            return cogs;
+                        });
                     
-                    Console.WriteLine($"?? Calculated COGS from {saleItems.Count} sale items: {cogsToday:C}");
+                    Console.WriteLine($"?? Calculated COGS from {saleItemsData.Count} sale items: {cogsToday:C}");
                 }
                 catch (Exception ex)
                 {
@@ -402,8 +410,10 @@ namespace HexaBill.Api.Modules.Reports
                 {
                     try
                     {
+                        // Select only needed fields to avoid loading entire Branch entity (may have missing columns like Location)
                         var branches = await _context.Branches
                             .Where(b => b.TenantId == tenantId)
+                            .Select(b => new { b.Id, b.Name })
                             .ToListAsync();
 
                         foreach (var branch in branches)

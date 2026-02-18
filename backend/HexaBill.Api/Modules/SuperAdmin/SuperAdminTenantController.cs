@@ -650,11 +650,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"❌ DeleteTenant Error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
                 return StatusCode(500, new ApiResponse<object>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = "An error occurred while deleting tenant",
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message ?? "" }.Where(e => !string.IsNullOrEmpty(e)).ToList()
                 });
             }
         }
@@ -689,7 +695,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+                Console.WriteLine($"❌ ClearTenantData Error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
+                return StatusCode(500, new ApiResponse<object> 
+                { 
+                    Success = false, 
+                    Message = "An error occurred while clearing tenant data",
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message ?? "" }.Where(e => !string.IsNullOrEmpty(e)).ToList()
+                });
             }
         }
 
