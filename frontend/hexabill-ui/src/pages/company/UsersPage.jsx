@@ -511,6 +511,9 @@ const UsersPage = () => {
                     Role
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                     Assigned (Branch / Route)
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
@@ -527,7 +530,7 @@ const UsersPage = () => {
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredUsers.length === 0 ? (
                   <tr>
-                    <td colSpan="8" className="px-6 py-8 text-center text-gray-500 text-sm">
+                    <td colSpan="9" className="px-6 py-8 text-center text-gray-500 text-sm">
                       {searchTerm ? 'No users found matching your search' : 'No users found. Add your first user.'}
                     </td>
                   </tr>
@@ -543,17 +546,6 @@ const UsersPage = () => {
                           ) : (
                             <User className="h-5 w-5 text-blue-500 mr-2" />
                           )}
-                          {/* Phase 6: Staff online indicator (green = active in last 5 min, else gray) */}
-                          {(() => {
-                            const last = user.lastActiveAt ? new Date(user.lastActiveAt).getTime() : 0
-                            const isOnline = last > 0 && (Date.now() - last) < 5 * 60 * 1000
-                            return (
-                              <span
-                                className={`inline-block w-2 h-2 rounded-full mr-2 flex-shrink-0 ${isOnline ? 'bg-green-500' : 'bg-gray-300'}`}
-                                title={isOnline ? 'Active in last 5 min' : (user.lastActiveAt ? `Last active ${new Date(user.lastActiveAt).toLocaleString()}` : 'No recent activity')}
-                              />
-                            )
-                          })()}
                           <span className="text-sm font-medium text-gray-900">{user.name}</span>
                         </div>
                       </td>
@@ -565,6 +557,31 @@ const UsersPage = () => {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                         {user.phone || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {/* BUG #2.9 FIX: Online/Offline status indicator using LastActiveAt */}
+                        {(() => {
+                          const lastActive = user.lastActiveAt ? new Date(user.lastActiveAt).getTime() : 0
+                          const now = Date.now()
+                          const fiveMinutesAgo = now - (5 * 60 * 1000) // 5 minutes in milliseconds
+                          const isOnline = lastActive > 0 && lastActive > fiveMinutesAgo
+                          
+                          return (
+                            <div className="flex items-center">
+                              <span
+                                className={`inline-block w-3 h-3 rounded-full mr-2 flex-shrink-0 ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}
+                                title={isOnline 
+                                  ? 'Online - Active in last 5 minutes' 
+                                  : (user.lastActiveAt 
+                                    ? `Offline - Last active: ${new Date(user.lastActiveAt).toLocaleString()}` 
+                                    : 'No activity recorded')}
+                              />
+                              <span className={`text-xs font-medium ${isOnline ? 'text-green-700' : 'text-gray-500'}`}>
+                                {isOnline ? 'Online' : 'Offline'}
+                              </span>
+                            </div>
+                          )
+                        })()}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex flex-col gap-0.5">

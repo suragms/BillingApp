@@ -309,9 +309,20 @@ const SuperAdminTenantDetailPage = () => {
         toast.error(response.message || 'Failed to clear company data')
       }
     } catch (error) {
-      const errorMsg = error?.response?.data?.errors?.[0] || error?.response?.data?.message || error?.message || 'An error occurred while clearing data'
-      if (!error?._handledByInterceptor) toast.error(errorMsg)
-      console.error('Clear data error:', error)
+      // BUG #2.2 FIX: Enhanced error handling - show detailed error messages from backend
+      const errorMsg = error?.response?.data?.errors?.[0] || 
+                      error?.response?.data?.message || 
+                      error?.message || 
+                      'An error occurred while clearing data. Please check the console for details.'
+      if (!error?._handledByInterceptor) {
+        toast.error(errorMsg, { duration: 6000 }) // Show for 6 seconds for important errors
+      }
+      console.error('Clear data error:', {
+        error,
+        response: error?.response?.data,
+        status: error?.response?.status,
+        innerException: error?.response?.data?.errors
+      })
     } finally {
       setLoadingAction(false)
     }

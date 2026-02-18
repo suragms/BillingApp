@@ -78,16 +78,22 @@ namespace HexaBill.Api.Models
     public class CreateUserRequest
     {
         [Required]
+        [MaxLength(100)]
         public string Name { get; set; } = string.Empty;
         [Required]
         [EmailAddress]
+        [MaxLength(100)]
         public string Email { get; set; } = string.Empty;
         [Required]
         [MinLength(6)]
+        [MaxLength(100)]
         public string Password { get; set; } = string.Empty;
         [Required]
+        [MaxLength(50)]
         public string Role { get; set; } = "Staff";
+        [MaxLength(20)]
         public string? Phone { get; set; }
+        [MaxLength(500)]
         public string? DashboardPermissions { get; set; }
         public List<int>? AssignedBranchIds { get; set; }
         public List<int>? AssignedRouteIds { get; set; }
@@ -136,25 +142,38 @@ namespace HexaBill.Api.Models
     public class CreateProductRequest
     {
         [Required]
+        [MaxLength(50)]
         public string Sku { get; set; } = string.Empty;
+        [MaxLength(100)]
         public string? Barcode { get; set; }
         [Required]
+        [MaxLength(200)]
         public string NameEn { get; set; } = string.Empty;
+        [MaxLength(200)]
         public string? NameAr { get; set; }
         [Required]
+        [MaxLength(20)]
         public string UnitType { get; set; } = string.Empty;
         [Required]
+        [Range(0.0001, 999999.99, ErrorMessage = "ConversionToBase must be greater than 0")]
         public decimal ConversionToBase { get; set; }
         [Required]
+        [Range(0, 99999999.99, ErrorMessage = "CostPrice must be non-negative")]
         public decimal CostPrice { get; set; }
         [Required]
+        [Range(0, 99999999.99, ErrorMessage = "SellPrice must be non-negative")]
         public decimal SellPrice { get; set; }
+        [Range(0, 99999999.99, ErrorMessage = "StockQty must be non-negative")]
         public decimal StockQty { get; set; } = 0;
+        [Range(0, int.MaxValue, ErrorMessage = "ReorderLevel must be non-negative")]
         public int ReorderLevel { get; set; } = 0;
         public DateTime? ExpiryDate { get; set; }
+        [MaxLength(500)]
         public string? DescriptionEn { get; set; }
+        [MaxLength(500)]
         public string? DescriptionAr { get; set; }
         public int? CategoryId { get; set; }
+        [MaxLength(500)]
         public string? ImageUrl { get; set; }
     }
 
@@ -183,25 +202,37 @@ namespace HexaBill.Api.Models
     public class CreateProductCategoryRequest
     {
         [Required]
+        [MaxLength(100)]
         public string Name { get; set; } = string.Empty;
+        [MaxLength(200)]
         public string? Description { get; set; }
+        [MaxLength(7)]
+        [RegularExpression(@"^#[0-9A-Fa-f]{6}$", ErrorMessage = "ColorCode must be a valid hex color (e.g., #FF5733)")]
         public string? ColorCode { get; set; }
     }
 
     public class BulkPriceUpdateRequest
     {
+        [MaxLength(20)]
         public string? UnitType { get; set; }
         public int? CategoryId { get; set; }
         public bool UpdateSellPrice { get; set; }
         public bool UpdateCostPrice { get; set; }
+        [MaxLength(20)]
+        [RegularExpression(@"^(percentage|fixed)$", ErrorMessage = "UpdateType must be 'percentage' or 'fixed'")]
         public string UpdateType { get; set; } = "percentage"; // "percentage" | "fixed"
+        [Range(-100, 1000, ErrorMessage = "Value must be between -100 and 1000 for percentage, or positive for fixed")]
         public decimal Value { get; set; }
         public List<BulkPriceUpdateItem> Items { get; set; } = new();
     }
 
     public class BulkPriceUpdateItem
     {
+        [Required]
+        [Range(1, int.MaxValue, ErrorMessage = "ProductId must be greater than 0")]
         public int ProductId { get; set; }
+        [Required]
+        [Range(0, 99999999.99, ErrorMessage = "NewPrice must be non-negative")]
         public decimal NewPrice { get; set; }
     }
 
@@ -220,10 +251,14 @@ namespace HexaBill.Api.Models
         public int? BranchId { get; set; }
         public int? RouteId { get; set; }
         [Required]
+        [MinLength(1, ErrorMessage = "At least one item is required")]
         public List<SaleItemRequest> Items { get; set; } = new();
         public List<PaymentRequest>? Payments { get; set; }
+        [MaxLength(500)]
         public string? Notes { get; set; }
+        [Range(0, 99999999.99, ErrorMessage = "Discount must be non-negative")]
         public decimal Discount { get; set; } = 0;
+        [MaxLength(100)]
         public string? InvoiceNo { get; set; } // Optional: Manual invoice number (if not provided, auto-generate)
         [MaxLength(200)]
         public string? ExternalReference { get; set; } // For idempotency - unique external reference (e.g., POS terminal ID, mobile app transaction ID)
@@ -235,10 +270,14 @@ namespace HexaBill.Api.Models
     {
         public int? CustomerId { get; set; }
         [Required]
+        [MinLength(1, ErrorMessage = "At least one item is required")]
         public List<SaleItemRequest> Items { get; set; } = new();
         public List<PaymentRequest>? Payments { get; set; }
+        [MaxLength(500)]
         public string? Notes { get; set; }
+        [Range(0, 99999999.99, ErrorMessage = "Discount must be non-negative")]
         public decimal Discount { get; set; } = 0;
+        [MaxLength(500)]
         public string? EditReason { get; set; } // Required for Staff users
         public string? RowVersion { get; set; } // Base64 encoded RowVersion for concurrency control
         public DateTime? InvoiceDate { get; set; } // Optional: Custom invoice date - Admin and Staff can modify
@@ -254,12 +293,16 @@ namespace HexaBill.Api.Models
     public class SaleItemRequest
     {
         [Required]
+        [Range(1, int.MaxValue, ErrorMessage = "ProductId must be greater than 0")]
         public int ProductId { get; set; }
         [Required]
+        [MaxLength(20)]
         public string UnitType { get; set; } = string.Empty;
         [Required]
+        [Range(0.0001, 999999.99, ErrorMessage = "Qty must be greater than 0")]
         public decimal Qty { get; set; }
         [Required]
+        [Range(0, 99999999.99, ErrorMessage = "UnitPrice must be non-negative")]
         public decimal UnitPrice { get; set; }
     }
 
@@ -301,7 +344,7 @@ namespace HexaBill.Api.Models
         public DateTime CreatedAt { get; set; }
         public string CreatedBy { get; set; } = string.Empty;
         public int Version { get; set; } = 1; // Version number for tracking edits
-        public bool IsLocked { get; set; } = false; // Locked after 48 hours
+        public bool IsLocked { get; set; } = false; // Locked after 8 hours
         public DateTime? LastModifiedAt { get; set; }
         public string? LastModifiedBy { get; set; }
         public string? RowVersion { get; set; } // Base64 encoded for concurrency control
@@ -346,30 +389,39 @@ namespace HexaBill.Api.Models
     public class CreatePurchaseRequest
     {
         [Required]
+        [MaxLength(200)]
         public string SupplierName { get; set; } = string.Empty;
         [Required]
+        [MaxLength(100)]
         public string InvoiceNo { get; set; } = string.Empty;
         [Required]
         public DateTime PurchaseDate { get; set; }
+        [MaxLength(100)]
         public string? ExpenseCategory { get; set; } // Optional expense category (e.g., "Inventory", "Supplies", "Equipment")
         
         // VAT HANDLING (Optional - if not provided, system will auto-calculate assuming costs include VAT)
         public bool? IncludesVat { get; set; } // True if costs include VAT, False if VAT should be added, Null for auto-detection
+        [Range(0, 100, ErrorMessage = "VatPercent must be between 0 and 100")]
         public decimal? VatPercent { get; set; } // VAT percentage (default 5% for UAE)
         
         [Required]
+        [MinLength(1, ErrorMessage = "At least one item is required")]
         public List<PurchaseItemRequest> Items { get; set; } = new();
     }
 
     public class PurchaseItemRequest
     {
         [Required]
+        [Range(1, int.MaxValue, ErrorMessage = "ProductId must be greater than 0")]
         public int ProductId { get; set; }
         [Required]
+        [MaxLength(20)]
         public string UnitType { get; set; } = string.Empty;
         [Required]
+        [Range(0.0001, 999999.99, ErrorMessage = "Qty must be greater than 0")]
         public decimal Qty { get; set; }
         [Required]
+        [Range(0, 99999999.99, ErrorMessage = "UnitCost must be non-negative")]
         public decimal UnitCost { get; set; } // Default: cost INCLUDING VAT (unless IncludesVat=false in parent)
     }
 
@@ -405,13 +457,20 @@ namespace HexaBill.Api.Models
     public class CreateCustomerRequest
     {
         [Required]
+        [MaxLength(200)]
         public string Name { get; set; } = string.Empty;
+        [MaxLength(20)]
         public string? Phone { get; set; }
         [EmailAddress]
+        [MaxLength(100)]
         public string? Email { get; set; }
+        [MaxLength(50)]
         public string? Trn { get; set; }
+        [MaxLength(500)]
         public string? Address { get; set; }
+        [Range(0, 99999999.99, ErrorMessage = "CreditLimit must be non-negative")]
         public decimal CreditLimit { get; set; }
+        [MaxLength(100)]
         public string? PaymentTerms { get; set; }
         
         /// <summary>
@@ -419,6 +478,7 @@ namespace HexaBill.Api.Models
         /// Credit customers can have outstanding balance, Cash customers must pay immediately
         /// Default is "Credit"
         /// </summary>
+        [MaxLength(20)]
         public string CustomerType { get; set; } = "Credit";
         public int? BranchId { get; set; }
         public int? RouteId { get; set; }

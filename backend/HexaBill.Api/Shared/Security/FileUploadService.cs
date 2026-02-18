@@ -215,7 +215,7 @@ namespace HexaBill.Api.Shared.Security
 
             try
             {
-                // Handle both full paths and relative paths
+                // PROD-17: Handle tenant-isolated file paths
                 string fullPath;
                 if (Path.IsPathRooted(filePath))
                 {
@@ -223,14 +223,28 @@ namespace HexaBill.Api.Shared.Security
                 }
                 else if (filePath.StartsWith("/uploads/") || filePath.StartsWith("uploads/"))
                 {
-                    // Extract filename from path like "/uploads/logo_xxx.png"
-                    var fileName = Path.GetFileName(filePath);
-                    fullPath = Path.Combine(_uploadPath, fileName);
+                    // Path format: "uploads/{tenantId}/filename" or "/uploads/{tenantId}/filename"
+                    // Remove leading slash and "uploads/" prefix
+                    var relativePath = filePath.TrimStart('/').Replace("uploads/", "", StringComparison.OrdinalIgnoreCase);
+                    fullPath = Path.Combine(_uploadPath, relativePath);
+                }
+                else if (filePath.Contains('/') || filePath.Contains('\\'))
+                {
+                    // Path format: "{tenantId}/filename" or "{tenantId}/products/filename"
+                    fullPath = Path.Combine(_uploadPath, filePath);
                 }
                 else
                 {
-                    // Assume it's just a filename
+                    // Legacy: Just filename (should not happen with tenant isolation)
                     fullPath = Path.Combine(_uploadPath, filePath);
+                }
+
+                // PROD-17: Security check - ensure file is within upload directory (prevent path traversal)
+                var normalizedFullPath = Path.GetFullPath(fullPath);
+                var normalizedUploadPath = Path.GetFullPath(_uploadPath);
+                if (!normalizedFullPath.StartsWith(normalizedUploadPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Task.FromResult(false); // Path traversal attempt
                 }
 
                 if (File.Exists(fullPath))
@@ -251,7 +265,16 @@ namespace HexaBill.Api.Shared.Security
             if (string.IsNullOrEmpty(filePath))
                 return Task.FromResult(string.Empty);
 
+            // PROD-17: Security check - ensure file path is within upload directory
             var fullPath = Path.Combine(_uploadPath, filePath);
+            var normalizedFullPath = Path.GetFullPath(fullPath);
+            var normalizedUploadPath = Path.GetFullPath(_uploadPath);
+            
+            if (!normalizedFullPath.StartsWith(normalizedUploadPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromResult(string.Empty); // Path traversal attempt
+            }
+
             if (File.Exists(fullPath))
             {
                 return Task.FromResult($"/uploads/{filePath}");

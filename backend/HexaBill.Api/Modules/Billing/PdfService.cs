@@ -485,10 +485,23 @@ namespace HexaBill.Api.Modules.Billing
                 
                 var settings = await GetCompanySettingsAsync(sales[0].OwnerId); // All sales belong to same owner
                 
+                // PROD-10: Pre-fetch all customer TRNs to avoid blocking .Result calls in synchronous context
+                var customerTrnMap = new Dictionary<int?, string>();
+                foreach (var sale in sales)
+                {
+                    if (sale.CustomerId.HasValue && !customerTrnMap.ContainsKey(sale.CustomerId))
+                    {
+                        var customerTrn = await GetCustomerTrnAsync(sale.CustomerId);
+                        customerTrnMap[sale.CustomerId] = customerTrn ?? "";
+                    }
+                }
+                
                 var document = Document.Create(container =>
                 {
                     foreach (var sale in sales)
                     {
+                        var customerTrn = sale.CustomerId.HasValue && customerTrnMap.TryGetValue(sale.CustomerId, out var trn) ? trn : null;
+                        
                         container.Page(page =>
                         {
                             page.Size(PageSizes.A4);
@@ -509,7 +522,7 @@ namespace HexaBill.Api.Modules.Billing
 
                             page.Content().Column(column =>
                             {
-                                RenderInvoiceContent(column, sale, settings);
+                                RenderInvoiceContent(column, sale, settings, customerTrn);
                             });
                         });
                     }
@@ -542,9 +555,10 @@ namespace HexaBill.Api.Modules.Billing
             }
         }
 
-        private void RenderInvoiceContent(ColumnDescriptor column, SaleDto sale, InvoiceTemplateService.CompanySettings settings)
+        private void RenderInvoiceContent(ColumnDescriptor column, SaleDto sale, InvoiceTemplateService.CompanySettings settings, string? customerTrn = null)
         {
-            var customerTrn = GetCustomerTrnAsync(sale.CustomerId).Result;
+            // PROD-10: Customer TRN should be pre-fetched before calling this synchronous method
+            // This avoids blocking .Result calls in synchronous context
             var trnDisplay = string.IsNullOrWhiteSpace(customerTrn) ? "" : customerTrn;
 
             column.Spacing(0);

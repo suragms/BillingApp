@@ -107,7 +107,7 @@ const ProductsPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPage, pageSize, debouncedSearchTerm, activeTab, activeFilters]) // Only refresh when filters change
 
-  const handleCreateProduct = async (productData) => {
+  const handleCreateProduct = async (productData, imageFile) => {
     // Prevent multiple clicks
     if (saving) {
       toast.error('Please wait, operation in progress...')
@@ -133,7 +133,22 @@ const ProductsPage = () => {
       const payload = { ...productData, expiryDate: productData.expiryDate?.trim() || undefined }
       const response = await productsAPI.createProduct(payload)
       if (response?.success) {
-        toast.success('Product created successfully')
+        // Upload image if provided (for new products, upload after creation)
+        if (imageFile && response.data?.id) {
+          try {
+            const uploadResponse = await productsAPI.uploadProductImage(response.data.id, imageFile)
+            if (uploadResponse?.success) {
+              toast.success('Product created and image uploaded successfully')
+            } else {
+              toast.success('Product created successfully, but image upload failed')
+            }
+          } catch (uploadError) {
+            console.error('Error uploading image:', uploadError)
+            toast.success('Product created successfully, but image upload failed')
+          }
+        } else {
+          toast.success('Product created successfully')
+        }
         setShowForm(false)
         loadProducts()
       } else {
@@ -191,7 +206,22 @@ const ProductsPage = () => {
       const payload = { ...productData, expiryDate: productData.expiryDate?.trim() || undefined }
       const response = await productsAPI.updateProduct(id, payload)
       if (response?.success) {
-        toast.success('Product updated successfully')
+        // Upload image if provided (image upload is handled in ProductForm for existing products, but handle it here too for consistency)
+        if (imageFile) {
+          try {
+            const uploadResponse = await productsAPI.uploadProductImage(id, imageFile)
+            if (uploadResponse?.success) {
+              toast.success('Product updated and image uploaded successfully')
+            } else {
+              toast.success('Product updated successfully, but image upload failed')
+            }
+          } catch (uploadError) {
+            console.error('Error uploading image:', uploadError)
+            toast.success('Product updated successfully, but image upload failed')
+          }
+        } else {
+          toast.success('Product updated successfully')
+        }
         setShowForm(false)
         setEditingProduct(null)
         loadProducts()
@@ -546,6 +576,39 @@ const ProductsPage = () => {
         data={products}
         loading={loading}
         columns={[
+          {
+            key: 'imageUrl',
+            label: 'Image',
+            sortable: false,
+            render: (product) => {
+              if (product.imageUrl) {
+                return (
+                  <div className="relative">
+                    <img 
+                      src={product.imageUrl.startsWith('http') || product.imageUrl.startsWith('/') 
+                        ? product.imageUrl 
+                        : `/uploads/${product.imageUrl}`}
+                      alt={product.nameEn}
+                      className="h-10 w-10 object-cover rounded border border-gray-200"
+                      onError={(e) => {
+                        e.target.style.display = 'none'
+                        const placeholder = e.target.parentElement.querySelector('.image-placeholder')
+                        if (placeholder) placeholder.style.display = 'flex'
+                      }}
+                    />
+                    <div className="image-placeholder h-10 w-10 bg-gray-100 rounded border border-gray-200 flex items-center justify-center" style={{ display: 'none' }}>
+                      <ImageIcon className="h-4 w-4 text-gray-400" />
+                    </div>
+                  </div>
+                )
+              }
+              return (
+                <div className="h-10 w-10 bg-gray-100 rounded border border-gray-200 flex items-center justify-center">
+                  <ImageIcon className="h-4 w-4 text-gray-400" />
+                </div>
+              )
+            }
+          },
           { key: 'sku', label: 'SKU', sortable: true },
           { 
             key: 'nameEn', 
@@ -560,6 +623,32 @@ const ProductsPage = () => {
                   </span>
                 )}
               </div>
+            )
+          },
+          {
+            key: 'barcode',
+            label: 'Barcode',
+            sortable: true,
+            render: (product) => (
+              product.barcode ? (
+                <span className="font-mono text-xs text-gray-600">{product.barcode}</span>
+              ) : (
+                <span className="text-gray-400 text-xs">—</span>
+              )
+            )
+          },
+          {
+            key: 'categoryName',
+            label: 'Category',
+            sortable: true,
+            render: (product) => (
+              product.categoryName ? (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700">
+                  {product.categoryName}
+                </span>
+              ) : (
+                <span className="text-gray-400 text-xs">—</span>
+              )
             )
           },
           { key: 'unitType', label: 'Qty', sortable: true },

@@ -49,8 +49,8 @@ namespace HexaBill.Api.Models
         // Invoice finalization - stock is only decremented when IsFinalized = true
         public bool IsFinalized { get; set; } = true; // True when invoice is finalized and stock is decremented
         
-        // 48-hour edit window fields
-        public bool IsLocked { get; set; } = false; // Locked after 48 hours
+        // 8-hour edit window fields (Gulf trading context - disputes happen same-day)
+        public bool IsLocked { get; set; } = false; // Locked after 8 hours
         public DateTime? LockedAt { get; set; } // When locked
         public string? EditReason { get; set; } // Reason for edit (required for Staff)
         public int Version { get; set; } = 1; // Version number for tracking edits (also used for concurrency)

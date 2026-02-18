@@ -45,7 +45,9 @@ namespace HexaBill.Api.Shared.Middleware
 
         private async Task HandleExceptionAsync(HttpContext context, Exception exception)
         {
-            var correlationId = Guid.NewGuid().ToString();
+            // PROD-18: Reuse correlation ID from RequestLoggingMiddleware if available
+            var correlationId = context.GetCorrelationIdOrNull() ?? Guid.NewGuid().ToString("N")[..12];
+            context.SetCorrelationId(correlationId); // Ensure it's set for response
 
             _logger.LogError(
                 exception,

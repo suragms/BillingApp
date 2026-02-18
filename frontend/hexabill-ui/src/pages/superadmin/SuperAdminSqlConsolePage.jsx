@@ -61,7 +61,7 @@ const SuperAdminSqlConsolePage = () => {
           <textarea
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={'SELECT * FROM "Tenants" LIMIT 10'}
+            placeholder="SELECT * FROM &quot;Tenants&quot; LIMIT 10"
             className="w-full min-h-[140px] p-4 font-mono text-sm border-0 focus:ring-0 resize-y bg-neutral-50"
             spellCheck={false}
           />

@@ -417,8 +417,13 @@ namespace HexaBill.Api.Modules.Inventory
                 // CRITICAL: Get tenantId from JWT token. #55: use global low-stock threshold from settings if set
                 var tenantId = CurrentTenantId;
                 var globalThreshold = await GetGlobalLowStockThresholdAsync();
-                var result = await _productService.GetLowStockProductsAsync(tenantId, globalThreshold);
-                return Ok(new ApiResponse<List<ProductDto>>
+                
+                // AUDIT-6 FIX: Add pagination support
+                var page = int.TryParse(Request.Query["page"].ToString(), out var p) ? p : 1;
+                var pageSize = int.TryParse(Request.Query["pageSize"].ToString(), out var ps) ? Math.Min(ps, 100) : 50;
+                
+                var result = await _productService.GetLowStockProductsAsync(tenantId, page, pageSize, globalThreshold);
+                return Ok(new ApiResponse<PagedResponse<ProductDto>>
                 {
                     Success = true,
                     Message = "Low stock products retrieved successfully",
@@ -427,7 +432,7 @@ namespace HexaBill.Api.Modules.Inventory
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<ProductDto>>
+                return StatusCode(500, new ApiResponse<PagedResponse<ProductDto>>
                 {
                     Success = false,
                     Message = "An error occurred",
@@ -563,17 +568,29 @@ namespace HexaBill.Api.Modules.Inventory
         {
             try
             {
-                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
-                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId))
+                // BUG #2.11 FIX: Enhanced error handling for Reset All Stock endpoint
+                var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier) ?? 
+                                 User.FindFirst("UserId") ?? 
+                                 User.FindFirst("id");
+                if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out int userId) || userId == 0)
                 {
                     return Unauthorized(new ApiResponse<object>
                     {
                         Success = false,
-                        Message = "Invalid user"
+                        Message = "Invalid user authentication"
                     });
                 }
 
                 var tenantId = CurrentTenantId; // CRITICAL: Get from JWT
+                if (tenantId <= 0)
+                {
+                    return BadRequest(new ApiResponse<object>
+                    {
+                        Success = false,
+                        Message = "Invalid tenant context"
+                    });
+                }
+
                 var result = await _productService.ResetAllStockAsync(userId, tenantId);
                 return Ok(new ApiResponse<object>
                 {
@@ -584,11 +601,17 @@ namespace HexaBill.Api.Modules.Inventory
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"❌ ResetAllStock Error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                }
                 return StatusCode(500, new ApiResponse<object>
                 {
                     Success = false,
                     Message = "An error occurred while resetting stock",
-                    Errors = new List<string> { ex.Message }
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(e => !string.IsNullOrEmpty(e)).ToList()
                 });
             }
         }

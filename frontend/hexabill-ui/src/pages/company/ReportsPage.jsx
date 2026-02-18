@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useDebounce } from '../../hooks/useDebounce'
 import {
   Download,
   Filter,
@@ -81,7 +82,8 @@ const ReportsPage = () => {
     product: '',
     customer: '',
     category: '',
-    status: '' // Pending, Paid, Partial for sales report
+    status: '', // Pending, Paid, Partial for sales report
+    search: '' // BUG #2.5 FIX: Add search filter for invoice number, customer name
   })
   const [appliedFilters, setAppliedFilters] = useState({
     branch: '',
@@ -89,8 +91,12 @@ const ReportsPage = () => {
     product: '',
     customer: '',
     category: '',
-    status: ''
+    status: '',
+    search: ''
   })
+  
+  // BUG #2.5 FIX: Debounce text filter inputs (400ms delay) to prevent instant API calls
+  const debouncedSearch = useDebounce(filters.search, 400)
 
   const [reportData, setReportData] = useState({
     summary: null,
@@ -327,6 +333,7 @@ const ReportsPage = () => {
             status: appliedFilters.status || undefined,
             branchId: appliedFilters.branch ? parseInt(appliedFilters.branch, 10) : undefined,
             routeId: appliedFilters.route ? parseInt(appliedFilters.route, 10) : undefined,
+            search: appliedFilters.search || undefined, // BUG #2.5 FIX: Add search parameter
             page: 1,
             pageSize: 100
           })
@@ -937,6 +944,14 @@ const ReportsPage = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // Only run once on mount
+
+  // BUG #2.5 FIX: Apply debounced search filter when it changes
+  useEffect(() => {
+    if (debouncedSearch !== appliedFilters.search) {
+      setAppliedFilters(prev => ({ ...prev, search: debouncedSearch }))
+      tabDataCacheRef.current = {} // Clear cache when search changes
+    }
+  }, [debouncedSearch, appliedFilters.search])
 
   // Handle dependency-based refreshes (dateRange, activeTab, filters change)
   useEffect(() => {

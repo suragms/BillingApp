@@ -186,16 +186,48 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     if (usePostgreSQL)
     {
         // For 2000+ tenants or multiple instances, use PgBouncer (point connection string to pooler) or set Maximum Pool Size in connection string. See docs/CONNECTION_POOLING_AND_PGBOUNCER.md.
-        options.UseNpgsql(connectionString);
-        logger.LogInformation("✅ PostgreSQL database configured");
+        options.UseNpgsql(connectionString, npgsqlOptions =>
+        {
+            // PROD-14: Add query timeout guard (30 seconds) - prevents long-running queries from hanging
+            npgsqlOptions.CommandTimeout(30);
+            // Enable retry on transient failures
+            npgsqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 3,
+                maxRetryDelay: TimeSpan.FromSeconds(5),
+                errorCodesToAdd: null);
+        });
+        logger.LogInformation("✅ PostgreSQL database configured with 30s timeout and retry policy");
     }
     else
     {
-        options.UseSqlite(connectionString);
-        logger.LogInformation("✅ SQLite database configured");
+        options.UseSqlite(connectionString, sqliteOptions =>
+        {
+            // PROD-14: Add query timeout guard (30 seconds) for SQLite as well
+            sqliteOptions.CommandTimeout(30);
+        });
+        logger.LogInformation("✅ SQLite database configured with 30s timeout");
     }
     options.ConfigureWarnings(w =>
         w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
+    
+    // PROD-16: Enable slow query logging (>500ms) via EF Core logging
+    // Log slow queries to console with details
+    options.LogTo(
+        message => 
+        {
+            // Parse EF Core log messages for slow queries
+            if (message.Contains("CommandExecuted") && message.Contains("ms"))
+            {
+                // Extract duration from log message (format: "Executed DbCommand (XXXms)")
+                var msMatch = System.Text.RegularExpressions.Regex.Match(message, @"\((\d+)ms\)");
+                if (msMatch.Success && int.TryParse(msMatch.Groups[1].Value, out var duration) && duration > 500)
+                {
+                    Console.WriteLine($"[SLOW QUERY] {message}");
+                }
+            }
+        },
+        Microsoft.Extensions.Logging.LogLevel.Information,
+        Microsoft.EntityFrameworkCore.Diagnostics.DbContextLoggerOptions.None);
 });
 
 // Security Services
@@ -231,7 +263,21 @@ builder.Services.AddScoped<IPdfService, PdfService>();
 builder.Services.AddScoped<IBackupService, BackupService>();
 builder.Services.AddScoped<IComprehensiveBackupService, ComprehensiveBackupService>();
 builder.Services.AddScoped<ICurrencyService, CurrencyService>();
-builder.Services.AddScoped<IFileUploadService, FileUploadService>();
+// BUG #2.2 FIX: Use R2 storage if configured, otherwise fallback to local disk storage
+var r2Endpoint = Environment.GetEnvironmentVariable("R2_ENDPOINT") ?? builder.Configuration["R2Settings:Endpoint"] ?? builder.Configuration["CloudflareR2:Endpoint"];
+var r2AccessKey = Environment.GetEnvironmentVariable("R2_ACCESS_KEY") ?? builder.Configuration["R2Settings:AccessKey"] ?? builder.Configuration["CloudflareR2:AccessKey"];
+var r2SecretKey = Environment.GetEnvironmentVariable("R2_SECRET_KEY") ?? builder.Configuration["R2Settings:SecretKey"] ?? builder.Configuration["CloudflareR2:SecretKey"];
+
+if (!string.IsNullOrWhiteSpace(r2Endpoint) && !string.IsNullOrWhiteSpace(r2AccessKey) && !string.IsNullOrWhiteSpace(r2SecretKey))
+{
+    builder.Services.AddScoped<IFileUploadService, R2FileUploadService>();
+    logger.LogInformation("✅ Cloudflare R2 storage enabled for file uploads");
+}
+else
+{
+    builder.Services.AddScoped<IFileUploadService, FileUploadService>();
+    logger.LogWarning("⚠️ R2 storage not configured - using local disk storage (files will be lost on server restart/deploy). Set R2_ENDPOINT, R2_ACCESS_KEY, and R2_SECRET_KEY to enable R2 storage.");
+}
 builder.Services.AddScoped<IReturnService, ReturnService>();
 builder.Services.AddScoped<IProfitService, ProfitService>();
 builder.Services.AddScoped<IStockAdjustmentService, StockAdjustmentService>();
@@ -250,10 +296,30 @@ builder.Services.AddScoped<ISubscriptionService, SubscriptionService>(); // Subs
 builder.Services.AddScoped<ISignupService, SignupService>(); // Public signup service
 builder.Services.AddScoped<HexaBill.Api.Modules.SuperAdmin.IDemoRequestService, HexaBill.Api.Modules.SuperAdmin.DemoRequestService>(); // Demo request approval flow
 builder.Services.AddScoped<IErrorLogService, ErrorLogService>(); // Enterprise: persist 500 errors for SuperAdmin
-// Automation provider - can switch between LogOnlyAutomationProvider (dev) and EmailAutomationProvider (production)
-// For production with email: builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.EmailAutomationProvider>();
-builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.LogOnlyAutomationProvider>(); // Log-only for now, switch to EmailAutomationProvider when email is configured
-builder.Services.AddSingleton<HexaBill.Api.Modules.Auth.ILoginLockoutService, HexaBill.Api.Modules.Auth.LoginLockoutService>(); // Login lockout 5 attempts, 15 min
+// BUG #2.4 FIX: Automation provider - use EmailAutomationProvider if SMTP is configured, otherwise LogOnlyAutomationProvider
+// Check for SMTP configuration (environment variables or appsettings)
+var smtpHost = Environment.GetEnvironmentVariable("SMTP_HOST") ?? builder.Configuration["EmailSettings:SmtpHost"] ?? builder.Configuration["BackupSettings:Email:SmtpServer"];
+var smtpUser = Environment.GetEnvironmentVariable("SMTP_USER") ?? builder.Configuration["EmailSettings:SmtpUser"] ?? builder.Configuration["BackupSettings:Email:Username"];
+var smtpPass = Environment.GetEnvironmentVariable("SMTP_PASS") ?? builder.Configuration["EmailSettings:SmtpPassword"] ?? builder.Configuration["BackupSettings:Email:Password"];
+var emailEnabled = Environment.GetEnvironmentVariable("EMAIL_ENABLED") ?? builder.Configuration["EmailSettings:Enabled"] ?? builder.Configuration["BackupSettings:Email:Enabled"];
+
+bool useEmailProvider = !string.IsNullOrWhiteSpace(smtpHost) && 
+                        !string.IsNullOrWhiteSpace(smtpUser) && 
+                        !string.IsNullOrWhiteSpace(smtpPass) &&
+                        (emailEnabled == "true" || emailEnabled == "True" || emailEnabled == "1");
+
+if (useEmailProvider)
+{
+    builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.EmailAutomationProvider>();
+    logger.LogInformation("✅ Email automation enabled - using EmailAutomationProvider (SMTP configured)");
+}
+else
+{
+    builder.Services.AddScoped<HexaBill.Api.Modules.Automation.IAutomationProvider, HexaBill.Api.Modules.Automation.LogOnlyAutomationProvider>();
+    logger.LogWarning("⚠️ Email automation disabled - using LogOnlyAutomationProvider. Set SMTP_HOST, SMTP_USER, SMTP_PASS environment variables to enable email sending.");
+}
+// BUG #2.7 FIX: Login lockout service - changed to Scoped (requires DbContext) and async methods
+builder.Services.AddScoped<HexaBill.Api.Modules.Auth.ILoginLockoutService, HexaBill.Api.Modules.Auth.LoginLockoutService>(); // Login lockout 5 attempts, 15 min (persistent in PostgreSQL)
 builder.Services.AddSingleton<HexaBill.Api.Shared.Services.ITenantActivityService, HexaBill.Api.Shared.Services.TenantActivityService>(); // SuperAdmin Live Activity
 
 // Background services
@@ -364,6 +430,43 @@ using (var scope = app.Services.CreateScope())
             ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_UserSessions_LoginAt ON UserSessions (LoginAt)");
         }
         catch { /* table may already exist */ }
+        // BUG #2.7 FIX: FailedLoginAttempts table - persistent login lockout tracking
+        try
+        {
+            if (ctx.Database.IsNpgsql())
+            {
+                ctx.Database.ExecuteSqlRaw(@"
+                    CREATE TABLE IF NOT EXISTS ""FailedLoginAttempts"" (
+                        ""Id"" SERIAL PRIMARY KEY,
+                        ""Email"" VARCHAR(100) NOT NULL UNIQUE,
+                        ""FailedCount"" INTEGER NOT NULL DEFAULT 1,
+                        ""LockoutUntil"" TIMESTAMP NULL,
+                        ""LastAttemptAt"" TIMESTAMP NOT NULL,
+                        ""CreatedAt"" TIMESTAMP NOT NULL,
+                        ""UpdatedAt"" TIMESTAMP NULL
+                    )");
+                ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_FailedLoginAttempts_Email ON \"FailedLoginAttempts\" (\"Email\")");
+                ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_FailedLoginAttempts_LockoutUntil ON \"FailedLoginAttempts\" (\"LockoutUntil\")");
+                ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_FailedLoginAttempts_LastAttemptAt ON \"FailedLoginAttempts\" (\"LastAttemptAt\")");
+            }
+            else
+            {
+                ctx.Database.ExecuteSqlRaw(@"
+                    CREATE TABLE IF NOT EXISTS FailedLoginAttempts (
+                        Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        Email TEXT NOT NULL UNIQUE,
+                        FailedCount INTEGER NOT NULL DEFAULT 1,
+                        LockoutUntil TEXT NULL,
+                        LastAttemptAt TEXT NOT NULL,
+                        CreatedAt TEXT NOT NULL,
+                        UpdatedAt TEXT NULL
+                    )");
+                ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_FailedLoginAttempts_Email ON FailedLoginAttempts (Email)");
+                ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_FailedLoginAttempts_LockoutUntil ON FailedLoginAttempts (LockoutUntil)");
+                ctx.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_FailedLoginAttempts_LastAttemptAt ON FailedLoginAttempts (LastAttemptAt)");
+            }
+        }
+        catch { /* table may already exist */ }
         // Expenses table - fixes 500 on /api/expenses (prevents server from crashing when dashboard loads)
         try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN AttachmentUrl TEXT NULL"); } catch { }
         try { ctx.Database.ExecuteSqlRaw("ALTER TABLE Expenses ADD COLUMN Status INTEGER NOT NULL DEFAULT 1"); } catch { }
@@ -406,6 +509,26 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
+// AUDIT-5: Migration check on startup - log warning if pending migrations
+using (var scope = app.Services.CreateScope())
+{
+    try
+    {
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var pendingMigrations = await db.Database.GetPendingMigrationsAsync();
+        if (pendingMigrations.Any())
+        {
+            var startupLogger = app.Services.GetService<ILoggerFactory>()?.CreateLogger("MigrationCheck");
+            startupLogger?.LogWarning("Pending migrations detected: {Count} - {Migrations}", pendingMigrations.Count(), string.Join(", ", pendingMigrations));
+        }
+    }
+    catch (Exception ex)
+    {
+        var startupLogger = app.Services.GetService<ILoggerFactory>()?.CreateLogger("MigrationCheck");
+        startupLogger?.LogWarning(ex, "Could not check pending migrations");
+    }
+}
+
 // CRITICAL: Global Exception Handler - MUST be FIRST in pipeline to catch all unhandled exceptions
 app.UseMiddleware<HexaBill.Api.Shared.Middleware.GlobalExceptionHandlerMiddleware>();
 
@@ -439,10 +562,26 @@ else
 if (!app.Environment.IsDevelopment())
     app.UseForwardedHeaders();
 
+// BUG #2.6 FIX: Only enable Swagger in Development mode (explicit check to prevent exposure in production)
+// On Render, ASPNETCORE_ENVIRONMENT defaults to 'Production' string, but we check explicitly
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+}
+else
+{
+    // Explicitly disable Swagger in production - return 404 for /swagger endpoints
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/swagger"))
+        {
+            context.Response.StatusCode = 404;
+            await context.Response.WriteAsync("Not Found");
+            return;
+        }
+        await next();
+    });
 }
 
 // Serve static files from wwwroot/uploads (for logo and other uploads)
@@ -468,6 +607,12 @@ app.UseCors(app.Environment.IsDevelopment() ? "Development" : "Production");
 // CRITICAL: PostgreSQL Error Monitoring Middleware
 app.UseMiddleware<HexaBill.Api.Shared.Middleware.PostgreSqlErrorMonitoringMiddleware>();
 
+// PROD-2: Request logging middleware - Logs TenantId, endpoint, duration, status code, correlation ID
+app.UseRequestLogging();
+
+// PROD-16: Slow query logging middleware - Logs queries >500ms with details
+app.UseSlowQueryLogging();
+
 // Security middleware (includes rate limiting and security headers)
 app.UseSecurityMiddleware(app.Environment);
 
@@ -478,6 +623,9 @@ app.UseTenantContext();
 
 // Tenant Activity - Record API calls per tenant for SuperAdmin Live Activity (must be after TenantContext)
 app.UseTenantActivity();
+
+// BUG #2.9 FIX: User Activity - Update User.LastActiveAt for online/offline indicator (must be after authentication)
+app.UseUserActivity();
 
 // Subscription Middleware - Enforce subscription limits and status
 app.UseSubscriptionMiddleware();
@@ -510,8 +658,8 @@ app.MapGet("/api/cors-check", (HttpContext context) =>
     };
 }).AllowAnonymous();
 
-// Health check endpoints - /health is lightweight; /health/ready includes DB check
-app.MapGet("/health", () => Results.Ok(new { status = "Healthy", timestamp = DateTime.UtcNow })).AllowAnonymous();
+// PROD-1: Health check endpoint - handled by DiagnosticsController for comprehensive checks
+// Basic health endpoint removed - use /api/health for full diagnostics
 app.MapGet("/health/ready", async (HttpContext ctx) =>
 {
     try
@@ -566,6 +714,43 @@ app.MapGet("/api/diagnostics/errors", () =>
         message = errorStats.Any() ? "Errors detected - see breakdown below" : "No errors recorded"
     });
 }).AllowAnonymous();
+
+// AUDIT-5 FIX: Check for pending migrations on startup
+_ = Task.Run(async () =>
+{
+    try
+    {
+        await Task.Delay(2000); // Wait for app to fully start
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+        
+        var pendingMigrations = await db.Database.GetPendingMigrationsAsync();
+        if (pendingMigrations.Any())
+        {
+            logger.LogWarning("⚠️ Pending migrations detected: {Count}", pendingMigrations.Count());
+            logger.LogWarning("Pending migrations: {Migrations}", string.Join(", ", pendingMigrations));
+            
+            // In development, optionally auto-apply migrations
+            if (app.Environment.IsDevelopment())
+            {
+                logger.LogInformation("Auto-applying migrations in development...");
+                await db.Database.MigrateAsync();
+                logger.LogInformation("✅ Migrations applied successfully");
+            }
+        }
+        else
+        {
+            logger.LogInformation("✅ Database is up to date - no pending migrations");
+        }
+    }
+    catch (Exception ex)
+    {
+        var logger = app.Services.GetRequiredService<ILogger<Program>>();
+        logger.LogError(ex, "❌ Error checking migrations");
+        // Don't throw - allow app to start even if migration check fails
+    }
+});
 
 // Database initialization - run in background, don't block server startup
 _ = Task.Run(async () =>
@@ -1294,7 +1479,11 @@ _ = Task.Run(async () =>
 
 // Start the server - this blocks forever until shutdown signal received
 appLogger.LogInformation("Starting server...");
-appLogger.LogInformation("Swagger UI available at: {SwaggerUrl}", app.Urls.FirstOrDefault() + "/swagger");
+// BUG #2.6 FIX: Only log Swagger URL in Development mode
+if (app.Environment.IsDevelopment())
+{
+    appLogger.LogInformation("Swagger UI available at: {SwaggerUrl}", app.Urls.FirstOrDefault() + "/swagger");
+}
 app.Run(); // Blocks here - server runs until SIGTERM/SIGINT received
 
 

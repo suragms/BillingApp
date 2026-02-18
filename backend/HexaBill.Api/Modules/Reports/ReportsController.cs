@@ -206,7 +206,8 @@ namespace HexaBill.Api.Modules.Reports
             [FromQuery] int page = 1,
             [FromQuery] int pageSize = 10,
             [FromQuery] int? branchId = null,
-            [FromQuery] int? routeId = null)
+            [FromQuery] int? routeId = null,
+            [FromQuery] string? search = null) // BUG #2.5 FIX: Add search parameter
         {
             try
             {
@@ -216,7 +217,7 @@ namespace HexaBill.Api.Modules.Reports
                 var to = ((toDate ?? gstNow).AddDays(1)).ToUtcKind();
                 var userId = int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var uid) ? uid : (int?)null;
                 var role = User.FindFirst(ClaimTypes.Role)?.Value;
-                var result = await _reportService.GetSalesReportAsync(tenantId, from, to, customerId, status, page, pageSize, branchId, routeId, userId, role);
+                var result = await _reportService.GetSalesReportAsync(tenantId, from, to, customerId, status, page, pageSize, branchId, routeId, userId, role, search);
                 return Ok(new ApiResponse<PagedResponse<SaleDto>>
                 {
                     Success = true,
@@ -295,14 +296,17 @@ namespace HexaBill.Api.Modules.Reports
         }
 
         [HttpGet("outstanding")]
-        public async Task<ActionResult<ApiResponse<List<CustomerDto>>>> GetOutstandingCustomers(
-            [FromQuery] int days = 30)
+        public async Task<ActionResult<ApiResponse<PagedResponse<CustomerDto>>>> GetOutstandingCustomers(
+            [FromQuery] int days = 30,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 100)
         {
             try
             {
                 var tenantId = CurrentTenantId; // CRITICAL: Multi-tenant data isolation
-                var result = await _reportService.GetOutstandingCustomersAsync(tenantId, days);
-                return Ok(new ApiResponse<List<CustomerDto>>
+                // AUDIT-6 FIX: Add pagination support
+                var result = await _reportService.GetOutstandingCustomersAsync(tenantId, page, pageSize, days);
+                return Ok(new ApiResponse<PagedResponse<CustomerDto>>
                 {
                     Success = true,
                     Message = "Outstanding customers retrieved successfully",
@@ -311,7 +315,7 @@ namespace HexaBill.Api.Modules.Reports
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<CustomerDto>>
+                return StatusCode(500, new ApiResponse<PagedResponse<CustomerDto>>
                 {
                     Success = false,
                     Message = "An error occurred",
@@ -321,13 +325,16 @@ namespace HexaBill.Api.Modules.Reports
         }
 
         [HttpGet("cheque")]
-        public async Task<ActionResult<ApiResponse<List<PaymentDto>>>> GetChequeReport()
+        public async Task<ActionResult<ApiResponse<PagedResponse<PaymentDto>>>> GetChequeReport(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 100)
         {
             try
             {
                 var tenantId = CurrentTenantId; // CRITICAL: Multi-tenant data isolation
-                var result = await _reportService.GetChequeReportAsync(tenantId);
-                return Ok(new ApiResponse<List<PaymentDto>>
+                // AUDIT-6 FIX: Add pagination support
+                var result = await _reportService.GetChequeReportAsync(tenantId, page, pageSize);
+                return Ok(new ApiResponse<PagedResponse<PaymentDto>>
                 {
                     Success = true,
                     Message = "Cheque report retrieved successfully",
@@ -336,7 +343,7 @@ namespace HexaBill.Api.Modules.Reports
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<PaymentDto>>
+                return StatusCode(500, new ApiResponse<PagedResponse<PaymentDto>>
                 {
                     Success = false,
                     Message = "An error occurred",
@@ -381,13 +388,15 @@ namespace HexaBill.Api.Modules.Reports
 
         [HttpGet("pending")]
         [HttpGet("pending-bills")] // Alternative route name per spec
-        public async Task<ActionResult<ApiResponse<List<PendingBillDto>>>> GetPendingBills(
+        public async Task<ActionResult<ApiResponse<PagedResponse<PendingBillDto>>>> GetPendingBills(
             [FromQuery] DateTime? from = null,
             [FromQuery] DateTime? to = null,
             [FromQuery] int? customerId = null,
             [FromQuery] int days = 30, // Legacy parameter for backward compatibility
             [FromQuery] string? search = null,
-            [FromQuery] string? status = null)
+            [FromQuery] string? status = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 100)
         {
             try
             {
@@ -396,14 +405,18 @@ namespace HexaBill.Api.Modules.Reports
                 // When omitted, show ALL pending/overdue bills (no date filter) so overdue is visible.
                 DateTime? fromDate = (from.HasValue && to.HasValue) ? from.Value.ToUtcKind() : null;
                 DateTime? toDate = (from.HasValue && to.HasValue) ? to.Value.ToUtcKind() : null;
+                
+                // AUDIT-6 FIX: Add pagination support
                 var result = await _reportService.GetPendingBillsAsync(
                     tenantId,
                     fromDate,
                     toDate,
                     customerId,
                     search,
-                    status);
-                return Ok(new ApiResponse<List<PendingBillDto>>
+                    status,
+                    page,
+                    pageSize);
+                return Ok(new ApiResponse<PagedResponse<PendingBillDto>>
                 {
                     Success = true,
                     Message = "Pending bills retrieved successfully",
@@ -412,7 +425,7 @@ namespace HexaBill.Api.Modules.Reports
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<PendingBillDto>>
+                return StatusCode(500, new ApiResponse<PagedResponse<PendingBillDto>>
                 {
                     Success = false,
                     Message = "An error occurred",
@@ -828,7 +841,9 @@ namespace HexaBill.Api.Modules.Reports
                 var from = (fromDate ?? _timeZoneService.GetCurrentDate().AddDays(-30)).ToUtcKind();
                 var to = (toDate ?? _timeZoneService.GetCurrentDate()).ToUtcKind();
                 
-                var pendingBills = await _reportService.GetPendingBillsAsync(tenantId, from, to, customerId, null, status);
+                // AUDIT-6 FIX: Add pagination support (use default page/pageSize for PDF export)
+                var pendingBillsResult = await _reportService.GetPendingBillsAsync(tenantId, from, to, customerId, null, status, 1, 1000);
+                var pendingBills = pendingBillsResult?.Items ?? new List<PendingBillDto>();
                 
                 if (pendingBills == null || !pendingBills.Any())
                 {

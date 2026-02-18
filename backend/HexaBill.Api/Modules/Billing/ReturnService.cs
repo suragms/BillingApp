@@ -58,9 +58,11 @@ namespace HexaBill.Api.Modules.Billing
                     if (saleItem == null)
                         throw new InvalidOperationException($"Sale item {item.SaleItemId} not found");
 
-                    var product = await _context.Products.FindAsync(saleItem.ProductId);
+                    // AUDIT-4 FIX: Add TenantId filter to prevent cross-tenant product access
+                    var product = await _context.Products
+                        .FirstOrDefaultAsync(p => p.Id == saleItem.ProductId && p.TenantId == tenantId);
                     if (product == null)
-                        throw new InvalidOperationException("Product not found");
+                        throw new InvalidOperationException("Product not found or does not belong to your tenant");
 
                     // Calculate return totals
                     var lineTotal = item.Qty * saleItem.UnitPrice;
@@ -88,8 +90,18 @@ namespace HexaBill.Api.Modules.Billing
                     if (!request.IsBadItem && request.RestoreStock)
                     {
                         var baseQty = item.Qty * product.ConversionToBase;
-                        product.StockQty += baseQty;
-                        product.UpdatedAt = DateTime.UtcNow;
+                        // PROD-19: Atomic stock restore
+                        var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $@"UPDATE ""Products"" 
+                               SET ""StockQty"" = ""StockQty"" + {baseQty}, 
+                                   ""UpdatedAt"" = {DateTime.UtcNow}
+                               WHERE ""Id"" = {product.Id} 
+                                 AND ""TenantId"" = {tenantId}");
+                        
+                        if (rowsAffected > 0)
+                        {
+                            await _context.Entry(product).ReloadAsync();
+                        }
 
                         // Create inventory transaction (Return increases stock)
                         inventoryTransactions.Add(new InventoryTransaction
@@ -208,9 +220,11 @@ namespace HexaBill.Api.Modules.Billing
                     if (purchaseItem == null)
                         throw new InvalidOperationException($"Purchase item {item.PurchaseItemId} not found");
 
-                    var product = await _context.Products.FindAsync(purchaseItem.ProductId);
+                    // AUDIT-4 FIX: Add TenantId filter to prevent cross-tenant product access
+                    var product = await _context.Products
+                        .FirstOrDefaultAsync(p => p.Id == purchaseItem.ProductId && p.TenantId == tenantId);
                     if (product == null)
-                        throw new InvalidOperationException("Product not found");
+                        throw new InvalidOperationException("Product not found or does not belong to your tenant");
 
                     // Calculate return totals
                     var lineTotal = item.Qty * purchaseItem.UnitCost;
@@ -235,8 +249,18 @@ namespace HexaBill.Api.Modules.Billing
 
                     // Decrease stock (returning to supplier)
                     var baseQty = item.Qty * product.ConversionToBase;
-                    product.StockQty -= baseQty;
-                    product.UpdatedAt = DateTime.UtcNow;
+                    // PROD-19: Atomic stock decrease (returning to supplier)
+                    var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                        $@"UPDATE ""Products"" 
+                           SET ""StockQty"" = ""StockQty"" - {baseQty}, 
+                               ""UpdatedAt"" = {DateTime.UtcNow}
+                           WHERE ""Id"" = {product.Id} 
+                             AND ""TenantId"" = {tenantId}");
+                    
+                    if (rowsAffected > 0)
+                    {
+                        await _context.Entry(product).ReloadAsync();
+                    }
 
                     // Create inventory transaction
                     inventoryTransactions.Add(new InventoryTransaction

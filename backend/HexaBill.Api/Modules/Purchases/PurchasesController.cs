@@ -454,16 +454,17 @@ namespace HexaBill.Api.Modules.Purchases
                     });
                 }
 
-                // Create uploads directory if it doesn't exist
-                var uploadsDir = Path.Combine(Directory.GetCurrentDirectory(), "storage", "purchases");
-                if (!Directory.Exists(uploadsDir))
+                // PROD-17: Use tenant-specific directory for file isolation
+                var baseDir = Path.Combine(Directory.GetCurrentDirectory(), "storage", "purchases");
+                var tenantDir = Path.Combine(baseDir, tenantId.ToString());
+                if (!Directory.Exists(tenantDir))
                 {
-                    Directory.CreateDirectory(uploadsDir);
+                    Directory.CreateDirectory(tenantDir);
                 }
 
                 // Generate unique filename
                 var fileName = $"{id}_{Guid.NewGuid()}{fileExtension}";
-                var filePath = Path.Combine(uploadsDir, fileName);
+                var filePath = Path.Combine(tenantDir, fileName);
 
                 // Save file
                 using (var stream = new FileStream(filePath, FileMode.Create))
@@ -472,11 +473,14 @@ namespace HexaBill.Api.Modules.Purchases
                 }
 
                 // Update purchase record
-                var purchaseEntity = await _context.Purchases.FindAsync(id);
+                // PROD-4: Filter by TenantId for tenant isolation
+                var purchaseEntity = await _context.Purchases
+                    .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
                 if (purchaseEntity != null)
                 {
                     purchaseEntity.InvoiceFileName = file.FileName;
-                    purchaseEntity.InvoiceFilePath = $"storage/purchases/{fileName}";
+                    // PROD-17: Include tenant ID in file path for isolation
+                    purchaseEntity.InvoiceFilePath = $"storage/purchases/{tenantId}/{fileName}";
                     await _context.SaveChangesAsync();
                 }
 
@@ -511,13 +515,31 @@ namespace HexaBill.Api.Modules.Purchases
                     return NotFound();
                 }
 
-                var purchaseEntity = await _context.Purchases.FindAsync(id);
+                // PROD-4: Filter by TenantId for tenant isolation
+                var purchaseEntity = await _context.Purchases
+                    .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
                 if (purchaseEntity == null || string.IsNullOrEmpty(purchaseEntity.InvoiceFilePath))
                 {
                     return NotFound();
                 }
 
-                var filePath = Path.Combine(Directory.GetCurrentDirectory(), purchaseEntity.InvoiceFilePath);
+                // PROD-17: Validate file path contains tenant ID to prevent cross-tenant access
+                var invoiceFilePath = purchaseEntity.InvoiceFilePath;
+                if (!invoiceFilePath.Contains($"/{tenantId}/") && !invoiceFilePath.Contains($"\\{tenantId}\\"))
+                {
+                    // Security check: File path must contain tenant ID
+                    return Forbid("Access denied: Invalid file path");
+                }
+
+                var filePath = Path.Combine(Directory.GetCurrentDirectory(), invoiceFilePath);
+                
+                // PROD-17: Additional security check - verify file path is within expected directory
+                var expectedBaseDir = Path.Combine(Directory.GetCurrentDirectory(), "storage", "purchases", tenantId.ToString());
+                if (!filePath.StartsWith(expectedBaseDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Forbid("Access denied: File path outside tenant directory");
+                }
+
                 if (!System.IO.File.Exists(filePath))
                 {
                     return NotFound();

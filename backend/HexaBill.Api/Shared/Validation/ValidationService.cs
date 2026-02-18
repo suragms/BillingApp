@@ -291,11 +291,11 @@ namespace HexaBill.Api.Shared.Validation
                 return ValidationResult.Failure(errors);
             }
 
-            // Check if sale is locked (48 hours rule)
+            // Check if sale is locked (8 hours rule - Gulf trading context, disputes happen same-day)
             var hoursSinceCreation = (DateTime.UtcNow - sale.CreatedAt).TotalHours;
-            if (hoursSinceCreation > 48 && sale.IsLocked)
+            if (hoursSinceCreation > 8 && sale.IsLocked)
             {
-                errors.Add("Invoice cannot be edited after 48 hours. Invoice is locked.");
+                errors.Add("Invoice cannot be edited after 8 hours. Invoice is locked.");
             }
 
             // Validate all items before processing

@@ -24,6 +24,8 @@ namespace HexaBill.Api.Shared.Validation
     {
         private readonly AppDbContext _context;
         private readonly Dictionary<string, decimal> _exchangeRates;
+        private string? _cachedDefaultCurrency; // PROD-10: Cache default currency to avoid blocking .Result calls
+        private readonly object _cacheLock = new object();
 
         public CurrencyService(AppDbContext context)
         {
@@ -42,7 +44,15 @@ namespace HexaBill.Api.Shared.Validation
             var setting = await _context.Settings
                 .FirstOrDefaultAsync(s => s.Key == "default_currency");
             
-            return setting?.Value ?? "AED";
+            var currency = setting?.Value ?? "AED";
+            
+            // PROD-10: Update cache
+            lock (_cacheLock)
+            {
+                _cachedDefaultCurrency = currency;
+            }
+            
+            return currency;
         }
 
         public async Task SetDefaultCurrencyAsync(string currency)
@@ -68,6 +78,12 @@ namespace HexaBill.Api.Shared.Validation
             }
 
             await _context.SaveChangesAsync();
+            
+            // PROD-10: Update cache after setting currency
+            lock (_cacheLock)
+            {
+                _cachedDefaultCurrency = currency;
+            }
         }
 
         public async Task<decimal> ConvertCurrencyAsync(decimal amount, string fromCurrency, string toCurrency)
@@ -136,7 +152,14 @@ namespace HexaBill.Api.Shared.Validation
 
         public string FormatCurrency(decimal amount, string? currency = null)
         {
-            var defaultCurrency = GetDefaultCurrencyAsync().Result;
+            // PROD-10: Use cached default currency to avoid blocking .Result call
+            // If cache is empty, use default "AED" (will be updated on next async call)
+            string defaultCurrency;
+            lock (_cacheLock)
+            {
+                defaultCurrency = _cachedDefaultCurrency ?? "AED";
+            }
+            
             var targetCurrency = currency ?? defaultCurrency;
 
             return targetCurrency switch
@@ -144,7 +167,7 @@ namespace HexaBill.Api.Shared.Validation
                 "AED" => $"{amount:F2} AED",
                 "INR" => $"?{amount:F2}",
                 "USD" => $"${amount:F2}",
-                "EUR" => $"€{amount:F2}",
+                "EUR" => $"?{amount:F2}",
                 _ => $"{amount:F2} {targetCurrency}"
             };
         }

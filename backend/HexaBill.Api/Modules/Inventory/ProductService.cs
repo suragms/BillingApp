@@ -20,7 +20,7 @@ namespace HexaBill.Api.Modules.Inventory
         Task<ProductDto?> UpdateProductAsync(int id, CreateProductRequest request, int tenantId, int? userId = null);
         Task<bool> DeleteProductAsync(int id, int tenantId);
         Task<bool> AdjustStockAsync(int productId, decimal changeQty, string reason, int userId, int tenantId);
-        Task<List<ProductDto>> GetLowStockProductsAsync(int tenantId, int? globalLowStockThreshold = null);
+        Task<PagedResponse<ProductDto>> GetLowStockProductsAsync(int tenantId, int page = 1, int pageSize = 50, int? globalLowStockThreshold = null);
         Task<List<ProductDto>> SearchProductsAsync(string query, int tenantId, int limit = 20);
         Task<List<PriceChangeLogDto>> GetPriceChangeHistoryAsync(int productId, int tenantId);
         Task<int> ResetAllStockAsync(int userId, int tenantId);
@@ -490,8 +490,20 @@ namespace HexaBill.Api.Modules.Inventory
                     
                 if (product == null) return false;
 
-                product.StockQty += changeQty;
-                product.UpdatedAt = DateTime.UtcNow;
+                // PROD-19: Atomic stock adjustment
+                var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"UPDATE ""Products"" 
+                       SET ""StockQty"" = ""StockQty"" + {changeQty}, 
+                           ""UpdatedAt"" = {DateTime.UtcNow}
+                       WHERE ""Id"" = {productId} 
+                         AND ""TenantId"" = {tenantId}");
+                
+                if (rowsAffected == 0)
+                {
+                    throw new InvalidOperationException($"Product {productId} not found or does not belong to your tenant.");
+                }
+                
+                await _context.Entry(product).ReloadAsync();
 
                 // Create inventory transaction
                 var inventoryTransaction = new InventoryTransaction
@@ -531,15 +543,24 @@ namespace HexaBill.Api.Modules.Inventory
             }
         }
 
-        public async Task<List<ProductDto>> GetLowStockProductsAsync(int tenantId, int? globalLowStockThreshold = null)
+        public async Task<PagedResponse<ProductDto>> GetLowStockProductsAsync(int tenantId, int page = 1, int pageSize = 50, int? globalLowStockThreshold = null)
         {
             // CRITICAL: Filter by tenantId and only active products. #55: per-product ReorderLevel or global fallback
+            // AUDIT-6 FIX: Add pagination to prevent memory exhaustion with large product catalogs
+            pageSize = Math.Min(pageSize, 100); // Max 100 items per page
+            
             var query = _context.Products.Where(p => p.TenantId == tenantId && p.IsActive);
             if (globalLowStockThreshold.HasValue && globalLowStockThreshold.Value > 0)
                 query = query.Where(p => (p.ReorderLevel > 0 && p.StockQty <= p.ReorderLevel) || (p.ReorderLevel == 0 && p.StockQty <= globalLowStockThreshold.Value));
             else
                 query = query.Where(p => p.ReorderLevel > 0 && p.StockQty <= p.ReorderLevel);
+            
+            var totalCount = await query.CountAsync();
+            
             var products = await query
+                .OrderBy(p => p.StockQty) // Order by stock quantity (lowest first) before pagination
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
                 .Select(p => new ProductDto
                 {
                     Id = p.Id,
@@ -559,7 +580,14 @@ namespace HexaBill.Api.Modules.Inventory
                 })
                 .ToListAsync();
 
-            return products.OrderBy(p => p.StockQty).ToList();
+            return new PagedResponse<ProductDto>
+            {
+                Items = products,
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+                TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
+            };
         }
 
         public async Task<List<ProductDto>> SearchProductsAsync(string query, int tenantId, int limit = 20)

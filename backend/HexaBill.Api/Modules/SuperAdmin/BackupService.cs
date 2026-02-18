@@ -50,7 +50,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
         public Task<string> GetDesktopBackupPathAsync()
         {
-            var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            // BUG #13 FIX: Use /tmp on Linux (Render), Desktop on Windows (dev)
+            var desktopPath = Environment.OSVersion.Platform == PlatformID.Unix || Environment.OSVersion.Platform == PlatformID.MacOSX
+                ? "/tmp"
+                : Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var fileName = $"HexaBillBackup_{timestamp}.zip";
             return Task.FromResult(Path.Combine(desktopPath, fileName));

@@ -32,32 +32,34 @@ namespace HexaBill.Api.Shared.Middleware
             var stopwatch = Stopwatch.StartNew();
             var requestPath = context.Request.Path.Value ?? "unknown";
             var requestMethod = context.Request.Method;
-            var requestId = Guid.NewGuid().ToString("N")[..8];
+            // PROD-18: Use correlation ID from RequestLoggingMiddleware if available, otherwise create one
+            var correlationId = context.GetCorrelationIdOrNull() ?? Guid.NewGuid().ToString("N")[..12];
+            context.SetCorrelationId(correlationId); // Ensure it's set
 
-            _logger.LogInformation("🔍 [{RequestId}] {Method} {Path} - Request started", 
-                requestId, requestMethod, requestPath);
+            _logger.LogInformation("🔍 [CorrelationId: {CorrelationId}] {Method} {Path} - Request started", 
+                correlationId, requestMethod, requestPath);
 
             try
             {
                 await _next(context);
                 
                 stopwatch.Stop();
-                _logger.LogInformation("✅ [{RequestId}] {Method} {Path} - Completed in {ElapsedMs}ms (Status: {StatusCode})", 
-                    requestId, requestMethod, requestPath, stopwatch.ElapsedMilliseconds, context.Response.StatusCode);
+                _logger.LogInformation("✅ [CorrelationId: {CorrelationId}] {Method} {Path} - Completed in {ElapsedMs}ms (Status: {StatusCode})", 
+                    correlationId, requestMethod, requestPath, stopwatch.ElapsedMilliseconds, context.Response.StatusCode);
             }
             catch (Exception ex)
             {
                 stopwatch.Stop();
-                await HandleExceptionAsync(context, ex, requestPath, requestMethod, requestId, stopwatch.ElapsedMilliseconds);
+                await HandleExceptionAsync(context, ex, requestPath, requestMethod, correlationId, stopwatch.ElapsedMilliseconds);
             }
         }
 
         private async Task HandleExceptionAsync(HttpContext context, Exception exception, string requestPath, 
-            string requestMethod, string requestId, long elapsedMs)
+            string requestMethod, string correlationId, long elapsedMs)
         {
             var errorDetails = new StringBuilder();
             errorDetails.AppendLine($"❌ CRITICAL ERROR DETECTED");
-            errorDetails.AppendLine($"Request ID: {requestId}");
+            errorDetails.AppendLine($"Correlation ID: {correlationId}");
             errorDetails.AppendLine($"Endpoint: {requestMethod} {requestPath}");
             errorDetails.AppendLine($"Time Elapsed: {elapsedMs}ms");
             errorDetails.AppendLine($"Timestamp: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
@@ -140,7 +142,7 @@ namespace HexaBill.Api.Shared.Middleware
                         ?? context.User?.FindFirst("id")?.Value;
                     int? userId = int.TryParse(userIdClaim, out var uid) ? uid : null;
                     await errorLogService.LogAsync(
-                        requestId,
+                        correlationId,
                         errorType,
                         exception.Message.Length > 500 ? exception.Message[..500] : exception.Message,
                         exception.StackTrace,
@@ -160,7 +162,8 @@ namespace HexaBill.Api.Shared.Middleware
             {
                 errorCode = errorType,
                 message = GetUserFriendlyMessage(errorType),
-                traceId = requestId,
+                traceId = correlationId,
+                correlationId = correlationId,
                 timestamp = utc
             };
             await context.Response.WriteAsJsonAsync(response);

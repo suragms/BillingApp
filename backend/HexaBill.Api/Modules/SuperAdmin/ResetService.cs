@@ -48,12 +48,31 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                         var backupFileName = $"BeforeReset_{timestamp}.zip";
                         
-                        // Create backup to desktop and server
-                        await _backupService.CreateFullBackupAsync(exportToDesktop: true, uploadToGoogleDrive: false, sendEmail: false);
+                        // AUDIT-8 FIX: System-wide reset backup - backup all active tenants
+                        var activeTenantIds = await _context.Tenants
+                            .Where(t => t.Status == TenantStatus.Active || t.Status == TenantStatus.Trial)
+                            .Select(t => t.Id)
+                            .ToListAsync();
+                        
+                        foreach (var tenantId in activeTenantIds)
+                        {
+                            try
+                            {
+                                await _backupService.CreateFullBackupAsync(tenantId, exportToDesktop: true, uploadToGoogleDrive: false, sendEmail: false);
+                                Console.WriteLine($"✅ Backup created for tenant {tenantId} before system reset");
+                            }
+                            catch (Exception tenantBackupEx)
+                            {
+                                Console.WriteLine($"⚠️ Failed to backup tenant {tenantId}: {tenantBackupEx.Message}");
+                            }
+                        }
                         
                         result.BackupCreated = true;
                         result.BackupFilePath = Path.Combine(
-                            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                            // BUG #13 FIX: Use /tmp on Linux (Render), Desktop on Windows (dev)
+                            (Environment.OSVersion.Platform == PlatformID.Unix || Environment.OSVersion.Platform == PlatformID.MacOSX)
+                                ? "/tmp"
+                                : Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
                             "HexaBill_Backups",
                             backupFileName
                         );

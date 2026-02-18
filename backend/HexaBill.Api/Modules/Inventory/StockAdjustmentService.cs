@@ -37,9 +37,21 @@ namespace HexaBill.Api.Modules.Inventory
                 var oldStock = product.StockQty;
                 var adjustment = request.NewStock - oldStock;
 
-                // Update stock
-                product.StockQty = request.NewStock;
-                product.UpdatedAt = DateTime.UtcNow;
+                // PROD-19: Atomic stock update to prevent race conditions
+                var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"UPDATE ""Products"" 
+                       SET ""StockQty"" = {request.NewStock}, 
+                           ""UpdatedAt"" = {DateTime.UtcNow}
+                       WHERE ""Id"" = {product.Id} 
+                         AND ""TenantId"" = {tenantId}");
+                
+                if (rowsAffected == 0)
+                {
+                    throw new InvalidOperationException($"Product {product.Id} not found or does not belong to your tenant.");
+                }
+                
+                // Reload product to get updated stock value and RowVersion
+                await _context.Entry(product).ReloadAsync();
 
                 // Create inventory transaction
                 var inventoryTransaction = new InventoryTransaction

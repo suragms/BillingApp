@@ -10,6 +10,7 @@ using HexaBill.Api.Shared.Extensions;
 using HexaBill.Api.Modules.Payments;
 using HexaBill.Api.Modules.Billing;
 using HexaBill.Api.Modules.SuperAdmin;
+using HexaBill.Api.Modules.Inventory;
 using HexaBill.Api.Shared.Services;
 
 namespace HexaBill.Api.Modules.Reports
@@ -17,15 +18,15 @@ namespace HexaBill.Api.Modules.Reports
     public interface IReportService
     {
         Task<SummaryReportDto> GetSummaryReportAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? branchId = null, int? routeId = null, int? userIdForStaff = null, string? roleForStaff = null);
-        Task<PagedResponse<SaleDto>> GetSalesReportAsync(int tenantId, DateTime fromDate, DateTime toDate, int? customerId = null, string? status = null, int page = 1, int pageSize = 10, int? branchId = null, int? routeId = null, int? userIdForStaff = null, string? roleForStaff = null);
+        Task<PagedResponse<SaleDto>> GetSalesReportAsync(int tenantId, DateTime fromDate, DateTime toDate, int? customerId = null, string? status = null, int page = 1, int pageSize = 10, int? branchId = null, int? routeId = null, int? userIdForStaff = null, string? roleForStaff = null, string? search = null);
         Task<EnhancedSalesReportDto> GetEnhancedSalesReportAsync(int tenantId, DateTime fromDate, DateTime toDate, string granularity = "day", int? productId = null, int? customerId = null, string? status = null, int page = 1, int pageSize = 50);
         Task<List<ProductSalesDto>> GetProductSalesReportAsync(int tenantId, DateTime fromDate, DateTime toDate, int top = 20);
         Task<List<ProductSalesDto>> GetEnhancedProductSalesReportAsync(int tenantId, DateTime fromDate, DateTime toDate, int? productId = null, string? unitType = null, bool lowStockOnly = false);
-        Task<List<CustomerDto>> GetOutstandingCustomersAsync(int tenantId, int days = 30);
+        Task<PagedResponse<CustomerDto>> GetOutstandingCustomersAsync(int tenantId, int page = 1, int pageSize = 100, int days = 30);
         Task<CustomerReportDto> GetCustomerReportAsync(int tenantId, DateTime fromDate, DateTime toDate, decimal? minOutstanding = null);
-        Task<List<PaymentDto>> GetChequeReportAsync(int tenantId);
+        Task<PagedResponse<PaymentDto>> GetChequeReportAsync(int tenantId, int page = 1, int pageSize = 100);
         Task<AISuggestionsDto> GetAISuggestionsAsync(int tenantId, int periodDays = 30);
-        Task<List<PendingBillDto>> GetPendingBillsAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? customerId = null, string? search = null, string? status = null);
+        Task<PagedResponse<PendingBillDto>> GetPendingBillsAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? customerId = null, string? search = null, string? status = null, int page = 1, int pageSize = 100);
         Task<AgingReportDto> GetAgingReportAsync(int tenantId, DateTime asOfDate, int? customerId = null);
         Task<StockReportDto> GetStockReportAsync(int tenantId, bool lowOnly = false);
         Task<List<ExpenseByCategoryDto>> GetExpensesByCategoryAsync(int tenantId, DateTime fromDate, DateTime toDate, int? branchId = null);
@@ -39,12 +40,14 @@ namespace HexaBill.Api.Modules.Reports
         private readonly AppDbContext _context;
         private readonly IRouteScopeService _routeScopeService;
         private readonly ISettingsService _settingsService;
+        private readonly IProductService _productService;
 
-        public ReportService(AppDbContext context, IRouteScopeService routeScopeService, ISettingsService settingsService)
+        public ReportService(AppDbContext context, IRouteScopeService routeScopeService, ISettingsService settingsService, IProductService productService)
         {
             _context = context;
             _routeScopeService = routeScopeService;
             _settingsService = settingsService;
+            _productService = productService;
         }
 
         public async Task<SummaryReportDto> GetSummaryReportAsync(int tenantId, DateTime? fromDate = null, DateTime? toDate = null, int? branchId = null, int? routeId = null, int? userIdForStaff = null, string? roleForStaff = null)
@@ -239,7 +242,7 @@ namespace HexaBill.Api.Modules.Reports
                 List<ProductDto> lowStockProducts = new List<ProductDto>();
                 try
                 {
-                    // #55: Per-product ReorderLevel or global fallback for ReorderLevel 0
+                    // #55: Per-product ReorderLevel or global fallback. AUDIT-6 FIX: Use paginated ProductService instead of loading all into memory
                     int? globalThreshold = null;
                     if (tenantId > 0)
                     {
@@ -247,36 +250,8 @@ namespace HexaBill.Api.Modules.Reports
                         if (settings.TryGetValue("LOW_STOCK_GLOBAL_THRESHOLD", out var v) && !string.IsNullOrWhiteSpace(v) && int.TryParse(v.Trim(), out int gt) && gt > 0)
                             globalThreshold = gt;
                     }
-                    var productsQuery = _context.Products.AsQueryable();
-                    if (tenantId > 0)
-                        productsQuery = productsQuery.Where(p => p.TenantId == tenantId);
-                    if (globalThreshold.HasValue && globalThreshold.Value > 0)
-                        productsQuery = productsQuery.Where(p => (p.ReorderLevel > 0 && p.StockQty <= p.ReorderLevel) || (p.ReorderLevel == 0 && p.StockQty <= globalThreshold.Value));
-                    else
-                        productsQuery = productsQuery.Where(p => p.ReorderLevel > 0 && p.StockQty <= p.ReorderLevel);
-                    
-                    var products = await productsQuery
-                        .Select(p => new ProductDto
-                        {
-                            Id = p.Id,
-                            Sku = p.Sku,
-                            NameEn = p.NameEn,
-                            NameAr = p.NameAr,
-                            UnitType = p.UnitType,
-                            ConversionToBase = p.ConversionToBase,
-                            CostPrice = p.CostPrice,
-                            SellPrice = p.SellPrice,
-                            StockQty = p.StockQty,
-                            ReorderLevel = p.ReorderLevel,
-                            DescriptionEn = p.DescriptionEn,
-                            DescriptionAr = p.DescriptionAr
-                        })
-                        .ToListAsync();
-                    
-                    lowStockProducts = products
-                        .OrderBy(p => p.StockQty)
-                        .Take(10)
-                        .ToList();
+                    var paged = await _productService.GetLowStockProductsAsync(tenantId, page: 1, pageSize: 10, globalThreshold);
+                    lowStockProducts = paged.Items ?? new List<ProductDto>();
                 }
                 catch (Exception ex)
                 {
@@ -410,41 +385,58 @@ namespace HexaBill.Api.Modules.Reports
                 {
                     try
                     {
-                        // Select only needed fields to avoid loading entire Branch entity (may have missing columns like Location)
-                        var branches = await _context.Branches
+                        // AUDIT-6 FIX: Use single grouped query instead of loop (reduces database round trips)
+                        // Get branch names first (lightweight query)
+                        var branchNames = await _context.Branches
                             .Where(b => b.TenantId == tenantId)
                             .Select(b => new { b.Id, b.Name })
+                            .ToDictionaryAsync(b => b.Id, b => b.Name);
+
+                        // Single grouped query for sales by branch
+                        var branchSalesStats = await _context.Sales
+                            .Where(s => !s.IsDeleted 
+                                && s.TenantId == tenantId
+                                && s.BranchId.HasValue
+                                && s.InvoiceDate >= startDate 
+                                && s.InvoiceDate < endDate)
+                            .GroupBy(s => s.BranchId.Value)
+                            .Select(g => new
+                            {
+                                BranchId = g.Key,
+                                Sales = g.Sum(s => (decimal?)s.GrandTotal) ?? 0m,
+                                InvoiceCount = g.Count()
+                            })
                             .ToListAsync();
 
-                        foreach (var branch in branches)
+                        // Single grouped query for expenses by branch
+                        var branchExpensesStats = await _context.Expenses
+                            .Where(e => e.TenantId == tenantId
+                                && e.BranchId.HasValue
+                                && e.Date >= startDate 
+                                && e.Date < endDate)
+                            .GroupBy(e => e.BranchId.Value)
+                            .Select(g => new
+                            {
+                                BranchId = g.Key,
+                                Expenses = g.Sum(e => (decimal?)e.Amount) ?? 0m
+                            })
+                            .ToDictionaryAsync(x => x.BranchId, x => x.Expenses);
+
+                        // Combine results
+                        foreach (var salesStat in branchSalesStats)
                         {
-                            // Sales for this branch in date range
-                            var branchSalesQuery = _context.Sales
-                                .Where(s => !s.IsDeleted 
-                                    && s.BranchId == branch.Id 
-                                    && s.InvoiceDate >= startDate 
-                                    && s.InvoiceDate < endDate);
-                            var branchSales = await branchSalesQuery.SumAsync(s => (decimal?)s.GrandTotal) ?? 0m;
-                            var branchInvoiceCount = await branchSalesQuery.CountAsync();
-
-                            // Expenses for this branch in date range
-                            var branchExpensesQuery = _context.Expenses
-                                .Where(e => e.BranchId == branch.Id 
-                                    && e.Date >= startDate 
-                                    && e.Date < endDate);
-                            var branchExpenses = await branchExpensesQuery.SumAsync(e => (decimal?)e.Amount) ?? 0m;
-
-                            // Simplified profit (Sales - Expenses, no COGS per branch in this view)
-                            var branchProfit = branchSales - branchExpenses;
+                            var branchName = branchNames.GetValueOrDefault(salesStat.BranchId, "Unknown");
+                            var expenses = branchExpensesStats.GetValueOrDefault(salesStat.BranchId, 0m);
+                            var profit = salesStat.Sales - expenses;
 
                             branchBreakdown.Add(new DashboardBranchSummaryDto
                             {
-                                BranchId = branch.Id,
-                                BranchName = branch.Name,
-                                Sales = branchSales,
-                                Expenses = branchExpenses,
-                                Profit = branchProfit,
-                                InvoiceCount = branchInvoiceCount
+                                BranchId = salesStat.BranchId,
+                                BranchName = branchName,
+                                Sales = salesStat.Sales,
+                                Expenses = expenses,
+                                Profit = profit,
+                                InvoiceCount = salesStat.InvoiceCount
                             });
                         }
 
@@ -760,7 +752,8 @@ namespace HexaBill.Api.Modules.Reports
             int? branchId = null,
             int? routeId = null,
             int? userIdForStaff = null,
-            string? roleForStaff = null)
+            string? roleForStaff = null,
+            string? search = null)
         {
             // CRITICAL FIX: Use < instead of <= for toDate comparison
             var query = _context.Sales
@@ -809,10 +802,21 @@ namespace HexaBill.Api.Modules.Reports
                 }
             }
             
+            // BUG #2.5 FIX: Apply search filter (invoice number or customer name) - server-side filtering
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var searchLower = search.ToLowerInvariant();
+                query = query.Where(s => 
+                    s.InvoiceNo.ToLower().Contains(searchLower) ||
+                    (s.Customer != null && s.Customer.Name.ToLower().Contains(searchLower))
+                );
+            }
+            
             var totalCount = await query.CountAsync();
             
             // CRITICAL: Include PaidAmount to calculate actual balance for accurate reporting
             // Calculate balance = GrandTotal - PaidAmount for each sale
+            // BUG #2.5 FIX: Include Customer in query for search filtering
             var sales = await (from s in query
                               join c in _context.Customers on s.CustomerId equals c.Id into customerGroup
                               from c in customerGroup.DefaultIfEmpty()
@@ -928,14 +932,23 @@ namespace HexaBill.Api.Modules.Reports
             }
         }
 
-        public async Task<List<CustomerDto>> GetOutstandingCustomersAsync(int tenantId, int days = 30)
+        public async Task<PagedResponse<CustomerDto>> GetOutstandingCustomersAsync(int tenantId, int page = 1, int pageSize = 100, int days = 30)
         {
             try
             {
                 // CRITICAL: Get customers with outstanding balance > 0.01 (PendingBalance = what they owe, #7)
-                var customers = await _context.Customers
-                    .Where(c => c.TenantId == tenantId && c.PendingBalance > 0.01m)
+                // AUDIT-6 FIX: Add pagination to prevent memory exhaustion with many outstanding customers
+                pageSize = Math.Min(pageSize, 100); // Max 100 items per page
+                
+                var query = _context.Customers
+                    .Where(c => c.TenantId == tenantId && c.PendingBalance > 0.01m);
+                
+                var totalCount = await query.CountAsync();
+                
+                var customers = await query
                     .OrderByDescending(c => c.PendingBalance)
+                    .Skip((page - 1) * pageSize)
+                    .Take(pageSize)
                     .Select(c => new CustomerDto
                     {
                         Id = c.Id,
@@ -950,13 +963,21 @@ namespace HexaBill.Api.Modules.Reports
                     })
                     .ToListAsync();
 
-                Console.WriteLine($"? GetOutstandingCustomersAsync: Found {customers.Count} customers with outstanding balance");
+                Console.WriteLine($"? GetOutstandingCustomersAsync: Found {totalCount} customers with outstanding balance (showing page {page})");
                 if (customers.Any())
                 {
                     Console.WriteLine($"? Total outstanding: {customers.Sum(c => c.Balance):C}");
                     Console.WriteLine($"? Highest balance: {customers.First().Balance:C} ({customers.First().Name})");
                 }
-                return customers;
+                
+                return new PagedResponse<CustomerDto>
+                {
+                    Items = customers,
+                    TotalCount = totalCount,
+                    Page = page,
+                    PageSize = pageSize,
+                    TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
+                };
             }
             catch (Exception ex)
             {
@@ -966,18 +987,34 @@ namespace HexaBill.Api.Modules.Reports
                 {
                     Console.WriteLine($"? Inner exception: {ex.InnerException.Message}");
                 }
-                // Return empty list instead of throwing
-                return new List<CustomerDto>();
+                // Return empty paged response instead of throwing
+                return new PagedResponse<CustomerDto>
+                {
+                    Items = new List<CustomerDto>(),
+                    TotalCount = 0,
+                    Page = page,
+                    PageSize = pageSize,
+                    TotalPages = 0
+                };
             }
         }
 
-        public async Task<List<PaymentDto>> GetChequeReportAsync(int tenantId)
+        public async Task<PagedResponse<PaymentDto>> GetChequeReportAsync(int tenantId, int page = 1, int pageSize = 100)
         {
-            var cheques = await _context.Payments
+            // AUDIT-6 FIX: Add pagination to prevent memory exhaustion with many cheque payments
+            pageSize = Math.Min(pageSize, 100); // Max 100 items per page
+            
+            var query = _context.Payments
                 .Where(p => p.TenantId == tenantId && p.Mode == PaymentMode.CHEQUE)
                 .Include(p => p.Sale)
-                .Include(p => p.Customer)
+                .Include(p => p.Customer);
+            
+            var totalCount = await query.CountAsync();
+            
+            var cheques = await query
                 .OrderByDescending(p => p.PaymentDate)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
                 .Select(p => new PaymentDto
                 {
                     Id = p.Id,
@@ -995,7 +1032,14 @@ namespace HexaBill.Api.Modules.Reports
                 })
                 .ToListAsync();
 
-            return cheques;
+            return new PagedResponse<PaymentDto>
+            {
+                Items = cheques,
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+                TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
+            };
         }
 
         public async Task<AISuggestionsDto> GetAISuggestionsAsync(int tenantId, int periodDays = 30)
@@ -1076,9 +1120,11 @@ namespace HexaBill.Api.Modules.Reports
                 List<ProductDto> lowMarginProducts = new List<ProductDto>();
                 try
                 {
-                    // Load data first, then order in memory to avoid SQLite decimal ORDER BY issues
-                    var products = await _context.Products
+                    // AUDIT-6 FIX: Move OrderBy and Take(5) to database query (don't load all products into memory)
+                    lowMarginProducts = await _context.Products
                         .Where(p => p.TenantId == tenantId && p.SellPrice > 0 && (p.SellPrice - p.CostPrice) / p.SellPrice < 0.2m)
+                        .OrderBy(p => p.SellPrice > 0 ? (p.SellPrice - p.CostPrice) / p.SellPrice : 0)
+                        .Take(5)
                         .Select(p => new ProductDto
                         {
                             Id = p.Id,
@@ -1095,11 +1141,6 @@ namespace HexaBill.Api.Modules.Reports
                             DescriptionAr = p.DescriptionAr
                         })
                         .ToListAsync();
-                    
-                    lowMarginProducts = products
-                        .OrderBy(p => p.SellPrice > 0 ? (p.SellPrice - p.CostPrice) / p.SellPrice : 0)
-                        .Take(5)
-                        .ToList();
                 }
                 catch (Exception ex)
                 {
@@ -1186,16 +1227,21 @@ namespace HexaBill.Api.Modules.Reports
             }
         }
 
-        public async Task<List<PendingBillDto>> GetPendingBillsAsync(
+        public async Task<PagedResponse<PendingBillDto>> GetPendingBillsAsync(
             int tenantId,
             DateTime? fromDate = null,
             DateTime? toDate = null,
             int? customerId = null,
             string? search = null,
-            string? status = null)
+            string? status = null,
+            int page = 1,
+            int pageSize = 100)
         {
             // CRITICAL: Single SQL aggregation — filter by balance in database, project to DTO (no load-all in memory)
             // PRODUCTION_MASTER_TODO #33
+            // AUDIT-6 FIX: Add pagination to prevent memory exhaustion with many pending bills
+            pageSize = Math.Min(pageSize, 100); // Max 100 items per page
+            
             var utcNow = DateTime.UtcNow;
             var today = new DateTime(utcNow.Year, utcNow.Month, utcNow.Day, 0, 0, 0, DateTimeKind.Utc);
 
@@ -1237,9 +1283,12 @@ namespace HexaBill.Api.Modules.Reports
             if (!string.IsNullOrEmpty(search))
                 query = query.Where(x => x.s.InvoiceNo.Contains(search) || (x.c != null && x.c.Name.Contains(search)));
 
-            // Project to DTO in database (single query, no full-entity load)
+            // Get total count before pagination
+            var totalCount = await query.CountAsync();
+
+            // Project to DTO in database, then paginate
+            // AUDIT-6 FIX: Move sorting to database query before pagination
             var list = await query
-                .OrderByDescending(x => x.s.InvoiceDate)
                 .Select(x => new PendingBillDto
                 {
                     Id = x.s.Id,
@@ -1252,21 +1301,34 @@ namespace HexaBill.Api.Modules.Reports
                     PaidAmount = x.s.PaidAmount,
                     BalanceAmount = x.s.GrandTotal - x.s.PaidAmount,
                     PaymentStatus = x.s.PaymentStatus.ToString(),
-                    DaysOverdue = 0 // set below in memory (EF may not translate DateTime diff for all providers)
+                    DaysOverdue = 0 // Will be calculated below
                 })
+                .OrderByDescending(x => x.InvoiceDate) // Sort by date first (simpler for DB)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
                 .ToListAsync();
 
-            // Set DaysOverdue and sort (lightweight in-memory; list is already filtered and projected)
+            // Calculate DaysOverdue in memory (lightweight, already paginated)
             foreach (var dto in list)
             {
                 var due = dto.DueDate ?? dto.InvoiceDate.AddDays(30);
                 dto.DaysOverdue = due < today ? (today - due).Days : 0;
             }
 
-            return list
+            // Sort by DaysOverdue then InvoiceDate (in-memory, small dataset)
+            list = list
                 .OrderByDescending(pb => pb.DaysOverdue)
                 .ThenByDescending(pb => pb.InvoiceDate)
                 .ToList();
+
+            return new PagedResponse<PendingBillDto>
+            {
+                Items = list,
+                TotalCount = totalCount,
+                Page = page,
+                PageSize = pageSize,
+                TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
+            };
         }
 
         public async Task<List<ExpenseByCategoryDto>> GetExpensesByCategoryAsync(int tenantId, DateTime fromDate, DateTime toDate, int? branchId = null)
@@ -1391,48 +1453,61 @@ namespace HexaBill.Api.Modules.Reports
             }
             else
             {
-                // Group by day - LOAD DATA FIRST (avoid DateTime.Date in database query for PostgreSQL)
-                var allSalesQuery = _context.Sales.Where(s => s.InvoiceDate >= fromDate && s.InvoiceDate < toDate);
-                if (tenantId > 0) allSalesQuery = allSalesQuery.Where(s => s.TenantId == tenantId);
-                var allSales = await allSalesQuery.ToListAsync();
-                // CRITICAL FIX: .GroupBy().Date creates Unspecified - group by Year/Month/Day instead
-                var salesData = allSales
-                    .GroupBy(s => new { s.InvoiceDate.Year, s.InvoiceDate.Month, s.InvoiceDate.Day })
+                // PROD-8 FIX: Use server-side aggregation instead of loading all records into memory
+                // Group by day - Use database GROUP BY instead of loading all records
+                var salesQuery = _context.Sales.Where(s => s.InvoiceDate >= fromDate && s.InvoiceDate < toDate);
+                if (tenantId > 0) salesQuery = salesQuery.Where(s => s.TenantId == tenantId);
+                
+                // Server-side aggregation: Group by date components in database
+                var salesData = await salesQuery
+                    .GroupBy(s => new { 
+                        Year = s.InvoiceDate.Year, 
+                        Month = s.InvoiceDate.Month, 
+                        Day = s.InvoiceDate.Day 
+                    })
                     .Select(g => new
                     {
                         Period = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc).ToString("yyyy-MM-dd"),
                         Date = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc),
                         Sales = g.Sum(s => s.GrandTotal)
                     })
-                    .ToList();
+                    .ToListAsync();
 
-                var allPurchasesQuery = _context.Purchases.Where(p => p.PurchaseDate >= fromDate && p.PurchaseDate < toDate);
-                if (tenantId > 0) allPurchasesQuery = allPurchasesQuery.Where(p => p.TenantId == tenantId);
-                var allPurchases = await allPurchasesQuery.ToListAsync();
-                // CRITICAL FIX: Never use .Date property
-                var purchasesData = allPurchases
-                    .GroupBy(p => new { p.PurchaseDate.Year, p.PurchaseDate.Month, p.PurchaseDate.Day })
+                var purchasesQuery = _context.Purchases.Where(p => p.PurchaseDate >= fromDate && p.PurchaseDate < toDate);
+                if (tenantId > 0) purchasesQuery = purchasesQuery.Where(p => p.TenantId == tenantId);
+                
+                // Server-side aggregation for purchases
+                var purchasesData = await purchasesQuery
+                    .GroupBy(p => new { 
+                        Year = p.PurchaseDate.Year, 
+                        Month = p.PurchaseDate.Month, 
+                        Day = p.PurchaseDate.Day 
+                    })
                     .Select(g => new
                     {
                         Period = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc).ToString("yyyy-MM-dd"),
                         Date = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc),
                         Purchases = g.Sum(p => p.TotalAmount)
                     })
-                    .ToList();
+                    .ToListAsync();
 
-                var allExpensesQuery = _context.Expenses.Where(e => e.Date >= fromDate && e.Date < toDate);
-                if (tenantId > 0) allExpensesQuery = allExpensesQuery.Where(e => e.TenantId == tenantId);
-                var allExpenses = await allExpensesQuery.ToListAsync();
-                // CRITICAL FIX: Never use .Date property
-                var expensesData = allExpenses
-                    .GroupBy(e => new { e.Date.Year, e.Date.Month, e.Date.Day })
+                var expensesQuery = _context.Expenses.Where(e => e.Date >= fromDate && e.Date < toDate);
+                if (tenantId > 0) expensesQuery = expensesQuery.Where(e => e.TenantId == tenantId);
+                
+                // Server-side aggregation for expenses
+                var expensesData = await expensesQuery
+                    .GroupBy(e => new { 
+                        Year = e.Date.Year, 
+                        Month = e.Date.Month, 
+                        Day = e.Date.Day 
+                    })
                     .Select(g => new
                     {
                         Period = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc).ToString("yyyy-MM-dd"),
                         Date = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc),
                         Expenses = g.Sum(e => e.Amount)
                     })
-                    .ToList();
+                    .ToListAsync();
 
                 var allPeriods = salesData.Select(s => s.Period)
                     .Union(purchasesData.Select(p => p.Period))
@@ -1501,34 +1576,48 @@ namespace HexaBill.Api.Modules.Reports
                 .Take(pageSize)
                 .ToListAsync();
 
-            // Calculate summary
-            var allSales = await query.ToListAsync();
+            // PROD-8 FIX: Calculate summary using server-side aggregation instead of loading all records
+            var summaryQuery = query.Select(s => new
+            {
+                GrandTotal = s.GrandTotal,
+                Subtotal = s.Subtotal,
+                VatTotal = s.VatTotal
+            });
+            
             var summary = new SummaryInfo
             {
-                TotalSales = allSales.Sum(s => s.GrandTotal),
-                NetSales = allSales.Sum(s => s.Subtotal),
-                VatCollected = allSales.Sum(s => s.VatTotal),
-                TotalInvoices = allSales.Count,
-                AvgOrderValue = allSales.Any() ? allSales.Average(s => s.GrandTotal) : 0
+                TotalSales = await summaryQuery.SumAsync(s => s.GrandTotal),
+                NetSales = await summaryQuery.SumAsync(s => s.Subtotal),
+                VatCollected = await summaryQuery.SumAsync(s => s.VatTotal),
+                TotalInvoices = totalCount,
+                AvgOrderValue = totalCount > 0 ? await summaryQuery.AverageAsync(s => s.GrandTotal) : 0
             };
 
-            // Generate series based on granularity
+            // PROD-8 FIX: Generate series using server-side aggregation instead of loading all records
             var series = new List<SalesSeriesDto>();
             if (granularity == "day")
             {
-                // CRITICAL FIX: .GroupBy().Date creates Unspecified - group by Year/Month/Day instead
-                var grouped = allSales.GroupBy(s => new { s.InvoiceDate.Year, s.InvoiceDate.Month, s.InvoiceDate.Day });
-                series = grouped.Select(g => new SalesSeriesDto
-                {
-                    Period = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc).ToString("yyyy-MM-dd"),
-                    Date = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc),
-                    Amount = g.Sum(s => s.GrandTotal),
-                    Count = g.Count()
-                }).OrderBy(s => s.Date).ToList();
+                // Server-side aggregation: Group by date components in database
+                var seriesData = await query
+                    .GroupBy(s => new { s.InvoiceDate.Year, s.InvoiceDate.Month, s.InvoiceDate.Day })
+                    .Select(g => new SalesSeriesDto
+                    {
+                        Period = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc).ToString("yyyy-MM-dd"),
+                        Date = new DateTime(g.Key.Year, g.Key.Month, g.Key.Day, 0, 0, 0, DateTimeKind.Utc),
+                        Amount = g.Sum(s => s.GrandTotal),
+                        Count = g.Count()
+                    })
+                    .OrderBy(s => s.Date)
+                    .ToListAsync();
+                series = seriesData;
             }
             else if (granularity == "week")
             {
-                var grouped = allSales.GroupBy(s => System.Globalization.CultureInfo.CurrentCulture.Calendar.GetWeekOfYear(s.InvoiceDate, System.Globalization.CalendarWeekRule.FirstDay, DayOfWeek.Sunday));
+                // For week grouping, we need to load dates but aggregate amounts server-side
+                var weekGroups = await query
+                    .Select(s => new { s.InvoiceDate, s.GrandTotal })
+                    .ToListAsync();
+                var grouped = weekGroups.GroupBy(s => System.Globalization.CultureInfo.CurrentCulture.Calendar.GetWeekOfYear(s.InvoiceDate, System.Globalization.CalendarWeekRule.FirstDay, DayOfWeek.Sunday));
                 series = grouped.Select(g => new SalesSeriesDto
                 {
                     Period = $"Week {g.Key}",
@@ -1539,14 +1628,19 @@ namespace HexaBill.Api.Modules.Reports
             }
             else if (granularity == "month")
             {
-                var grouped = allSales.GroupBy(s => new { s.InvoiceDate.Year, s.InvoiceDate.Month });
-                series = grouped.Select(g => new SalesSeriesDto
-                {
-                    Period = $"{g.Key.Year}-{g.Key.Month:D2}",
-                    Date = new DateTime(g.Key.Year, g.Key.Month, 1, 0, 0, 0, DateTimeKind.Utc),
-                    Amount = g.Sum(s => s.GrandTotal),
-                    Count = g.Count()
-                }).OrderBy(s => s.Date).ToList();
+                // Server-side aggregation: Group by month in database
+                var seriesData = await query
+                    .GroupBy(s => new { s.InvoiceDate.Year, s.InvoiceDate.Month })
+                    .Select(g => new SalesSeriesDto
+                    {
+                        Period = $"{g.Key.Year}-{g.Key.Month:D2}",
+                        Date = new DateTime(g.Key.Year, g.Key.Month, 1, 0, 0, 0, DateTimeKind.Utc),
+                        Amount = g.Sum(s => s.GrandTotal),
+                        Count = g.Count()
+                    })
+                    .OrderBy(s => s.Date)
+                    .ToListAsync();
+                series = seriesData;
             }
 
             // Map sales to report items
@@ -2131,62 +2225,110 @@ namespace HexaBill.Api.Modules.Reports
             var from = fromDate.ToUtcKind();
             var to = toDate.AddDays(1).AddTicks(-1).ToUtcKind();
 
+            // PROD-7 FIX: Batch all queries to avoid N+1 problem
+            // Load all staff users in one query
             var staffUsers = await _context.Users
                 .Where(u => u.TenantId == tenantId && u.Role == UserRole.Staff)
                 .Select(u => new { u.Id, u.Name })
                 .ToListAsync();
 
+            if (!staffUsers.Any())
+                return new List<StaffPerformanceDto>();
+
+            var staffIds = staffUsers.Select(s => s.Id).ToList();
+
+            // Batch load all RouteStaff relationships in one query
+            var allRouteStaff = await _context.RouteStaff
+                .Where(rs => staffIds.Contains(rs.UserId))
+                .Select(rs => new { rs.UserId, rs.RouteId })
+                .ToListAsync();
+
+            // Batch load all Routes assigned to staff in one query
+            var allAssignedRoutes = await _context.Routes
+                .Where(r => r.TenantId == tenantId && r.AssignedStaffId != null && staffIds.Contains(r.AssignedStaffId.Value))
+                .Select(r => new { r.Id, r.AssignedStaffId, r.Name })
+                .ToListAsync();
+
+            // Get all route IDs that any staff member is assigned to
+            var allRouteIds = allRouteStaff.Select(rs => rs.RouteId)
+                .Union(allAssignedRoutes.Select(r => r.Id))
+                .Distinct()
+                .ToList();
+
+            // Batch load all route names in one query
+            var routeNamesDict = await _context.Routes
+                .Where(r => allRouteIds.Contains(r.Id))
+                .Select(r => new { r.Id, r.Name })
+                .ToDictionaryAsync(r => r.Id, r => r.Name);
+
+            // Batch load all sales for all staff in one query
+            var allSalesQuery = _context.Sales
+                .Where(s => s.TenantId == tenantId && !s.IsDeleted 
+                    && staffIds.Contains(s.CreatedBy)
+                    && s.InvoiceDate >= from && s.InvoiceDate < to);
+            
+            // Apply route filter if provided
+            if (routeId.HasValue)
+            {
+                allSalesQuery = allSalesQuery.Where(s => s.RouteId == routeId.Value);
+            }
+
+            var allSales = await allSalesQuery.ToListAsync();
+
+            // Group sales by staff member
+            var salesByStaff = allSales.GroupBy(s => s.CreatedBy).ToDictionary(g => g.Key, g => g.ToList());
+
             var result = new List<StaffPerformanceDto>();
 
+            // Process each staff member using in-memory data
             foreach (var staff in staffUsers)
             {
-                var routeIdsFromRouteStaff = await _context.RouteStaff
+                // Get route IDs for this staff member from batch-loaded data
+                var routeIdsFromRouteStaff = allRouteStaff
                     .Where(rs => rs.UserId == staff.Id)
                     .Select(rs => rs.RouteId)
-                    .ToListAsync();
-                var routeIdsFromAssigned = await _context.Routes
-                    .Where(r => r.TenantId == tenantId && r.AssignedStaffId == staff.Id)
-                    .Select(r => r.Id)
-                    .ToListAsync();
-                var allRouteIds = routeIdsFromRouteStaff.Union(routeIdsFromAssigned).Distinct().ToList();
-                var routeNames = await _context.Routes
-                    .Where(r => allRouteIds.Contains(r.Id))
-                    .Select(r => r.Name)
-                    .ToListAsync();
-                var assignedRoutes = string.Join(", ", routeNames);
-                if (string.IsNullOrEmpty(assignedRoutes)) assignedRoutes = "-";
-
-                // FIX: Filter sales by staff's assigned routes only (route-scoped performance)
-                var salesQuery = _context.Sales
-                    .Where(s => s.TenantId == tenantId && !s.IsDeleted && s.CreatedBy == staff.Id
-                        && s.InvoiceDate >= from && s.InvoiceDate < to);
+                    .ToList();
                 
-                // FIX: Only count sales for routes assigned to this staff member
-                if (allRouteIds != null && allRouteIds.Count > 0)
+                var routeIdsFromAssigned = allAssignedRoutes
+                    .Where(r => r.AssignedStaffId == staff.Id)
+                    .Select(r => r.Id)
+                    .ToList();
+                
+                var allRouteIdsForStaff = routeIdsFromRouteStaff.Union(routeIdsFromAssigned).Distinct().ToList();
+
+                // Get route names from batch-loaded dictionary
+                var routeNames = allRouteIdsForStaff
+                    .Where(id => routeNamesDict.ContainsKey(id))
+                    .Select(id => routeNamesDict[id])
+                    .ToList();
+                
+                var assignedRoutes = routeNames.Any() ? string.Join(", ", routeNames) : "-";
+
+                // Get sales for this staff member, filtered by assigned routes
+                var staffSales = salesByStaff.ContainsKey(staff.Id) 
+                    ? salesByStaff[staff.Id] 
+                    : new List<Sale>();
+
+                // Filter sales by assigned routes if staff has routes
+                if (allRouteIdsForStaff.Any())
                 {
-                    salesQuery = salesQuery.Where(s => s.RouteId != null && allRouteIds.Contains(s.RouteId.Value));
-                    
-                    // FIX: Additional route filter if provided (for route-specific performance)
-                    if (routeId.HasValue)
-                    {
-                        salesQuery = salesQuery.Where(s => s.RouteId == routeId.Value);
-                    }
+                    staffSales = staffSales
+                        .Where(s => s.RouteId != null && allRouteIdsForStaff.Contains(s.RouteId.Value))
+                        .ToList();
                 }
                 else
                 {
                     // Staff with no routes assigned should show 0 performance
-                    salesQuery = salesQuery.Where(s => false);
+                    staffSales = new List<Sale>();
                 }
-                
-                var sales = await salesQuery.ToListAsync();
 
-                var invoicesCreated = sales.Count;
-                var totalBilled = sales.Sum(s => s.GrandTotal);
-                var cashCollected = sales.Sum(s => s.PaidAmount);
+                var invoicesCreated = staffSales.Count;
+                var totalBilled = staffSales.Sum(s => s.GrandTotal);
+                var cashCollected = staffSales.Sum(s => s.PaidAmount);
                 var collectionRate = totalBilled > 0 ? (double)(cashCollected / totalBilled * 100) : 0;
 
                 var avgDaysToPay = 0.0;
-                var paidSales = sales.Where(s => s.PaidAmount > 0 && s.LastPaymentDate.HasValue).ToList();
+                var paidSales = staffSales.Where(s => s.PaidAmount > 0 && s.LastPaymentDate.HasValue).ToList();
                 if (paidSales.Any())
                 {
                     avgDaysToPay = paidSales.Average(s => (s.LastPaymentDate!.Value - s.InvoiceDate).TotalDays);

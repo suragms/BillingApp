@@ -15,6 +15,7 @@ using HexaBill.Api.Modules.SuperAdmin;
 using HexaBill.Api.Models;
 using HexaBill.Api.Data;
 using HexaBill.Api.Shared.Services;
+using HexaBill.Api.Shared.Extensions;
 using System.Collections.Generic;
 
 namespace HexaBill.Api.Modules.SuperAdmin
@@ -22,7 +23,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
     [ApiController]
     [Route("api/[controller]")]
     [Authorize(Policy = "AdminOrOwner")] // Production: case-insensitive Admin/Owner/SystemAdmin
-    public class BackupController : ControllerBase
+    public class BackupController : TenantScopedController
     {
         private const long MaxRestoreFileSizeBytes = 100L * 1024 * 1024; // 100 MB
         private const int BackupScheduleOwnerId = 0; // Platform-wide schedule
@@ -137,9 +138,20 @@ namespace HexaBill.Api.Modules.SuperAdmin
         {
             try
             {
+                // AUDIT-8 FIX: Get tenantId from controller context
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0)
+                {
+                    return BadRequest(new ApiResponse<BackupInfo>
+                    {
+                        Success = false,
+                        Message = "Tenant ID is required for backup. SystemAdmin must specify tenant."
+                    });
+                }
+                
                 // Note: downloadToBrowser replaces exportToDesktop - backups are always created on server
                 // If downloadToBrowser=true, return the file directly for browser download
-                var fileName = await _backupService.CreateFullBackupAsync(false, uploadToGoogleDrive, sendEmail);
+                var fileName = await _backupService.CreateFullBackupAsync(tenantId, false, uploadToGoogleDrive, sendEmail);
                 
                 if (downloadToBrowser)
                 {
@@ -304,7 +316,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 {
                     return BadRequest(new ApiResponse<bool> { Success = false, Message = "FileName or UploadedFilePath is required." });
                 }
-                var result = await _backupService.RestoreFromBackupAsync(request.FileName ?? "", request.UploadedFilePath);
+                // AUDIT-8 FIX: Get tenantId and validate before restore
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0)
+                {
+                    return BadRequest(new ApiResponse<bool>
+                    {
+                        Success = false,
+                        Message = "Tenant ID is required for restore. SystemAdmin must specify tenant."
+                    });
+                }
+                
+                var result = await _backupService.RestoreFromBackupAsync(tenantId, request.FileName ?? "", request.UploadedFilePath);
                 if (result)
                 {
                     await _auditService.LogAsync("Backup Restored", entityType: "Backup", details: $"FileName: {request.FileName ?? "uploaded"}");
@@ -371,7 +394,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 try
                 {
-                    var success = await _backupService.RestoreFromBackupAsync("", tempPath);
+                    // AUDIT-8 FIX: Get tenantId and validate before restore
+                    var tenantId = CurrentTenantId;
+                    if (tenantId <= 0)
+                    {
+                        return BadRequest(new ApiResponse<bool>
+                        {
+                            Success = false,
+                            Message = "Tenant ID is required for restore. SystemAdmin must specify tenant."
+                        });
+                    }
+                    
+                    var success = await _backupService.RestoreFromBackupAsync(tenantId, "", tempPath);
                     if (success)
                     {
                         await _auditService.LogAsync("Backup Restored", entityType: "Backup", details: $"Uploaded file: {file.FileName}");

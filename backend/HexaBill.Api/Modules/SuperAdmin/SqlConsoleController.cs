@@ -3,6 +3,7 @@
  * Execute SELECT only; timeout and row limit enforced.
  */
 using System.Data;
+using System.Security.Claims;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -18,12 +19,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
     [Authorize(Roles = "SystemAdmin")]
     public class SqlConsoleController : ControllerBase
     {
-        private const int MaxRows = 1000;
+        // BUG #2.3 FIX: Reduce max rows to 500 for better performance and security
+        private const int MaxRows = 500;
         private const int CommandTimeoutSeconds = 30;
 
         private static readonly Regex CommentBlockRegex = new Regex(@"/\*[\s\S]*?\*/", RegexOptions.Multiline);
+        // BUG #2.3 FIX: Enhanced blacklist - catch DELETE/UPDATE/TRUNCATE without WHERE clause
         private static readonly Regex ForbiddenKeywordRegex = new Regex(
             @"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|EXECUTE|EXEC|CALL|REFRESH|LOCK|COPY|VACUUM)\b",
+            RegexOptions.IgnoreCase);
+        // BUG #2.3 FIX: Detect DELETE/UPDATE without WHERE clause (dangerous even if keyword is allowed)
+        private static readonly Regex DangerousDeleteUpdateRegex = new Regex(
+            @"\b(DELETE|UPDATE|TRUNCATE)\s+[^\s]+\s*(?!WHERE)",
             RegexOptions.IgnoreCase);
 
         private readonly AppDbContext _db;
@@ -52,6 +59,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
             var (valid, error) = ValidateReadOnly(query);
             if (!valid)
                 return BadRequest(new ApiResponse<SqlConsoleResultDto> { Success = false, Message = error });
+
+            // BUG #2.3 FIX: Get admin user ID for AuditLog
+            var adminUserId = int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var uid) ? uid : 0;
 
             if (!_db.Database.IsNpgsql())
                 return BadRequest(new ApiResponse<SqlConsoleResultDto> { Success = false, Message = "SQL console is only supported for PostgreSQL." });
@@ -113,9 +123,30 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
                     sw.Stop();
 
+                    // BUG #2.3 FIX: Log every SQL query execution to AuditLog for security auditing
+                    try
+                    {
+                        var auditLog = new AuditLog
+                        {
+                            OwnerId = 0, // SystemAdmin operations
+                            TenantId = 0, // SystemAdmin operations
+                            UserId = adminUserId,
+                            Action = "SQL Console Query",
+                            Details = $"Executed SQL query: {query.Substring(0, Math.Min(200, query.Length))}... (Rows: {rows.Count}, Time: {sw.ElapsedMilliseconds}ms)",
+                            CreatedAt = DateTime.UtcNow
+                        };
+                        _db.AuditLogs.Add(auditLog);
+                        await _db.SaveChangesAsync();
+                    }
+                    catch
+                    {
+                        // Don't fail the query if audit logging fails
+                    }
+
                     return Ok(new ApiResponse<SqlConsoleResultDto>
                     {
                         Success = true,
+                        Message = truncated ? $"Results truncated to {MaxRows} rows. Query executed successfully." : "Query executed successfully.",
                         Data = new SqlConsoleResultDto
                         {
                             Columns = columns,
@@ -171,6 +202,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             if (ForbiddenKeywordRegex.IsMatch(normalized))
                 return (false, "Query must not contain INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, or other write/DDL keywords.");
+
+            // BUG #2.3 FIX: Detect DELETE/UPDATE without WHERE clause (dangerous even if keyword is allowed)
+            if (DangerousDeleteUpdateRegex.IsMatch(normalized))
+                return (false, "DELETE/UPDATE/TRUNCATE statements without WHERE clause are not allowed for safety.");
 
             var semiIdx = normalized.IndexOf(';');
             if (semiIdx >= 0 && normalized.Substring(semiIdx).TrimEnd() != ";")

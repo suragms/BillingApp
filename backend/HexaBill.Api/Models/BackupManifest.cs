@@ -32,6 +32,9 @@ namespace HexaBill.Api.Models
         
         [JsonPropertyName("notes")]
         public string? Notes { get; set; }
+        
+        [JsonPropertyName("tenantId")]
+        public int? TenantId { get; set; }
     }
 
     public class RecordCounts

@@ -326,7 +326,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     });
                 }
 
-                var tenant = await _tenantService.CreateTenantAsync(request);
+                var (tenant, generatedPassword) = await _tenantService.CreateTenantAsync(request);
                 await WriteSuperAdminAuditAsync("CreateTenant", tenant.Id, $"Tenant: {tenant.Name}, Email: {tenant.Email ?? request.Email ?? "N/A"}");
 
                 var clientAppLink = _configuration["ClientApp:BaseUrl"] ?? "http://localhost:5176";
@@ -340,7 +340,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         ClientAppLink = clientAppLink,
                         TenantId = tenant.Id,
                         Email = clientEmail,
-                        Password = "Owner123!" // Default password for new tenant owner (must match SuperAdminTenantService)
+                        Password = generatedPassword // Randomly generated password - shown once, never stored
                     }
                 };
 

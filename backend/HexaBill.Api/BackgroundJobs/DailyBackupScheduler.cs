@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Modules.SuperAdmin;
 using HexaBill.Api.Data;
+using HexaBill.Api.Models;
 
 namespace HexaBill.Api.BackgroundJobs
 {
@@ -58,8 +59,27 @@ namespace HexaBill.Api.BackgroundJobs
                         using (var scope = _serviceProvider.CreateScope())
                         {
                             var backupService = scope.ServiceProvider.GetRequiredService<IComprehensiveBackupService>();
-                            var fileName = await backupService.CreateFullBackupAsync(exportToDesktop: false, uploadToGoogleDrive: false, sendEmail: false);
-                            _logger.LogInformation("✅ Scheduled backup completed: {FileName}", fileName);
+                            var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                            
+                            // AUDIT-8 FIX: Backup all active tenants (system-wide scheduled backup)
+                            var activeTenantIds = await context.Tenants
+                                .Where(t => t.Status == TenantStatus.Active || t.Status == TenantStatus.Trial)
+                                .Select(t => t.Id)
+                                .ToListAsync(stoppingToken);
+                            
+                            foreach (var tenantId in activeTenantIds)
+                            {
+                                try
+                                {
+                                    var fileName = await backupService.CreateFullBackupAsync(tenantId, exportToDesktop: false, uploadToGoogleDrive: false, sendEmail: false);
+                                    _logger.LogInformation("✅ Scheduled backup completed for tenant {TenantId}: {FileName}", tenantId, fileName);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "❌ Failed to backup tenant {TenantId}", tenantId);
+                                }
+                            }
+                            
                             await CleanupOldBackupsAsync(scope.ServiceProvider, retentionDays);
                         }
                     }

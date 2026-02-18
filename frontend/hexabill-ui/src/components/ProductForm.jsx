@@ -111,6 +111,61 @@ const ProductForm = ({ product, saving = false, onSave, onCancel }) => {
   const handleSubmit = async (e) => {
     e.preventDefault()
     
+    // CRITICAL FIX: Client-side validation
+    if (!formData.nameEn || !formData.nameEn.trim()) {
+      toast.error('Product name (English) is required')
+      return
+    }
+    if (!formData.sku || !formData.sku.trim()) {
+      toast.error('SKU is required')
+      return
+    }
+    if (!formData.unitType) {
+      toast.error('Unit type is required')
+      return
+    }
+    if (formData.costPrice < 0 || formData.sellPrice < 0) {
+      toast.error('Prices cannot be negative')
+      return
+    }
+    if (formData.conversionToBase <= 0) {
+      toast.error('Conversion to base must be greater than 0')
+      return
+    }
+    
+    // Decimal precision validation (max 2 decimal places)
+    const validateDecimal = (value, maxDecimals = 2) => {
+      if (value === null || value === undefined || value === '') return true
+      const parts = value.toString().split('.')
+      return parts.length === 1 || parts[1].length <= maxDecimals
+    }
+    
+    if (!validateDecimal(formData.costPrice)) {
+      toast.error('Cost price must have maximum 2 decimal places')
+      return
+    }
+    if (!validateDecimal(formData.sellPrice)) {
+      toast.error('Sell price must have maximum 2 decimal places')
+      return
+    }
+    if (!validateDecimal(formData.conversionToBase)) {
+      toast.error('Conversion to base must have maximum 2 decimal places')
+      return
+    }
+    
+    // Business logic validation: warn if sell price < cost price
+    if (formData.sellPrice < formData.costPrice) {
+      const confirm = window.confirm(
+        'Sell price is less than cost price. This will result in a loss. Continue?'
+      )
+      if (!confirm) return
+    }
+    
+    // Round prices to 2 decimal places before submitting
+    const roundToDecimals = (value, decimals = 2) => {
+      return Math.round(value * Math.pow(10, decimals)) / Math.pow(10, decimals)
+    }
+    
     // Upload image first if a new image was selected (only for existing products)
     let imageUrl = formData.imageUrl || product?.imageUrl
     
@@ -133,8 +188,13 @@ const ProductForm = ({ product, saving = false, onSave, onCancel }) => {
       }
     }
     
-    // Save product with image URL
-    const productData = { ...formData }
+    // Save product with image URL and rounded prices
+    const productData = { 
+      ...formData,
+      costPrice: roundToDecimals(formData.costPrice),
+      sellPrice: roundToDecimals(formData.sellPrice),
+      conversionToBase: roundToDecimals(formData.conversionToBase, 4) // Allow more decimals for conversion
+    }
     if (imageUrl) {
       productData.imageUrl = imageUrl
     }

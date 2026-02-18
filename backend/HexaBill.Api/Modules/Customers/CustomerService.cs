@@ -252,9 +252,22 @@ namespace HexaBill.Api.Modules.Customers
                 // The database schema is now fixed to have proper defaults
                 await _context.SaveChangesAsync();
                 
-                // Link customer to route for filtering (many-to-many)
+                // PROD-12: Link customer to route with validation
                 if (request.RouteId.HasValue && request.RouteId.Value > 0)
                 {
+                    // Validate Route exists and belongs to tenant
+                    var route = await _context.Routes.FirstOrDefaultAsync(r => r.Id == request.RouteId.Value && r.TenantId == tenantId);
+                    if (route == null)
+                        throw new InvalidOperationException($"Route with ID {request.RouteId.Value} not found or does not belong to your tenant.");
+                    
+                    // PROD-12: Validate Route.BranchId matches Customer.BranchId if Customer has a BranchId
+                    if (customer.BranchId.HasValue && route.BranchId != customer.BranchId.Value)
+                    {
+                        throw new InvalidOperationException(
+                            $"Customer belongs to Branch {customer.BranchId.Value}, but Route {request.RouteId.Value} belongs to Branch {route.BranchId}. " +
+                            "Customer and Route must belong to the same Branch.");
+                    }
+                    
                     if (!await _context.RouteCustomers.AnyAsync(rc => rc.RouteId == request.RouteId.Value && rc.CustomerId == customer.Id))
                     {
                         _context.RouteCustomers.Add(new RouteCustomer
@@ -367,6 +380,23 @@ namespace HexaBill.Api.Modules.Customers
             customer.BranchId = request.BranchId;
             customer.RouteId = request.RouteId;
             customer.UpdatedAt = DateTime.UtcNow;
+
+            // PROD-12: Validate Route/Branch consistency before updating RouteCustomers
+            if (request.RouteId.HasValue && request.RouteId.Value > 0)
+            {
+                // Validate Route exists and belongs to tenant
+                var route = await _context.Routes.FirstOrDefaultAsync(r => r.Id == request.RouteId.Value && r.TenantId == tenantId);
+                if (route == null)
+                    throw new InvalidOperationException($"Route with ID {request.RouteId.Value} not found or does not belong to your tenant.");
+                
+                // PROD-12: Validate Route.BranchId matches Customer.BranchId if Customer has a BranchId
+                if (customer.BranchId.HasValue && route.BranchId != customer.BranchId.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Customer belongs to Branch {customer.BranchId.Value}, but Route {request.RouteId.Value} belongs to Branch {route.BranchId}. " +
+                        "Customer and Route must belong to the same Branch.");
+                }
+            }
 
             // Sync RouteCustomers: ensure customer is linked to the selected route only
             var existingRouteCustomers = await _context.RouteCustomers.Where(rc => rc.CustomerId == customer.Id).ToListAsync();
@@ -497,8 +527,18 @@ namespace HexaBill.Api.Modules.Customers
                         if (product != null)
                         {
                             var baseQty = item.Qty * product.ConversionToBase;
-                            product.StockQty += baseQty;
-                            product.UpdatedAt = DateTime.UtcNow;
+                            // PROD-19: Atomic stock restore
+                            var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                                $@"UPDATE ""Products"" 
+                                   SET ""StockQty"" = ""StockQty"" + {baseQty}, 
+                                       ""UpdatedAt"" = {DateTime.UtcNow}
+                                   WHERE ""Id"" = {product.Id} 
+                                     AND ""TenantId"" = {tenantId}");
+                            
+                            if (rowsAffected > 0)
+                            {
+                                await _context.Entry(product).ReloadAsync();
+                            }
 
                             // Create inventory transaction for audit
                             _context.InventoryTransactions.Add(new InventoryTransaction

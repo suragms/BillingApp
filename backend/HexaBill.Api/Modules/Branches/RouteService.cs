@@ -119,8 +119,15 @@ namespace HexaBill.Api.Modules.Branches
 
         public async Task<RouteDto> CreateRouteAsync(CreateRouteRequest request, int tenantId)
         {
+            // PROD-12: Validate Branch exists and belongs to tenant
             var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == request.BranchId && b.TenantId == tenantId);
-            if (branch == null) throw new InvalidOperationException("Branch not found.");
+            if (branch == null) 
+                throw new InvalidOperationException($"Branch with ID {request.BranchId} not found or does not belong to your tenant.");
+            
+            // PROD-12: Validate Route.BranchId matches Branch.TenantId (data integrity)
+            if (branch.TenantId != tenantId)
+                throw new InvalidOperationException($"Branch {request.BranchId} does not belong to tenant {tenantId}.");
+            
             var route = new HexaBill.Api.Models.Route
             {
                 BranchId = request.BranchId,
@@ -152,6 +159,33 @@ namespace HexaBill.Api.Modules.Branches
         {
             var route = await _context.Routes.FirstOrDefaultAsync(r => r.Id == id && r.TenantId == tenantId);
             if (route == null) return null;
+            
+            // PROD-12: Validate Branch exists and belongs to tenant if BranchId is being changed
+            if (request.BranchId != route.BranchId)
+            {
+                var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == request.BranchId && b.TenantId == tenantId);
+                if (branch == null)
+                    throw new InvalidOperationException($"Branch with ID {request.BranchId} not found or does not belong to your tenant.");
+                
+                // PROD-12: Validate Route.BranchId matches Branch.TenantId
+                if (branch.TenantId != tenantId)
+                    throw new InvalidOperationException($"Branch {request.BranchId} does not belong to tenant {tenantId}.");
+                
+                // AUDIT-9 FIX: Prevent branch change if route has customers or sales (data consistency)
+                var hasCustomers = await _context.RouteCustomers.AnyAsync(rc => rc.RouteId == id) ||
+                                   await _context.Customers.AnyAsync(c => c.RouteId == id && c.TenantId == tenantId);
+                
+                var hasSales = await _context.Sales.AnyAsync(s => s.RouteId == id && s.TenantId == tenantId && !s.IsDeleted);
+                
+                if (hasCustomers || hasSales)
+                {
+                    throw new InvalidOperationException(
+                        $"Cannot change route branch. Route has {(hasCustomers ? "customers" : "")} " +
+                        $"{(hasCustomers && hasSales ? "and " : "")}{(hasSales ? "sales records" : "")} assigned. " +
+                        "Please reassign customers and sales to another route before changing branch.");
+                }
+            }
+            
             route.Name = request.Name.Trim();
             route.AssignedStaffId = request.AssignedStaffId;
             route.BranchId = request.BranchId;
@@ -185,10 +219,32 @@ namespace HexaBill.Api.Modules.Branches
 
         public async Task<bool> AssignCustomerToRouteAsync(int routeId, int customerId, int tenantId)
         {
+            // PROD-12: Validate Route exists and belongs to tenant
             var route = await _context.Routes.FirstOrDefaultAsync(r => r.Id == routeId && r.TenantId == tenantId);
+            if (route == null) 
+                throw new InvalidOperationException($"Route with ID {routeId} not found or does not belong to your tenant.");
+            
+            // PROD-12: Validate Customer exists and belongs to tenant
             var customer = await _context.Customers.FirstOrDefaultAsync(c => c.Id == customerId && c.TenantId == tenantId);
-            if (route == null || customer == null) return false;
-            if (await _context.RouteCustomers.AnyAsync(rc => rc.RouteId == routeId && rc.CustomerId == customerId)) return true;
+            if (customer == null) 
+                throw new InvalidOperationException($"Customer with ID {customerId} not found or does not belong to your tenant.");
+            
+            // PROD-12: Validate Route.BranchId matches Customer's BranchId if Customer has a BranchId
+            if (customer.BranchId.HasValue && route.BranchId != customer.BranchId.Value)
+            {
+                throw new InvalidOperationException(
+                    $"Customer {customerId} belongs to Branch {customer.BranchId.Value}, but Route {routeId} belongs to Branch {route.BranchId}. " +
+                    "Customer and Route must belong to the same Branch.");
+            }
+            
+            // Check if already assigned
+            if (await _context.RouteCustomers.AnyAsync(rc => rc.RouteId == routeId && rc.CustomerId == customerId)) 
+                return true;
+            
+            // Update Customer.RouteId for consistency
+            customer.RouteId = routeId;
+            customer.UpdatedAt = DateTime.UtcNow;
+            
             _context.RouteCustomers.Add(new RouteCustomer { RouteId = routeId, CustomerId = customerId, AssignedAt = DateTime.UtcNow });
             await _context.SaveChangesAsync();
             return true;

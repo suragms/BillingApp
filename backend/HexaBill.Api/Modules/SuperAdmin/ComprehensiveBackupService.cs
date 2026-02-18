@@ -24,8 +24,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
 {
     public interface IComprehensiveBackupService
     {
-        Task<string> CreateFullBackupAsync(bool exportToDesktop = false, bool uploadToGoogleDrive = false, bool sendEmail = false);
-        Task<bool> RestoreFromBackupAsync(string backupFilePath, string? uploadedFilePath = null);
+        Task<string> CreateFullBackupAsync(int tenantId, bool exportToDesktop = false, bool uploadToGoogleDrive = false, bool sendEmail = false);
+        Task<bool> RestoreFromBackupAsync(int tenantId, string backupFilePath, string? uploadedFilePath = null);
         Task<List<BackupInfo>> GetBackupListAsync();
         /// <summary>Returns a stream and filename for download. Caller must dispose the stream. For S3, stream is a temp-file stream that deletes on dispose.</summary>
         Task<(Stream stream, string fileName)?> GetBackupForDownloadAsync(string fileName);
@@ -49,7 +49,12 @@ namespace HexaBill.Api.Modules.SuperAdmin
             _configuration = configuration;
             _serviceProvider = serviceProvider;
             _backupDirectory = Path.Combine(Directory.GetCurrentDirectory(), "backups");
-            _desktopPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "HexaBill_Backups");
+            // BUG #13 FIX: Use /tmp on Linux (Render), Desktop on Windows (dev)
+            // SpecialFolder.Desktop returns empty string on Linux, causing silent failures
+            var basePath = Environment.OSVersion.Platform == PlatformID.Unix || Environment.OSVersion.Platform == PlatformID.MacOSX
+                ? "/tmp"
+                : Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            _desktopPath = Path.Combine(basePath, "HexaBill_Backups");
 
             // Ensure directories exist
             if (!Directory.Exists(_backupDirectory))
@@ -63,11 +68,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        public async Task<string> CreateFullBackupAsync(bool exportToDesktop = false, bool uploadToGoogleDrive = false, bool sendEmail = false)
+        public async Task<string> CreateFullBackupAsync(int tenantId, bool exportToDesktop = false, bool uploadToGoogleDrive = false, bool sendEmail = false)
         {
+            // AUDIT-8 FIX: Validate tenantId
+            if (tenantId <= 0)
+            {
+                throw new ArgumentException("Tenant ID must be greater than 0 for backup operations.");
+            }
+            
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var dateFolder = DateTime.Now.ToString("yyyy-MM-dd");
-            var zipFileName = $"HexaBill_Backup_{timestamp}.zip";
+            var zipFileName = $"HexaBill_Backup_Tenant{tenantId}_{timestamp}.zip";
             var zipPath = Path.Combine(_backupDirectory, zipFileName);
 
             try
@@ -75,9 +86,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 using (var zipArchive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
                 {
                     // 1. Backup Database (SQL dump)
+                    // AUDIT-8 FIX: Pass tenantId for per-tenant backup
                     try
                     {
-                        await BackupDatabaseAsync(zipArchive, timestamp);
+                        await BackupDatabaseAsync(zipArchive, timestamp, tenantId);
                         Console.WriteLine("✅ Database backup completed");
                     }
                     catch (Exception ex)
@@ -87,9 +99,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
 
                     // 2. Backup CSV Exports (customers, sales, payments, expenses, products, ledger)
+                    // AUDIT-8 FIX: Pass tenantId to filter data
                     try
                     {
-                        await BackupCsvExportsAsync(zipArchive);
+                        await BackupCsvExportsAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ CSV exports completed");
                     }
                     catch (Exception ex)
@@ -98,9 +111,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
 
                     // 3. Backup all sales invoices (PDFs)
+                    // AUDIT-8 FIX: Pass tenantId to filter invoices
                     try
                     {
-                        await BackupInvoicesAsync(zipArchive);
+                        await BackupInvoicesAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ Invoice PDFs backup completed");
                     }
                     catch (Exception ex)
@@ -109,9 +123,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
 
                     // 4. Backup customer statements
+                    // AUDIT-8 FIX: Pass tenantId to filter statements
                     try
                     {
-                        await BackupCustomerStatementsAsync(zipArchive);
+                        await BackupCustomerStatementsAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ Customer statements backup completed");
                     }
                     catch (Exception ex)
@@ -120,9 +135,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
 
                     // 5. Backup monthly sales ledger reports
+                    // AUDIT-8 FIX: Pass tenantId to filter reports
                     try
                     {
-                        await BackupMonthlySalesLedgerAsync(zipArchive);
+                        await BackupMonthlySalesLedgerAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ Monthly sales ledger backup completed");
                     }
                     catch (Exception ex)
@@ -131,9 +147,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
 
                     // 6. Backup reports (daily, profit, etc.)
+                    // AUDIT-8 FIX: Pass tenantId to filter reports
                     try
                     {
-                        await BackupReportsAsync(zipArchive);
+                        await BackupReportsAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ Reports backup completed");
                     }
                     catch (Exception ex)
@@ -142,9 +159,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     }
 
                     // 7. Backup uploaded files (purchases, attachments)
+                    // AUDIT-8 FIX: Pass tenantId to filter storage files
                     try
                     {
-                        await BackupUploadedFilesAsync(zipArchive);
+                        await BackupUploadedFilesAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ Uploaded files backup completed");
                     }
                     catch (Exception ex)
@@ -155,8 +173,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     // 8. Backup settings and users
                     try
                     {
-                        await BackupSettingsAsync(zipArchive);
-                        await BackupUsersAsync(zipArchive);
+                        // AUDIT-8 FIX: Pass tenantId to filter settings and users
+                        await BackupSettingsAsync(zipArchive, tenantId);
+                        await BackupUsersAsync(zipArchive, tenantId);
                         Console.WriteLine("✅ Settings and users backup completed");
                     }
                     catch (Exception ex)
@@ -167,7 +186,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     // 9. Create manifest file
                     try
                     {
-                        await CreateManifestAsync(zipArchive, timestamp);
+                        // AUDIT-8 FIX: Pass tenantId to manifest
+                        await CreateManifestAsync(zipArchive, timestamp, tenantId);
                         Console.WriteLine("✅ Manifest created");
                     }
                     catch (Exception ex)
@@ -283,7 +303,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task BackupDatabaseAsync(ZipArchive zipArchive, string timestamp)
+        private async Task BackupDatabaseAsync(ZipArchive zipArchive, string timestamp, int tenantId)
         {
             var connectionString = _configuration.GetConnectionString("DefaultConnection");
             if (string.IsNullOrEmpty(connectionString))
@@ -296,8 +316,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
             
             if (isPostgreSQL)
             {
-                // PostgreSQL: Use pg_dump to create SQL dump
-                await BackupPostgreSQLDatabaseAsync(zipArchive, timestamp, connectionString);
+                // PostgreSQL: Use EF Core export with tenant filtering (pg_dump exports entire DB)
+                // AUDIT-8 FIX: Use tenant-filtered export instead of full pg_dump
+                await BackupPostgreSQLDatabaseAsync(zipArchive, timestamp, connectionString, tenantId);
             }
             else
             {
@@ -345,7 +366,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task BackupPostgreSQLDatabaseAsync(ZipArchive zipArchive, string timestamp, string connectionString)
+        private async Task BackupPostgreSQLDatabaseAsync(ZipArchive zipArchive, string timestamp, string connectionString, int tenantId)
         {
             try
             {
@@ -405,7 +426,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 {
                     // Fallback: Use Npgsql to export data via EF Core
                     Console.WriteLine("⚠️ pg_dump not found, using EF Core export (slower but works)");
-                    await ExportPostgreSQLViaEfCoreAsync(tempDumpPath);
+                    await ExportPostgreSQLViaEfCoreAsync(tempDumpPath, tenantId);
                 }
 
                 // Add SQL dump to ZIP
@@ -423,14 +444,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     File.Delete(tempDumpPath);
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️ PostgreSQL backup failed: {ex.Message}");
-                // Try fallback: export via EF Core
-                try
+                catch (Exception ex)
                 {
-                    var tempDumpPath = Path.Combine(Path.GetTempPath(), $"pg_dump_{timestamp}.sql");
-                    await ExportPostgreSQLViaEfCoreAsync(tempDumpPath);
+                    Console.WriteLine($"⚠️ PostgreSQL backup failed: {ex.Message}");
+                    // Try fallback: export via EF Core
+                    try
+                    {
+                        var tempDumpPath = Path.Combine(Path.GetTempPath(), $"pg_dump_{timestamp}.sql");
+                        // AUDIT-8 FIX: Use tenant-filtered export
+                        await ExportPostgreSQLViaEfCoreAsync(tempDumpPath, tenantId);
                     
                     var entry = zipArchive.CreateEntry($"data/db_dump.sql");
                     using (var entryStream = entry.Open())
@@ -510,35 +532,36 @@ namespace HexaBill.Api.Modules.SuperAdmin
             return null;
         }
 
-        private async Task ExportPostgreSQLViaEfCoreAsync(string outputPath)
+        private async Task ExportPostgreSQLViaEfCoreAsync(string outputPath, int tenantId)
         {
-            // Export all tables using EF Core
+            // AUDIT-8 FIX: Export only tenant-specific data using EF Core
             using var writer = new StreamWriter(outputPath);
             
             await writer.WriteLineAsync("-- HexaBill PostgreSQL Backup SQL Dump");
             await writer.WriteLineAsync($"-- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+            await writer.WriteLineAsync($"-- Tenant ID: {tenantId}");
             await writer.WriteLineAsync($"-- Database: {_context.Database.GetConnectionString()}");
             await writer.WriteLineAsync();
             await writer.WriteLineAsync("BEGIN;");
             await writer.WriteLineAsync();
 
-            // Export all tables
-            await ExportTableAsync(writer, "Products", async () => await _context.Products.ToListAsync());
-            await ExportTableAsync(writer, "Customers", async () => await _context.Customers.ToListAsync());
-            await ExportTableAsync(writer, "Sales", async () => await _context.Sales.ToListAsync());
-            await ExportTableAsync(writer, "SaleItems", async () => await _context.SaleItems.ToListAsync());
-            await ExportTableAsync(writer, "Purchases", async () => await _context.Purchases.ToListAsync());
-            await ExportTableAsync(writer, "PurchaseItems", async () => await _context.PurchaseItems.ToListAsync());
-            await ExportTableAsync(writer, "Payments", async () => await _context.Payments.ToListAsync());
-            await ExportTableAsync(writer, "Expenses", async () => await _context.Expenses.ToListAsync());
-            await ExportTableAsync(writer, "Users", async () => await _context.Users.ToListAsync());
-            await ExportTableAsync(writer, "Settings", async () => await _context.Settings.ToListAsync());
-            await ExportTableAsync(writer, "Branches", async () => await _context.Branches.ToListAsync());
-            await ExportTableAsync(writer, "Routes", async () => await _context.Routes.ToListAsync());
-            await ExportTableAsync(writer, "BranchStaff", async () => await _context.BranchStaff.ToListAsync());
-            await ExportTableAsync(writer, "RouteCustomers", async () => await _context.RouteCustomers.ToListAsync());
-            await ExportTableAsync(writer, "RouteExpenses", async () => await _context.RouteExpenses.ToListAsync());
-            await ExportTableAsync(writer, "CustomerVisits", async () => await _context.CustomerVisits.ToListAsync());
+            // AUDIT-8 FIX: Export all tables filtered by TenantId
+            await ExportTableAsync(writer, "Products", async () => await _context.Products.Where(p => p.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Customers", async () => await _context.Customers.Where(c => c.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Sales", async () => await _context.Sales.Where(s => s.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "SaleItems", async () => await _context.SaleItems.Where(si => si.Sale.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Purchases", async () => await _context.Purchases.Where(p => p.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "PurchaseItems", async () => await _context.PurchaseItems.Where(pi => pi.Purchase.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Payments", async () => await _context.Payments.Where(p => p.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Expenses", async () => await _context.Expenses.Where(e => e.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Users", async () => await _context.Users.Where(u => u.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Settings", async () => await _context.Settings.Where(s => s.OwnerId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Branches", async () => await _context.Branches.Where(b => b.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "Routes", async () => await _context.Routes.Where(r => r.Branch.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "BranchStaff", async () => await _context.BranchStaff.Where(bs => bs.Branch.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "RouteCustomers", async () => await _context.RouteCustomers.Where(rc => rc.Route.Branch.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "RouteExpenses", async () => await _context.RouteExpenses.Where(re => re.Route.Branch.TenantId == tenantId).ToListAsync());
+            await ExportTableAsync(writer, "CustomerVisits", async () => await _context.CustomerVisits.Where(cv => cv.Customer.TenantId == tenantId).ToListAsync());
             
             await writer.WriteLineAsync();
             await writer.WriteLineAsync("COMMIT;");
@@ -557,66 +580,84 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task BackupInvoicesAsync(ZipArchive zipArchive)
+        private async Task BackupInvoicesAsync(ZipArchive zipArchive, int tenantId)
         {
-            // Backup saved invoice PDFs
+            // AUDIT-8 FIX: Backup only tenant-specific invoice PDFs
+            // Invoice files are named INV-{InvoiceNo}.pdf, so we need to query Sales to get invoice numbers for this tenant
             var invoicesDir = Path.Combine(Directory.GetCurrentDirectory(), "invoices");
             if (Directory.Exists(invoicesDir))
             {
-                var invoiceFiles = Directory.GetFiles(invoicesDir, "*.pdf", SearchOption.TopDirectoryOnly);
-                foreach (var file in invoiceFiles)
+                // Get all invoice numbers for this tenant
+                var tenantInvoiceNos = await _context.Sales
+                    .Where(s => s.TenantId == tenantId && !s.IsDeleted && !string.IsNullOrEmpty(s.InvoiceNo))
+                    .Select(s => s.InvoiceNo)
+                    .ToListAsync();
+                
+                var backedUpCount = 0;
+                foreach (var invoiceNo in tenantInvoiceNos)
                 {
-                    var fileName = Path.GetFileName(file);
-                    var entry = zipArchive.CreateEntry($"invoices/{fileName}");
-                    using (var entryStream = entry.Open())
-                    using (var fileStream = File.OpenRead(file))
+                    var fileName = $"INV-{invoiceNo}.pdf";
+                    var filePath = Path.Combine(invoicesDir, fileName);
+                    if (File.Exists(filePath))
                     {
-                        await fileStream.CopyToAsync(entryStream);
+                        var entry = zipArchive.CreateEntry($"invoices/{fileName}");
+                        using (var entryStream = entry.Open())
+                        using (var fileStream = File.OpenRead(filePath))
+                        {
+                            await fileStream.CopyToAsync(entryStream);
+                        }
+                        backedUpCount++;
                     }
                 }
-                Console.WriteLine($"   Backed up {invoiceFiles.Length} invoice PDF(s)");
+                Console.WriteLine($"   Backed up {backedUpCount} invoice PDF(s) for tenant {tenantId}");
             }
         }
 
-        private async Task BackupUploadedFilesAsync(ZipArchive zipArchive)
+        private async Task BackupUploadedFilesAsync(ZipArchive zipArchive, int tenantId)
         {
+            // AUDIT-8 FIX: Backup only tenant-specific storage files
+            // Storage files are organized as: storage/purchases/{tenantId}/... and storage/uploads/{tenantId}/...
             var storagePath = Path.Combine(Directory.GetCurrentDirectory(), "storage");
             if (Directory.Exists(storagePath))
             {
                 var directories = new[] { "purchases", "uploads" };
+                var totalBackedUp = 0;
 
                 foreach (var dirName in directories)
                 {
-                    var dirPath = Path.Combine(storagePath, dirName);
-                    if (Directory.Exists(dirPath))
+                    var tenantDirPath = Path.Combine(storagePath, dirName, tenantId.ToString());
+                    if (Directory.Exists(tenantDirPath))
                     {
-                        var files = Directory.GetFiles(dirPath, "*", SearchOption.AllDirectories);
+                        var files = Directory.GetFiles(tenantDirPath, "*", SearchOption.AllDirectories);
                         foreach (var file in files)
                         {
-                            var relativePath = Path.GetRelativePath(dirPath, file);
-                            var entry = zipArchive.CreateEntry($"storage/{dirName}/{relativePath}");
+                            var relativePath = Path.GetRelativePath(tenantDirPath, file);
+                            var entry = zipArchive.CreateEntry($"storage/{dirName}/{tenantId}/{relativePath}");
                             using (var entryStream = entry.Open())
                             using (var fileStream = File.OpenRead(file))
                             {
                                 await fileStream.CopyToAsync(entryStream);
                             }
+                            totalBackedUp++;
                         }
                     }
                 }
+                Console.WriteLine($"   Backed up {totalBackedUp} storage file(s) for tenant {tenantId}");
             }
         }
 
-        private async Task BackupCsvExportsAsync(ZipArchive zipArchive)
+        private async Task BackupCsvExportsAsync(ZipArchive zipArchive, int tenantId)
         {
+            // AUDIT-8 FIX: Export only tenant-specific data
             // Export Customers
-            var customers = await _context.Customers.ToListAsync();
+            var customers = await _context.Customers.Where(c => c.TenantId == tenantId).ToListAsync();
             var customersCsv = GenerateCustomersCsv(customers);
             AddCsvToZip(zipArchive, "database/customers.csv", customersCsv);
 
             // Export Sales
             var sales = await _context.Sales
                 .Include(s => s.Items)
-                .Where(s => !s.IsDeleted)
+                .Where(s => s.TenantId == tenantId && !s.IsDeleted)
                 .ToListAsync();
             var salesCsv = GenerateSalesCsv(sales);
             AddCsvToZip(zipArchive, "database/sales.csv", salesCsv);
@@ -625,7 +666,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             var saleItems = await _context.SaleItems
                 .Include(si => si.Product)
                 .Include(si => si.Sale)
-                .Where(si => !si.Sale.IsDeleted)
+                .Where(si => si.Sale.TenantId == tenantId && !si.Sale.IsDeleted)
                 .ToListAsync();
             var saleItemsCsv = GenerateSaleItemsCsv(saleItems);
             AddCsvToZip(zipArchive, "database/sale_items.csv", saleItemsCsv);
@@ -633,6 +674,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             // Export Payments
             var payments = await _context.Payments
                 .Include(p => p.Customer)
+                .Where(p => p.TenantId == tenantId)
                 .ToListAsync();
             var paymentsCsv = GeneratePaymentsCsv(payments);
             AddCsvToZip(zipArchive, "database/payments.csv", paymentsCsv);
@@ -640,18 +682,20 @@ namespace HexaBill.Api.Modules.SuperAdmin
             // Export Expenses
             var expenses = await _context.Expenses
                 .Include(e => e.Category)
+                .Where(e => e.TenantId == tenantId)
                 .ToListAsync();
             var expensesCsv = GenerateExpensesCsv(expenses);
             AddCsvToZip(zipArchive, "database/expenses.csv", expensesCsv);
 
             // Export Products
-            var products = await _context.Products.ToListAsync();
+            var products = await _context.Products.Where(p => p.TenantId == tenantId).ToListAsync();
             var productsCsv = GenerateProductsCsv(products);
             AddCsvToZip(zipArchive, "database/products.csv", productsCsv);
 
             // Export Inventory Transactions
             var inventoryTx = await _context.InventoryTransactions
                 .Include(it => it.Product)
+                .Where(it => it.Product.TenantId == tenantId)
                 .ToListAsync();
             var inventoryCsv = GenerateInventoryCsv(inventoryTx);
             AddCsvToZip(zipArchive, "database/inventory_transactions.csv", inventoryCsv);
@@ -659,6 +703,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             // Export Sales Returns
             var salesReturns = await _context.SaleReturns
                 .Include(sr => sr.Items)
+                .Where(sr => sr.TenantId == tenantId)
                 .ToListAsync();
             var returnsCsv = GenerateSalesReturnsCsv(salesReturns);
             AddCsvToZip(zipArchive, "database/sales_returns.csv", returnsCsv);
@@ -666,6 +711,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             // Export Purchases
             var purchases = await _context.Purchases
                 .Include(p => p.Items)
+                .Where(p => p.TenantId == tenantId)
                 .ToListAsync();
             var purchasesCsv = GeneratePurchasesCsv(purchases);
             AddCsvToZip(zipArchive, "database/purchases.csv", purchasesCsv);
@@ -673,29 +719,53 @@ namespace HexaBill.Api.Modules.SuperAdmin
             Console.WriteLine("✅ CSV exports completed");
         }
 
-        private async Task BackupCustomerStatementsAsync(ZipArchive zipArchive)
+        private async Task BackupCustomerStatementsAsync(ZipArchive zipArchive, int tenantId)
         {
-            // Backup customer statement PDFs if they exist
+            // AUDIT-8 FIX: Backup only tenant-specific customer statement PDFs
+            // Statement files may be named by customer ID or customer name, so we query Customers to filter
             var statementsDir = Path.Combine(Directory.GetCurrentDirectory(), "statements");
             if (Directory.Exists(statementsDir))
             {
-                var statementFiles = Directory.GetFiles(statementsDir, "*.pdf", SearchOption.TopDirectoryOnly);
-                foreach (var file in statementFiles)
+                // Get all customer IDs for this tenant
+                var tenantCustomerIds = await _context.Customers
+                    .Where(c => c.TenantId == tenantId)
+                    .Select(c => c.Id)
+                    .ToListAsync();
+                
+                var backedUpCount = 0;
+                foreach (var customerId in tenantCustomerIds)
                 {
-                    var fileName = Path.GetFileName(file);
-                    var entry = zipArchive.CreateEntry($"statements/{fileName}");
-                    using (var entryStream = entry.Open())
-                    using (var fileStream = File.OpenRead(file))
+                    // Try common statement file naming patterns
+                    var possibleFileNames = new[]
                     {
-                        await fileStream.CopyToAsync(entryStream);
+                        $"STATEMENT-{customerId}.pdf",
+                        $"Customer-{customerId}-Statement.pdf",
+                        $"statement_{customerId}.pdf"
+                    };
+                    
+                    foreach (var fileName in possibleFileNames)
+                    {
+                        var filePath = Path.Combine(statementsDir, fileName);
+                        if (File.Exists(filePath))
+                        {
+                            var entry = zipArchive.CreateEntry($"statements/{fileName}");
+                            using (var entryStream = entry.Open())
+                            using (var fileStream = File.OpenRead(filePath))
+                            {
+                                await fileStream.CopyToAsync(entryStream);
+                            }
+                            backedUpCount++;
+                            break; // Found file for this customer, move to next customer
+                        }
                     }
                 }
+                Console.WriteLine($"   Backed up {backedUpCount} customer statement PDF(s) for tenant {tenantId}");
             }
         }
 
-        private async Task BackupMonthlySalesLedgerAsync(ZipArchive zipArchive)
+        private async Task BackupMonthlySalesLedgerAsync(ZipArchive zipArchive, int tenantId)
         {
-            // Generate and backup monthly sales ledger reports
+            // AUDIT-8 FIX: Generate and backup tenant-specific monthly sales ledger reports
             try
             {
                 using var scope = _serviceProvider.CreateScope();
@@ -709,25 +779,25 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 var previousMonthStart = currentMonthStart.AddMonths(-1);
                 var previousMonthEnd = currentMonthStart.AddDays(-1);
                 
-                // Generate current month sales ledger PDF
-                var currentMonthLedger = await reportService.GetComprehensiveSalesLedgerAsync(0, currentMonthStart, currentMonthEnd); // System backup (owner_id=0)
-                var currentMonthPdf = await pdfService.GenerateSalesLedgerPdfAsync(currentMonthLedger, currentMonthStart, currentMonthEnd, 0); // System backup
+                // Generate current month sales ledger PDF for this tenant
+                var currentMonthLedger = await reportService.GetComprehensiveSalesLedgerAsync(tenantId, currentMonthStart, currentMonthEnd);
+                var currentMonthPdf = await pdfService.GenerateSalesLedgerPdfAsync(currentMonthLedger, currentMonthStart, currentMonthEnd, tenantId);
                 var currentMonthEntry = zipArchive.CreateEntry($"reports/monthly_sales_ledger_{currentMonthStart:yyyy-MM}.pdf");
                 using (var entryStream = currentMonthEntry.Open())
                 {
                     await entryStream.WriteAsync(currentMonthPdf, 0, currentMonthPdf.Length);
                 }
                 
-                // Generate previous month sales ledger PDF
-                var previousMonthLedger = await reportService.GetComprehensiveSalesLedgerAsync(0, previousMonthStart, previousMonthEnd); // System backup (owner_id=0)
-                var previousMonthPdf = await pdfService.GenerateSalesLedgerPdfAsync(previousMonthLedger, previousMonthStart, previousMonthEnd, 0); // System backup
+                // Generate previous month sales ledger PDF for this tenant
+                var previousMonthLedger = await reportService.GetComprehensiveSalesLedgerAsync(tenantId, previousMonthStart, previousMonthEnd);
+                var previousMonthPdf = await pdfService.GenerateSalesLedgerPdfAsync(previousMonthLedger, previousMonthStart, previousMonthEnd, tenantId);
                 var previousMonthEntry = zipArchive.CreateEntry($"reports/monthly_sales_ledger_{previousMonthStart:yyyy-MM}.pdf");
                 using (var entryStream = previousMonthEntry.Open())
                 {
                     await entryStream.WriteAsync(previousMonthPdf, 0, previousMonthPdf.Length);
                 }
                 
-                Console.WriteLine($"   Backed up monthly sales ledger reports for {currentMonthStart:yyyy-MM} and {previousMonthStart:yyyy-MM}");
+                Console.WriteLine($"   Backed up monthly sales ledger reports for tenant {tenantId} ({currentMonthStart:yyyy-MM} and {previousMonthStart:yyyy-MM})");
             }
             catch (Exception ex)
             {
@@ -736,14 +806,38 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task BackupReportsAsync(ZipArchive zipArchive)
+        private async Task BackupReportsAsync(ZipArchive zipArchive, int tenantId)
         {
-            // Backup generated reports
+            // AUDIT-8 FIX: Backup only tenant-specific report files
+            // Reports may be stored with tenant ID in filename or path, or we need to query which reports belong to tenant
+            // For now, check if reports directory has tenant subdirectories
             var reportsDir = Path.Combine(Directory.GetCurrentDirectory(), "reports");
             if (Directory.Exists(reportsDir))
             {
-                var reportFiles = Directory.GetFiles(reportsDir, "*", SearchOption.TopDirectoryOnly);
-                foreach (var file in reportFiles)
+                var tenantReportsDir = Path.Combine(reportsDir, tenantId.ToString());
+                var backedUpCount = 0;
+                
+                // Check tenant-specific subdirectory first
+                if (Directory.Exists(tenantReportsDir))
+                {
+                    var reportFiles = Directory.GetFiles(tenantReportsDir, "*", SearchOption.TopDirectoryOnly);
+                    foreach (var file in reportFiles)
+                    {
+                        var fileName = Path.GetFileName(file);
+                        var entry = zipArchive.CreateEntry($"reports/{tenantId}/{fileName}");
+                        using (var entryStream = entry.Open())
+                        using (var fileStream = File.OpenRead(file))
+                        {
+                            await fileStream.CopyToAsync(entryStream);
+                        }
+                        backedUpCount++;
+                    }
+                }
+                
+                // Also check root reports directory for files that might contain tenant ID in filename
+                // This is a fallback - ideally all reports should be in tenant subdirectories
+                var rootReportFiles = Directory.GetFiles(reportsDir, $"*tenant{tenantId}*", SearchOption.TopDirectoryOnly);
+                foreach (var file in rootReportFiles)
                 {
                     var fileName = Path.GetFileName(file);
                     var entry = zipArchive.CreateEntry($"reports/{fileName}");
@@ -752,13 +846,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     {
                         await fileStream.CopyToAsync(entryStream);
                     }
+                    backedUpCount++;
                 }
+                
+                Console.WriteLine($"   Backed up {backedUpCount} report file(s) for tenant {tenantId}");
             }
         }
 
-        private async Task BackupUsersAsync(ZipArchive zipArchive)
+        private async Task BackupUsersAsync(ZipArchive zipArchive, int tenantId)
         {
-            var users = await _context.Users.ToListAsync();
+            // AUDIT-8 FIX: Filter users by TenantId
+            var users = await _context.Users.Where(u => u.TenantId == tenantId).ToListAsync();
             
             // Create JSON file with users (without passwords)
             var usersJson = System.Text.Json.JsonSerializer.Serialize(
@@ -774,9 +872,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task BackupSettingsAsync(ZipArchive zipArchive)
+        private async Task BackupSettingsAsync(ZipArchive zipArchive, int tenantId)
         {
-            var settings = await _context.Settings.ToListAsync();
+            // AUDIT-8 FIX: Filter settings by OwnerId (which equals TenantId for tenant settings)
+            var settings = await _context.Settings.Where(s => s.OwnerId == tenantId).ToListAsync();
             
             // Create JSON file with settings
             var settingsJson = System.Text.Json.JsonSerializer.Serialize(
@@ -792,29 +891,31 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task CreateManifestAsync(ZipArchive zipArchive, string timestamp)
+        private async Task CreateManifestAsync(ZipArchive zipArchive, string timestamp, int tenantId)
         {
             var userIdClaim = System.Security.Claims.ClaimsPrincipal.Current?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
             var exportedBy = userIdClaim?.Value ?? "System";
 
+            // AUDIT-8 FIX: Include tenantId in manifest and filter counts by tenantId
             var manifest = new BackupManifest
             {
                 SchemaVersion = "1.0", // Current schema version
                 BackupDate = DateTime.UtcNow,
                 AppVersion = "1.0.0",
                 DatabaseType = "SQLite",
+                TenantId = tenantId,
                 RecordCounts = new RecordCounts
                 {
-                    Products = await _context.Products.CountAsync(),
-                    Customers = await _context.Customers.CountAsync(),
-                    Sales = await _context.Sales.CountAsync(),
-                    Purchases = await _context.Purchases.CountAsync(),
-                    Payments = await _context.Payments.CountAsync(),
-                    Expenses = await _context.Expenses.CountAsync(),
-                    Users = await _context.Users.CountAsync()
+                    Products = await _context.Products.Where(p => p.TenantId == tenantId).CountAsync(),
+                    Customers = await _context.Customers.Where(c => c.TenantId == tenantId).CountAsync(),
+                    Sales = await _context.Sales.Where(s => s.TenantId == tenantId).CountAsync(),
+                    Purchases = await _context.Purchases.Where(p => p.TenantId == tenantId).CountAsync(),
+                    Payments = await _context.Payments.Where(p => p.TenantId == tenantId).CountAsync(),
+                    Expenses = await _context.Expenses.Where(e => e.TenantId == tenantId).CountAsync(),
+                    Users = await _context.Users.Where(u => u.TenantId == tenantId).CountAsync()
                 },
                 ExportedBy = exportedBy,
-                Notes = "Full system backup"
+                Notes = $"Full backup for tenant {tenantId}"
             };
 
             // Calculate checksums for data integrity
@@ -1093,8 +1194,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        public async Task<bool> RestoreFromBackupAsync(string backupFilePath, string? uploadedFilePath = null)
+        public async Task<bool> RestoreFromBackupAsync(int tenantId, string backupFilePath, string? uploadedFilePath = null)
         {
+            // AUDIT-8 FIX: Validate tenantId
+            if (tenantId <= 0)
+            {
+                throw new ArgumentException("Tenant ID must be greater than 0 for restore operations.");
+            }
+            
             string? sourcePath = null;
             var isTempFromS3 = false;
             try
@@ -1108,6 +1215,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 isTempFromS3 = sourcePath.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
 
+                // AUDIT-8 FIX: Validate backup belongs to tenant
+                var manifestPath = Path.Combine(Path.GetDirectoryName(sourcePath) ?? "", "manifest.json");
+                if (File.Exists(manifestPath))
+                {
+                    var manifestJson = await File.ReadAllTextAsync(manifestPath);
+                    var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(manifestJson);
+                    if (manifest != null && manifest.TenantId.HasValue && manifest.TenantId.Value != tenantId)
+                    {
+                        throw new UnauthorizedAccessException($"Backup belongs to tenant {manifest.TenantId.Value}, but restore requested for tenant {tenantId}.");
+                    }
+                }
+
                 // Extract to temp directory
                 var tempExtractPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
                 Directory.CreateDirectory(tempExtractPath);
@@ -1115,70 +1234,98 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 try
                 {
                     ZipFile.ExtractToDirectory(sourcePath, tempExtractPath);
-
-                    // Find database file or SQL dump
-                    var dataDir = Path.Combine(tempExtractPath, "data");
-                    if (Directory.Exists(dataDir))
+                    
+                    // AUDIT-8 FIX: Read manifest from extracted backup
+                    var extractedManifestPath = Path.Combine(tempExtractPath, "manifest.json");
+                    if (File.Exists(extractedManifestPath))
                     {
-                        // Check for PostgreSQL SQL dump first
-                        var sqlDumpPath = Path.Combine(dataDir, "db_dump.sql");
-                        if (File.Exists(sqlDumpPath))
+                        var manifestJson = await File.ReadAllTextAsync(extractedManifestPath);
+                        var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(manifestJson);
+                        if (manifest != null && manifest.TenantId.HasValue && manifest.TenantId.Value != tenantId)
                         {
-                            // PostgreSQL restore from SQL dump
-                            Console.WriteLine("📥 Restoring PostgreSQL database from SQL dump...");
-                            await RestorePostgreSQLDatabaseAsync(sqlDumpPath);
+                            throw new UnauthorizedAccessException($"Backup belongs to tenant {manifest.TenantId.Value}, but restore requested for tenant {tenantId}.");
                         }
-                        else
+                    }
+
+                    // AUDIT-8 FIX: Wrap restore in transaction
+                    using var transaction = await _context.Database.BeginTransactionAsync();
+                    try
+                    {
+                        // Find database file or SQL dump
+                        var dataDir = Path.Combine(tempExtractPath, "data");
+                        if (Directory.Exists(dataDir))
                         {
-                            // SQLite restore from .db file
-                            var dbFiles = Directory.GetFiles(dataDir, "*.db");
-                            var dbFile = dbFiles.FirstOrDefault();
-                            if (dbFile != null)
+                            // Check for PostgreSQL SQL dump first
+                            var sqlDumpPath = Path.Combine(dataDir, "db_dump.sql");
+                            if (File.Exists(sqlDumpPath))
                             {
-                                // CRITICAL: Dispose current DB connection before replacing database file
-                                Console.WriteLine("🔄 Closing database connections...");
-                                await _context.Database.CloseConnectionAsync();
-                                
-                                // Restore database
-                                Console.WriteLine("📥 Restoring SQLite database file...");
-                                await RestoreDatabaseAsync(dbFile);
-                                
-                                // CRITICAL: Recreate context to use the new database file
-                                Console.WriteLine("🔄 Reinitializing database context...");
-                                await _context.Database.EnsureCreatedAsync();
+                                // PostgreSQL restore from SQL dump
+                                Console.WriteLine("📥 Restoring PostgreSQL database from SQL dump...");
+                                await RestorePostgreSQLDatabaseAsync(sqlDumpPath, tenantId);
                             }
                             else
                             {
-                                Console.WriteLine("⚠️ No database file (.db) or SQL dump (db_dump.sql) found in backup");
+                                // SQLite restore from .db file
+                                var dbFiles = Directory.GetFiles(dataDir, "*.db");
+                                var dbFile = dbFiles.FirstOrDefault();
+                                if (dbFile != null)
+                                {
+                                    // CRITICAL: Dispose current DB connection before replacing database file
+                                    Console.WriteLine("🔄 Closing database connections...");
+                                    await _context.Database.CloseConnectionAsync();
+                                    
+                                    // Restore database
+                                    Console.WriteLine("📥 Restoring SQLite database file...");
+                                    await RestoreDatabaseAsync(dbFile);
+                                    
+                                    // CRITICAL: Recreate context to use the new database file
+                                    Console.WriteLine("🔄 Reinitializing database context...");
+                                    await _context.Database.EnsureCreatedAsync();
+                                }
+                                else
+                                {
+                                    Console.WriteLine("⚠️ No database file (.db) or SQL dump (db_dump.sql) found in backup");
+                                }
                             }
                         }
-                    }
 
-                    // Restore storage files
-                    var storageSource = Path.Combine(tempExtractPath, "storage");
-                    if (Directory.Exists(storageSource))
-                    {
-                        Console.WriteLine("📁 Restoring storage files...");
-                        var storageDest = Path.Combine(Directory.GetCurrentDirectory(), "storage");
-                        if (!Directory.Exists(storageDest))
+                        // Restore storage files
+                        var storageSource = Path.Combine(tempExtractPath, "storage");
+                        if (Directory.Exists(storageSource))
                         {
-                            Directory.CreateDirectory(storageDest);
+                            Console.WriteLine("📁 Restoring storage files...");
+                            var storageDest = Path.Combine(Directory.GetCurrentDirectory(), "storage");
+                            if (!Directory.Exists(storageDest))
+                            {
+                                Directory.CreateDirectory(storageDest);
+                            }
+
+                            await CopyDirectoryAsync(storageSource, storageDest);
                         }
 
-                        await CopyDirectoryAsync(storageSource, storageDest);
-                    }
+                        // Restore settings
+                        var settingsFile = Path.Combine(tempExtractPath, "settings.json");
+                        if (File.Exists(settingsFile))
+                        {
+                            Console.WriteLine("⚙️  Restoring settings...");
+                            await RestoreSettingsAsync(settingsFile, tenantId);
+                        }
 
-                    // Restore settings
-                    var settingsFile = Path.Combine(tempExtractPath, "settings.json");
-                    if (File.Exists(settingsFile))
+                        // AUDIT-8 FIX: Recalculate customer balances after restore
+                        Console.WriteLine("🔄 Recalculating customer balances...");
+                        var customerService = _serviceProvider.GetRequiredService<HexaBill.Api.Modules.Customers.ICustomerService>();
+                        await customerService.RecalculateAllCustomerBalancesAsync(tenantId);
+
+                        await transaction.CommitAsync();
+                        await LogBackupActionAsync("Backup Restored", backupFilePath);
+                        Console.WriteLine($"✅ Backup restored successfully from {backupFilePath}");
+                        return true;
+                    }
+                    catch
                     {
-                        Console.WriteLine("⚙️  Restoring settings...");
-                        await RestoreSettingsAsync(settingsFile);
+                        await transaction.RollbackAsync();
+                        throw;
                     }
-
-                    await LogBackupActionAsync("Backup Restored", backupFilePath);
-                    Console.WriteLine($"✅ Backup restored successfully from {backupFilePath}");
-                    return true;
                 }
                 finally
                 {
@@ -1234,7 +1381,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             return Task.CompletedTask;
         }
 
-        private async Task RestorePostgreSQLDatabaseAsync(string sqlDumpPath)
+        private async Task RestorePostgreSQLDatabaseAsync(string sqlDumpPath, int tenantId)
         {
             try
             {
@@ -1297,18 +1444,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 {
                     // Fallback: Parse SQL dump and execute via EF Core
                     Console.WriteLine("⚠️ psql not found, using EF Core restore (slower but works)");
-                    await RestorePostgreSQLViaEfCoreAsync(sqlDumpPath);
+                    await RestorePostgreSQLViaEfCoreAsync(sqlDumpPath, tenantId);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ PostgreSQL restore failed: {ex.Message}");
-                // Try fallback
-                try
-                {
-                    Console.WriteLine("🔄 Trying EF Core fallback restore...");
-                    await RestorePostgreSQLViaEfCoreAsync(sqlDumpPath);
-                }
+                    // Try fallback
+                    try
+                    {
+                        Console.WriteLine("🔄 Trying EF Core fallback restore...");
+                        await RestorePostgreSQLViaEfCoreAsync(sqlDumpPath, tenantId);
+                    }
                 catch (Exception fallbackEx)
                 {
                     throw new Exception($"PostgreSQL restore failed: {ex.Message}. Fallback also failed: {fallbackEx.Message}", ex);
@@ -1372,8 +1519,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
             return null;
         }
 
-        private async Task RestorePostgreSQLViaEfCoreAsync(string sqlDumpPath)
+        private async Task RestorePostgreSQLViaEfCoreAsync(string sqlDumpPath, int tenantId)
         {
+            // AUDIT-8 FIX: Pass tenantId to filter restore data
             // Read SQL dump and parse DATA lines
             var sqlContent = await File.ReadAllTextAsync(sqlDumpPath);
             var lines = sqlContent.Split('\n');
@@ -1387,14 +1535,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     {
                         var tableName = parts[0];
                         var jsonData = parts[1];
-                        await UpsertTableDataAsync(tableName, jsonData);
+                        await UpsertTableDataAsync(tableName, jsonData, tenantId);
                     }
                 }
             }
         }
 
-        private async Task UpsertTableDataAsync(string tableName, string jsonData)
+        private async Task UpsertTableDataAsync(string tableName, string jsonData, int tenantId)
         {
+            // AUDIT-8 FIX: Filter upserts by tenantId to prevent cross-tenant data corruption
             try
             {
                 switch (tableName)
@@ -1405,7 +1554,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in products)
                             {
-                                var existing = await _context.Products.FindAsync(item.Id);
+                                // AUDIT-8 FIX: Only upsert if TenantId matches
+                                if (item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping Product {item.Id} - TenantId mismatch (backup: {item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Products
+                                    .FirstOrDefaultAsync(p => p.Id == item.Id && p.TenantId == tenantId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1424,7 +1581,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in customers)
                             {
-                                var existing = await _context.Customers.FindAsync(item.Id);
+                                // AUDIT-8 FIX: Only upsert if TenantId matches
+                                if (item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping Customer {item.Id} - TenantId mismatch (backup: {item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Customers
+                                    .FirstOrDefaultAsync(c => c.Id == item.Id && c.TenantId == tenantId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1443,7 +1608,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in sales)
                             {
-                                var existing = await _context.Sales.FindAsync(item.Id);
+                                // AUDIT-8 FIX: Only upsert if TenantId matches
+                                if (item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping Sale {item.Id} - TenantId mismatch (backup: {item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Sales
+                                    .FirstOrDefaultAsync(s => s.Id == item.Id && s.TenantId == tenantId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1463,7 +1636,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in saleItems)
                             {
-                                var existing = await _context.SaleItems.FindAsync(item.Id);
+                                // AUDIT-8 FIX: SaleItems don't have TenantId directly, check through Sale
+                                var sale = await _context.Sales
+                                    .FirstOrDefaultAsync(s => s.Id == item.SaleId && s.TenantId == tenantId);
+                                if (sale == null)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping SaleItem {item.Id} - Sale {item.SaleId} doesn't belong to tenant {tenantId}");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.SaleItems
+                                    .FirstOrDefaultAsync(si => si.Id == item.Id && si.SaleId == item.SaleId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1482,7 +1665,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in payments)
                             {
-                                var existing = await _context.Payments.FindAsync(item.Id);
+                                // AUDIT-8 FIX: Only upsert if TenantId matches
+                                if (item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping Payment {item.Id} - TenantId mismatch (backup: {item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Payments
+                                    .FirstOrDefaultAsync(p => p.Id == item.Id && p.TenantId == tenantId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1501,7 +1692,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in expenses)
                             {
-                                var existing = await _context.Expenses.FindAsync(item.Id);
+                                // AUDIT-8 FIX: Only upsert if TenantId matches
+                                if (item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping Expense {item.Id} - TenantId mismatch (backup: {item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Expenses
+                                    .FirstOrDefaultAsync(e => e.Id == item.Id && e.TenantId == tenantId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1520,7 +1719,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in users)
                             {
-                                var existing = await _context.Users.FindAsync(item.Id);
+                                // AUDIT-8 FIX: Only upsert if TenantId matches
+                                if (item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping User {item.Id} - TenantId mismatch (backup: {item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Users
+                                    .FirstOrDefaultAsync(u => u.Id == item.Id && u.TenantId == tenantId);
                                 if (existing != null)
                                 {
                                     _context.Entry(existing).CurrentValues.SetValues(item);
@@ -1539,7 +1746,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             foreach (var item in settings)
                             {
-                                var existing = await _context.Settings.FindAsync(item.Key);
+                                // AUDIT-8 FIX: Settings use OwnerId or TenantId, validate both
+                                if (item.OwnerId != tenantId && item.TenantId != tenantId)
+                                {
+                                    Console.WriteLine($"⚠️ Skipping Setting {item.Key} - OwnerId/TenantId mismatch (backup: OwnerId={item.OwnerId}, TenantId={item.TenantId}, restore: {tenantId})");
+                                    continue;
+                                }
+                                
+                                var existing = await _context.Settings
+                                    .FirstOrDefaultAsync(s => s.Key == item.Key && (s.OwnerId == tenantId || s.TenantId == tenantId));
                                 if (existing != null)
                                 {
                                     existing.Value = item.Value;
@@ -1547,6 +1762,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
                                 }
                                 else
                                 {
+                                    // Ensure OwnerId/TenantId is set correctly
+                                    item.OwnerId = tenantId;
+                                    item.TenantId = tenantId;
                                     _context.Settings.Add(item);
                                 }
                             }
@@ -1563,8 +1781,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
-        private async Task RestoreSettingsAsync(string settingsFilePath)
+        private async Task RestoreSettingsAsync(string settingsFilePath, int tenantId)
         {
+            // AUDIT-8 FIX: Restore only tenant-specific settings
             var jsonContent = await File.ReadAllTextAsync(settingsFilePath);
             var settings = System.Text.Json.JsonSerializer.Deserialize<List<SettingEntry>>(jsonContent);
 
@@ -1572,7 +1791,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
             {
                 foreach (var setting in settings)
                 {
-                    var existing = await _context.Settings.FindAsync(setting.Key);
+                    // Only restore settings that belong to this tenant (OwnerId == tenantId)
+                    var existing = await _context.Settings
+                        .FirstOrDefaultAsync(s => s.Key == setting.Key && s.OwnerId == tenantId);
                     if (existing != null)
                     {
                         existing.Value = setting.Value;
@@ -1584,7 +1805,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         {
                             Key = setting.Key,
                             Value = setting.Value,
-                            UpdatedAt = DateTime.UtcNow
+                            OwnerId = tenantId,
+                            TenantId = tenantId,
+                            UpdatedAt = DateTime.UtcNow,
+                            CreatedAt = DateTime.UtcNow
                         });
                     }
                 }
@@ -1886,7 +2110,24 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 if (autoBackup)
                 {
                     Console.WriteLine($"🔄 Starting scheduled backup at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                    await CreateFullBackupAsync(exportDesktop, uploadDrive, sendEmail);
+                    // AUDIT-8 FIX: Backup all active tenants (system-wide scheduled backup)
+                    var activeTenantIds = await _context.Tenants
+                        .Where(t => t.Status == TenantStatus.Active || t.Status == TenantStatus.Trial)
+                        .Select(t => t.Id)
+                        .ToListAsync();
+                    
+                    foreach (var tenantId in activeTenantIds)
+                    {
+                        try
+                        {
+                            await CreateFullBackupAsync(tenantId, exportDesktop, uploadDrive, sendEmail);
+                            Console.WriteLine($"✅ Scheduled backup completed for tenant {tenantId} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"❌ Failed to backup tenant {tenantId}: {ex.Message}");
+                        }
+                    }
                     Console.WriteLine($"✅ Scheduled backup completed at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                 }
                 else

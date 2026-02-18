@@ -35,16 +35,17 @@ namespace HexaBill.Api.Modules.Auth
             try
             {
                 var email = request?.Email?.Trim().ToLowerInvariant() ?? "";
-                if (_lockout.IsLockedOut(email))
+                // BUG #2.7 FIX: Use async lockout check (persistent in PostgreSQL)
+                if (await _lockout.IsLockedOutAsync(email))
                     return StatusCode(429, new ApiResponse<LoginResponse> { Success = false, Message = "Too many failed attempts. Try again in 15 minutes." });
 
                 var result = await _authService.LoginAsync(request);
                 if (result == null)
                 {
-                    _lockout.RecordFailedAttempt(email);
+                    await _lockout.RecordFailedAttemptAsync(email);
                     return BadRequest(new ApiResponse<LoginResponse> { Success = false, Message = "Invalid email or password", Errors = new List<string>() });
                 }
-                _lockout.ClearAttempts(email);
+                await _lockout.ClearAttemptsAsync(email);
                 return Ok(new ApiResponse<LoginResponse> { Success = true, Message = "Login successful", Data = result });
             }
             catch (Exception ex)

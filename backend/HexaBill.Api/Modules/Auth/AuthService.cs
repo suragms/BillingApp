@@ -11,6 +11,7 @@ using System.Text;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using Microsoft.AspNetCore.Http;
+using Npgsql;
 
 namespace HexaBill.Api.Modules.Auth
 {
@@ -211,7 +212,16 @@ namespace HexaBill.Api.Modules.Auth
             };
 
             _context.Users.Add(user);
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx && pgEx.SqlState == "23505")
+            {
+                // BUG #8 FIX: Handle concurrent registration race condition (unique violation)
+                // Two admins creating users with same email simultaneously both pass the check, then both try to insert
+                throw new InvalidOperationException("Email already registered");
+            }
 
             // Log action in audit log if AuditLogs table exists
             try

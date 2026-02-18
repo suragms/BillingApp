@@ -1,50 +1,134 @@
+using Microsoft.EntityFrameworkCore;
+using HexaBill.Api.Data;
+using HexaBill.Api.Models;
+
 namespace HexaBill.Api.Modules.Auth;
 
 public interface ILoginLockoutService
 {
-    bool IsLockedOut(string email);
-    void RecordFailedAttempt(string email);
-    void ClearAttempts(string email);
+    Task<bool> IsLockedOutAsync(string email);
+    Task RecordFailedAttemptAsync(string email);
+    Task ClearAttemptsAsync(string email);
 }
 
+/// <summary>
+/// BUG #2.7 FIX: Persistent login lockout service - stores attempts in PostgreSQL instead of memory
+/// Survives server restarts, prevents brute force attacks across deployments
+/// </summary>
 public class LoginLockoutService : ILoginLockoutService
 {
     private const int MaxAttempts = 5;
     private static readonly TimeSpan LockoutWindow = TimeSpan.FromMinutes(15);
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<DateTime>> _attempts = new();
+    private readonly AppDbContext _context;
 
-    public bool IsLockedOut(string email)
+    public LoginLockoutService(AppDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<bool> IsLockedOutAsync(string email)
     {
         var key = (email ?? "").Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(key)) return false;
-        Prune(key);
-        return _attempts.TryGetValue(key, out var list) && list.Count >= MaxAttempts;
-    }
 
-    public void RecordFailedAttempt(string email)
-    {
-        var key = (email ?? "").Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(key)) return;
-        var list = _attempts.AddOrUpdate(key, _ => new List<DateTime> { DateTime.UtcNow }, (_, existing) =>
+        // Clean up old attempts first
+        await PruneOldAttemptsAsync();
+
+        var attempt = await _context.FailedLoginAttempts
+            .FirstOrDefaultAsync(a => a.Email == key);
+
+        if (attempt == null) return false;
+
+        // Check if locked out and lockout hasn't expired
+        if (attempt.LockoutUntil.HasValue && attempt.LockoutUntil.Value > DateTime.UtcNow)
         {
-            existing.Add(DateTime.UtcNow);
-            return existing;
-        });
-        Prune(key);
+            return true;
+        }
+
+        // Check if failed count exceeds max attempts within lockout window
+        if (attempt.FailedCount >= MaxAttempts && 
+            attempt.LastAttemptAt > DateTime.UtcNow - LockoutWindow)
+        {
+            // Set lockout until time if not already set
+            if (!attempt.LockoutUntil.HasValue)
+            {
+                attempt.LockoutUntil = DateTime.UtcNow.Add(LockoutWindow);
+                attempt.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+            }
+            return true;
+        }
+
+        return false;
     }
 
-    public void ClearAttempts(string email)
+    public async Task RecordFailedAttemptAsync(string email)
     {
         var key = (email ?? "").Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(key)) return;
-        _attempts.TryRemove(key, out _);
+
+        await PruneOldAttemptsAsync();
+
+        var attempt = await _context.FailedLoginAttempts
+            .FirstOrDefaultAsync(a => a.Email == key);
+
+        if (attempt == null)
+        {
+            // Create new failed attempt record
+            attempt = new FailedLoginAttempt
+            {
+                Email = key,
+                FailedCount = 1,
+                LastAttemptAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.FailedLoginAttempts.Add(attempt);
+        }
+        else
+        {
+            // Increment failed count
+            attempt.FailedCount++;
+            attempt.LastAttemptAt = DateTime.UtcNow;
+            attempt.UpdatedAt = DateTime.UtcNow;
+
+            // Set lockout if max attempts reached
+            if (attempt.FailedCount >= MaxAttempts)
+            {
+                attempt.LockoutUntil = DateTime.UtcNow.Add(LockoutWindow);
+            }
+        }
+
+        await _context.SaveChangesAsync();
     }
 
-    private static void Prune(string key)
+    public async Task ClearAttemptsAsync(string email)
     {
-        if (!_attempts.TryGetValue(key, out var list)) return;
+        var key = (email ?? "").Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(key)) return;
+
+        var attempt = await _context.FailedLoginAttempts
+            .FirstOrDefaultAsync(a => a.Email == key);
+
+        if (attempt != null)
+        {
+            _context.FailedLoginAttempts.Remove(attempt);
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    private async Task PruneOldAttemptsAsync()
+    {
+        // Remove attempts older than lockout window that are not locked out
         var cutoff = DateTime.UtcNow - LockoutWindow;
-        list.RemoveAll(d => d < cutoff);
-        if (list.Count == 0) _attempts.TryRemove(key, out _);
+        var oldAttempts = await _context.FailedLoginAttempts
+            .Where(a => a.LastAttemptAt < cutoff && 
+                       (!a.LockoutUntil.HasValue || a.LockoutUntil.Value < DateTime.UtcNow))
+            .ToListAsync();
+
+        if (oldAttempts.Any())
+        {
+            _context.FailedLoginAttempts.RemoveRange(oldAttempts);
+            await _context.SaveChangesAsync();
+        }
     }
 }

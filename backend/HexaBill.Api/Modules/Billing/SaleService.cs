@@ -32,7 +32,7 @@ namespace HexaBill.Api.Modules.Billing
         Task<bool> UnlockInvoiceAsync(int saleId, int userId, string unlockReason, int tenantId);
         Task<List<InvoiceVersion>> GetInvoiceVersionsAsync(int saleId, int tenantId);
         Task<SaleDto?> RestoreInvoiceVersionAsync(int saleId, int versionNumber, int userId, int tenantId);
-        Task<bool> LockOldInvoicesAsync(int tenantId); // Background job to lock invoices after 48 hours
+        Task<bool> LockOldInvoicesAsync(int tenantId); // Background job to lock invoices after 8 hours
         Task<List<SaleDto>> GetDeletedSalesAsync(int tenantId); // Get all deleted sales for audit trail
         Task<ReconciliationResult> ReconcileAllPaymentStatusAsync(int tenantId, int userId); // CRITICAL: Sync all Sale.PaymentStatus with actual payments
         Task<bool> ReconcileSalePaymentStatusAsync(int saleId, int tenantId); // Reconcile single sale payment status
@@ -402,6 +402,30 @@ namespace HexaBill.Api.Modules.Billing
                     }
                 }
 
+                // PROD-12: Validate Route belongs to tenant and Branch if RouteId provided
+                if (request.RouteId.HasValue)
+                {
+                    var route = await _context.Routes.FirstOrDefaultAsync(r => r.Id == request.RouteId.Value && r.TenantId == tenantId);
+                    if (route == null)
+                        throw new InvalidOperationException($"Route with ID {request.RouteId.Value} not found or does not belong to your tenant.");
+                    
+                    // PROD-12: Validate Route.BranchId matches Sale.BranchId if BranchId provided
+                    if (request.BranchId.HasValue && route.BranchId != request.BranchId.Value)
+                    {
+                        throw new InvalidOperationException(
+                            $"Sale belongs to Branch {request.BranchId.Value}, but Route {request.RouteId.Value} belongs to Branch {route.BranchId}. " +
+                            "Sale and Route must belong to the same Branch.");
+                    }
+                    
+                    // PROD-12: Validate Customer.RouteId matches Sale.RouteId if Customer has RouteId
+                    if (customer != null && customer.RouteId.HasValue && customer.RouteId.Value != request.RouteId.Value)
+                    {
+                        throw new InvalidOperationException(
+                            $"Customer {customer.Id} belongs to Route {customer.RouteId.Value}, but Sale is being assigned to Route {request.RouteId.Value}. " +
+                            "Customer and Sale must belong to the same Route.");
+                    }
+                }
+
                 // RISK-4 FIX: Staff route lock — validate Staff can only assign invoices to their assigned routes
                 var creatingUser = await _context.Users.AsNoTracking()
                     .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId);
@@ -513,11 +537,25 @@ namespace HexaBill.Api.Modules.Billing
 
                     saleItems.Add(saleItem);
 
-                    // CRITICAL: Decrement stock only when invoice is finalized
-                    // Stock is decremented atomically in this transaction
-                    // If transaction fails/rolls back, stock is automatically restored
-                    product.StockQty -= baseQty;
-                    product.UpdatedAt = DateTime.UtcNow;
+                    // PROD-19: Atomic stock update to prevent race conditions
+                    // Use SQL UPDATE to atomically decrement stock and prevent concurrent update issues
+                    var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                        $@"UPDATE ""Products"" 
+                           SET ""StockQty"" = ""StockQty"" - {baseQty}, 
+                               ""UpdatedAt"" = {DateTime.UtcNow}
+                           WHERE ""Id"" = {product.Id} 
+                             AND ""TenantId"" = {tenantId}
+                             AND ""StockQty"" >= {baseQty}");
+                    
+                    if (rowsAffected == 0)
+                    {
+                        // Stock was insufficient or product was modified concurrently
+                        throw new InvalidOperationException(
+                            $"Insufficient stock for {product.NameEn}. Available stock may have changed. Please refresh and try again.");
+                    }
+                    
+                    // Reload product to get updated stock value and RowVersion
+                    await _context.Entry(product).ReloadAsync();
 
                     // Create inventory transaction
                     var inventoryTransaction = new InventoryTransaction
@@ -711,7 +749,9 @@ namespace HexaBill.Api.Modules.Billing
                         
                         if (clearedAmount > 0)
                         {
-                            var customerEntity = await _context.Customers.FindAsync(request.CustomerId.Value);
+                            // PROD-4: Filter by TenantId for tenant isolation
+                            var customerEntity = await _context.Customers
+                                .FirstOrDefaultAsync(c => c.Id == request.CustomerId.Value && c.TenantId == tenantId);
                             if (customerEntity != null)
                             {
                                 customerEntity.Balance -= clearedAmount;
@@ -730,7 +770,9 @@ namespace HexaBill.Api.Modules.Billing
                     // New sale increases customer balance (customer owes more)
                     if (request.CustomerId.HasValue)
                     {
-                        var customerEntity = await _context.Customers.FindAsync(request.CustomerId.Value);
+                        // AUDIT-4 FIX: Add TenantId filter to prevent cross-tenant customer balance modification
+                        var customerEntity = await _context.Customers
+                            .FirstOrDefaultAsync(c => c.Id == request.CustomerId.Value && c.TenantId == tenantId);
                         if (customerEntity != null)
                         {
                             customerEntity.Balance += grandTotal;
@@ -819,11 +861,13 @@ namespace HexaBill.Api.Modules.Billing
                         }
                         
                         // Create backup (background task, don't block)
+                        // AUDIT-8 FIX: Pass tenantId to backup
+                        var backupTenantId = tenantId; // Capture for closure
                         _ = Task.Run(async () =>
                         {
                             try
                             {
-                                await _backupService.CreateFullBackupAsync(exportToDesktop: true);
+                                await _backupService.CreateFullBackupAsync(backupTenantId, exportToDesktop: true);
                                 Console.WriteLine("✅ Auto-backup completed to Desktop");
                             }
                             catch (Exception backupEx)
@@ -882,9 +926,11 @@ namespace HexaBill.Api.Modules.Billing
 
                 foreach (var item in request.Items)
                 {
-                    var product = await _context.Products.FindAsync(item.ProductId);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var product = await _context.Products
+                        .FirstOrDefaultAsync(p => p.Id == item.ProductId && p.TenantId == tenantId);
                     if (product == null)
-                        throw new InvalidOperationException($"Product with ID {item.ProductId} not found");
+                        throw new InvalidOperationException($"Product with ID {item.ProductId} not found for your account. Please verify the product exists.");
 
                     var baseQty = item.Qty * product.ConversionToBase;
                     // Calculate line totals: Total = qty × price, VAT = Total × vatPercent%, Amount = Total + VAT
@@ -908,9 +954,20 @@ namespace HexaBill.Api.Modules.Billing
 
                     saleItems.Add(saleItem);
 
-                    // Update stock even if negative (admin override)
-                    product.StockQty -= baseQty;
-                    product.UpdatedAt = DateTime.UtcNow;
+                    // PROD-19: Atomic stock update (admin override allows negative stock)
+                    var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                        $@"UPDATE ""Products"" 
+                           SET ""StockQty"" = ""StockQty"" - {baseQty}, 
+                               ""UpdatedAt"" = {DateTime.UtcNow}
+                           WHERE ""Id"" = {product.Id} 
+                             AND ""TenantId"" = {tenantId}");
+                    
+                    if (rowsAffected == 0)
+                    {
+                        throw new InvalidOperationException($"Product {product.Id} not found or does not belong to your tenant.");
+                    }
+                    
+                    await _context.Entry(product).ReloadAsync();
 
                     var inventoryTransaction = new InventoryTransaction
                     {
@@ -1092,11 +1149,13 @@ namespace HexaBill.Api.Modules.Billing
                         }
                         
                         // Create backup (background task, don't block)
+                        // AUDIT-8 FIX: Pass tenantId to backup
+                        var backupTenantId = tenantId; // Capture for closure
                         _ = Task.Run(async () =>
                         {
                             try
                             {
-                                await _backupService.CreateFullBackupAsync(exportToDesktop: true);
+                                await _backupService.CreateFullBackupAsync(backupTenantId, exportToDesktop: true);
                                 Console.WriteLine("✅ Auto-backup completed to Desktop");
                             }
                             catch (Exception backupEx)
@@ -1147,12 +1206,13 @@ namespace HexaBill.Api.Modules.Billing
                 if (existingSale.IsDeleted)
                     throw new InvalidOperationException("Cannot edit deleted sale");
 
-                // Verify user exists and has permission (Admin OR Owner OR Staff can edit)
-                var user = await _context.Users.FindAsync(userId);
+                // PROD-4: Verify user exists and belongs to tenant
+                var user = await _context.Users
+                    .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId);
                 if (user == null)
-                    throw new InvalidOperationException("User not found");
+                    throw new InvalidOperationException("User not found or does not belong to your tenant");
                 
-                // Allow Admin, Owner, and Staff to edit invoices (no 48-hour lock)
+                // Allow Admin, Owner, and Staff to edit invoices (no 8-hour lock)
                 if (user.Role != UserRole.Admin && user.Role != UserRole.Owner && user.Role != UserRole.Staff)
                 {
                     throw new InvalidOperationException("Only Admin, Owner, and Staff users can edit invoices");
@@ -1161,9 +1221,11 @@ namespace HexaBill.Api.Modules.Billing
                 // CONCURRENCY CHECK: Verify version hasn't changed (another user edited it)
                 if (expectedRowVersion != null && expectedRowVersion.Length > 0)
                 {
-                    var currentSale = await _context.Sales.FindAsync(saleId);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var currentSale = await _context.Sales
+                        .FirstOrDefaultAsync(s => s.Id == saleId && s.TenantId == tenantId);
                     if (currentSale == null)
-                        throw new InvalidOperationException("Sale not found");
+                        throw new InvalidOperationException("Sale not found or does not belong to your tenant");
 
                     // Compare RowVersion bytes to detect concurrent modification
                     if (currentSale.RowVersion != null && currentSale.RowVersion.Length > 0)
@@ -1188,7 +1250,9 @@ namespace HexaBill.Api.Modules.Billing
 
                 if (recentlyModified)
                 {
-                    var modifier = await _context.Users.FindAsync(existingSale.LastModifiedBy);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var modifier = await _context.Users
+                        .FirstOrDefaultAsync(u => u.Id == existingSale.LastModifiedBy && u.TenantId == tenantId);
                     throw new InvalidOperationException(
                         $"WARNING: Another user ({modifier?.Name ?? "Unknown"}) is currently editing this invoice. " +
                         $"Please wait a few seconds and refresh before saving."
@@ -1196,10 +1260,14 @@ namespace HexaBill.Api.Modules.Billing
                 }
 
                 // Now load with tracking for updates
+                // PROD-4: Filter by TenantId for tenant isolation
                 var saleForUpdate = await _context.Sales
                     .Include(s => s.Items)
                     .ThenInclude(i => i.Product)
-                    .FirstOrDefaultAsync(s => s.Id == saleId);
+                    .FirstOrDefaultAsync(s => s.Id == saleId && s.TenantId == tenantId);
+                
+                if (saleForUpdate == null)
+                    throw new InvalidOperationException("Sale not found or does not belong to your tenant");
 
                 if (saleForUpdate == null)
                     throw new InvalidOperationException("Sale not found");
@@ -1254,10 +1322,12 @@ namespace HexaBill.Api.Modules.Billing
                 var stockConflicts = new List<string>();
                 foreach (var item in request.Items)
                 {
-                    var product = await _context.Products.FindAsync(item.ProductId);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var product = await _context.Products
+                        .FirstOrDefaultAsync(p => p.Id == item.ProductId && p.TenantId == tenantId);
                     if (product == null)
                     {
-                        stockConflicts.Add($"Product ID {item.ProductId} not found");
+                        stockConflicts.Add($"Product ID {item.ProductId} not found for your account");
                         continue;
                     }
 
@@ -1293,13 +1363,24 @@ namespace HexaBill.Api.Modules.Billing
                     {
                         if (oldItem != null)
                         {
-                            var product = await _context.Products.FindAsync(oldItem.ProductId);
+                            // PROD-4: Filter by TenantId for tenant isolation
+                            var product = await _context.Products
+                                .FirstOrDefaultAsync(p => p.Id == oldItem.ProductId && p.TenantId == tenantId);
                             if (product != null)
                             {
-                                // Restore stock
+                                // PROD-19: Atomic stock restore
                                 var oldBaseQty = oldItem.Qty * product.ConversionToBase;
-                                product.StockQty += oldBaseQty;
-                                product.UpdatedAt = DateTime.UtcNow;
+                                var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                                    $@"UPDATE ""Products"" 
+                                       SET ""StockQty"" = ""StockQty"" + {oldBaseQty}, 
+                                           ""UpdatedAt"" = {DateTime.UtcNow}
+                                       WHERE ""Id"" = {product.Id} 
+                                         AND ""TenantId"" = {tenantId}");
+                                
+                                if (rowsAffected > 0)
+                                {
+                                    await _context.Entry(product).ReloadAsync();
+                                }
                             }
                         }
                     }
@@ -1387,11 +1468,24 @@ namespace HexaBill.Api.Modules.Billing
                     };
                     newSaleItems.Add(saleItem);
 
-                    // CRITICAL: Update stock for edited invoice
-                    // Old stock was already restored above (line 898-900)
+                    // PROD-19: Atomic stock update for edited invoice
+                    // Old stock was already restored above
                     // Now decrement stock for new quantities (delta calculation)
-                    product.StockQty -= baseQty;
-                    product.UpdatedAt = DateTime.UtcNow;
+                    var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                        $@"UPDATE ""Products"" 
+                           SET ""StockQty"" = ""StockQty"" - {baseQty}, 
+                               ""UpdatedAt"" = {DateTime.UtcNow}
+                           WHERE ""Id"" = {product.Id} 
+                             AND ""TenantId"" = {tenantId}
+                             AND ""StockQty"" >= {baseQty}");
+                    
+                    if (rowsAffected == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Insufficient stock for {product.NameEn}. Available stock may have changed. Please refresh and try again.");
+                    }
+                    
+                    await _context.Entry(product).ReloadAsync();
 
                     // Create inventory transaction
                     inventoryTransactions.Add(new InventoryTransaction
@@ -1439,7 +1533,9 @@ namespace HexaBill.Api.Modules.Billing
                     // Update customer balance (reduce what customer owes)
                     if (saleForUpdate.CustomerId.HasValue)
                     {
-                        var customer = await _context.Customers.FindAsync(saleForUpdate.CustomerId.Value);
+                        // PROD-4: Filter by TenantId for tenant isolation
+                        var customer = await _context.Customers
+                            .FirstOrDefaultAsync(c => c.Id == saleForUpdate.CustomerId.Value && c.TenantId == tenantId);
                         if (customer != null)
                         {
                             customer.Balance -= excessAmount; // Customer owes less (credit)
@@ -1493,7 +1589,9 @@ namespace HexaBill.Api.Modules.Billing
                 // STEP 1: Reverse ALL old invoice effects (balance + payments)
                 if (oldCustomerId.HasValue)
                 {
-                    var oldCustomer = await _context.Customers.FindAsync(oldCustomerId.Value);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var oldCustomer = await _context.Customers
+                        .FirstOrDefaultAsync(c => c.Id == oldCustomerId.Value && c.TenantId == tenantId);
                     if (oldCustomer != null)
                     {
                         // Remove old invoice from old customer's balance
@@ -1511,7 +1609,9 @@ namespace HexaBill.Api.Modules.Billing
                     {
                         if (oldPayment.Status == PaymentStatus.CLEARED && oldPayment.CustomerId.HasValue)
                         {
-                            var customer = await _context.Customers.FindAsync(oldPayment.CustomerId.Value);
+                            // AUDIT-4 FIX: Add TenantId filter to prevent cross-tenant customer balance modification
+                            var customer = await _context.Customers
+                                .FirstOrDefaultAsync(c => c.Id == oldPayment.CustomerId.Value && c.TenantId == tenantId);
                             if (customer != null)
                             {
                                 // Reverse old payment: customer owes more
@@ -1660,10 +1760,12 @@ namespace HexaBill.Api.Modules.Billing
                 // STEP 4: Add new invoice to new customer's balance (if credit sale)
                 if (newCustomerId.HasValue)
                 {
-                    var newCustomer = await _context.Customers.FindAsync(newCustomerId.Value);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var newCustomer = await _context.Customers
+                        .FirstOrDefaultAsync(c => c.Id == newCustomerId.Value && c.TenantId == tenantId);
                     if (newCustomer == null)
                     {
-                        throw new InvalidOperationException($"Customer with ID {newCustomerId.Value} not found");
+                        throw new InvalidOperationException($"Customer with ID {newCustomerId.Value} not found or does not belong to your tenant");
                     }
                     
                     // Add new invoice outstanding to customer balance
@@ -1688,7 +1790,9 @@ namespace HexaBill.Api.Modules.Billing
                     await customerService.RecalculateCustomerBalanceAsync(request.CustomerId.Value, tenantId);
                     
                     // Update customer LastActivity
-                    var customer = await _context.Customers.FindAsync(request.CustomerId.Value);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var customer = await _context.Customers
+                        .FirstOrDefaultAsync(c => c.Id == request.CustomerId.Value && c.TenantId == tenantId);
                     if (customer != null)
                     {
                         customer.LastActivity = DateTime.UtcNow;
@@ -1794,12 +1898,24 @@ namespace HexaBill.Api.Modules.Billing
                 {
                     foreach (var item in sale.Items)
                     {
-                        var product = await _context.Products.FindAsync(item.ProductId);
+                        // PROD-4: Filter by TenantId for tenant isolation
+                        var product = await _context.Products
+                            .FirstOrDefaultAsync(p => p.Id == item.ProductId && p.TenantId == tenantId);
                         if (product != null)
                         {
                             var baseQty = item.Qty * product.ConversionToBase;
-                            product.StockQty += baseQty;
-                            product.UpdatedAt = DateTime.UtcNow;
+                            // PROD-19: Atomic stock restore
+                            var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                                $@"UPDATE ""Products"" 
+                                   SET ""StockQty"" = ""StockQty"" + {baseQty}, 
+                                       ""UpdatedAt"" = {DateTime.UtcNow}
+                                   WHERE ""Id"" = {product.Id} 
+                                     AND ""TenantId"" = {tenantId}");
+                            
+                            if (rowsAffected > 0)
+                            {
+                                await _context.Entry(product).ReloadAsync();
+                            }
 
                             // Create reversal transaction
                             _context.InventoryTransactions.Add(new InventoryTransaction
@@ -1829,7 +1945,9 @@ namespace HexaBill.Api.Modules.Billing
                         // Reverse customer balance adjustment
                         if (payment.CustomerId.HasValue)
                         {
-                            var customer = await _context.Customers.FindAsync(payment.CustomerId.Value);
+                            // PROD-4: Filter by TenantId for tenant isolation
+                            var customer = await _context.Customers
+                                .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
                             if (customer != null)
                             {
                                 customer.Balance += payment.Amount; // Reverse: customer owes more
@@ -1860,7 +1978,9 @@ namespace HexaBill.Api.Modules.Billing
                 sale.DeletedAt = DateTime.UtcNow;
 
                 // Create audit log
-                var user = await _context.Users.FindAsync(userId);
+                // PROD-4: Filter by TenantId for tenant isolation
+                var user = await _context.Users
+                    .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId);
                 var auditLog = new AuditLog
                 {
                     OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
@@ -2051,8 +2171,8 @@ namespace HexaBill.Api.Modules.Billing
 
         public async Task<bool> LockOldInvoicesAsync(int tenantId)
         {
-            // CRITICAL: Lock invoices created more than 48 hours ago for this owner only
-            var cutoffTime = DateTime.UtcNow.AddHours(-48);
+            // CRITICAL: Lock invoices created more than 8 hours ago for this owner only (Gulf trading context - disputes happen same-day)
+            var cutoffTime = DateTime.UtcNow.AddHours(-8);
             var invoicesToLock = await _context.Sales
                 .Where(s => s.TenantId == tenantId && !s.IsLocked && !s.IsDeleted && s.CreatedAt < cutoffTime)
                 .ToListAsync();
@@ -2129,12 +2249,13 @@ namespace HexaBill.Api.Modules.Billing
                     throw new InvalidOperationException("Failed to deserialize version data");
                 
                 // Get current sale
+                // AUDIT-4 FIX: Add TenantId filter to prevent cross-tenant sale access
                 var currentSale = await _context.Sales
                     .Include(s => s.Items)
-                    .FirstOrDefaultAsync(s => s.Id == saleId);
+                    .FirstOrDefaultAsync(s => s.Id == saleId && s.TenantId == tenantId);
                 
                 if (currentSale == null)
-                    throw new InvalidOperationException("Sale not found");
+                    throw new InvalidOperationException("Sale not found or does not belong to your tenant");
                 
                 // Create version snapshot of current state before restore
                 var currentSnapshot = new
@@ -2171,12 +2292,24 @@ namespace HexaBill.Api.Modules.Billing
                 // Restore old items - reverse current stock changes first
                 foreach (var item in currentSale.Items)
                 {
-                    var product = await _context.Products.FindAsync(item.ProductId);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var product = await _context.Products
+                        .FirstOrDefaultAsync(p => p.Id == item.ProductId && p.TenantId == tenantId);
                     if (product != null)
                     {
                         var baseQty = item.Qty * product.ConversionToBase;
-                        product.StockQty += baseQty; // Restore stock
-                        product.UpdatedAt = DateTime.UtcNow;
+                        // PROD-19: Atomic stock restore
+                        var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $@"UPDATE ""Products"" 
+                               SET ""StockQty"" = ""StockQty"" + {baseQty}, 
+                                   ""UpdatedAt"" = {DateTime.UtcNow}
+                               WHERE ""Id"" = {product.Id} 
+                                 AND ""TenantId"" = {tenantId}");
+                        
+                        if (rowsAffected > 0)
+                        {
+                            await _context.Entry(product).ReloadAsync();
+                        }
                     }
                 }
                 

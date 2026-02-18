@@ -323,11 +323,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
         // Comprehensive Backup Endpoints
         [HttpPost("backup/full")]
-        public async Task<ActionResult<ApiResponse<string>>> CreateFullBackup([FromQuery] bool exportToDesktop = false)
+        public async Task<ActionResult<ApiResponse<string>>> CreateFullBackup([FromQuery] bool exportToDesktop = false, [FromQuery] int? tenantId = null)
         {
             try
             {
-                var fileName = await _comprehensiveBackupService.CreateFullBackupAsync(exportToDesktop);
+                // AUDIT-8 FIX: Use tenantId from query or CurrentTenantId
+                var targetTenantId = tenantId ?? CurrentTenantId;
+                var fileName = await _comprehensiveBackupService.CreateFullBackupAsync(targetTenantId, exportToDesktop);
                 return Ok(new ApiResponse<string>
                 {
                     Success = true,
@@ -392,7 +394,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
         {
             try
             {
-                var success = await _comprehensiveBackupService.RestoreFromBackupAsync(request.FileName);
+                // AUDIT-8 FIX: Restore requires tenantId and backupFilePath
+                var tenantId = request.TenantId ?? CurrentTenantId;
+                var success = await _comprehensiveBackupService.RestoreFromBackupAsync(tenantId, request.FileName ?? "", request.UploadedFilePath);
                 if (success)
                 {
                     return Ok(new ApiResponse<object>
@@ -454,7 +458,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 try
                 {
-                    var success = await _comprehensiveBackupService.RestoreFromBackupAsync("", tempPath);
+                    // AUDIT-8 FIX: Restore requires tenantId
+                    var tenantId = CurrentTenantId; // For upload restore, use current tenant
+                    var success = await _comprehensiveBackupService.RestoreFromBackupAsync(tenantId, "", tempPath);
                     if (success)
                     {
                         return Ok(new ApiResponse<object>
@@ -535,8 +541,11 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 
                 if (!System.IO.File.Exists(backupPath))
                 {
-                    // Check desktop location
-                    var desktopPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "HexaBill_Backups", fileName);
+                    // Check desktop/tmp location (BUG #13 FIX: Use /tmp on Linux)
+                    var basePath = Environment.OSVersion.Platform == PlatformID.Unix || Environment.OSVersion.Platform == PlatformID.MacOSX
+                        ? "/tmp"
+                        : Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                    var desktopPath = Path.Combine(basePath, "HexaBill_Backups", fileName);
                     if (System.IO.File.Exists(desktopPath))
                     {
                         backupPath = desktopPath;
@@ -1243,6 +1252,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
     public class RestoreRequest
     {
         public string FileName { get; set; } = string.Empty;
+        public string? UploadedFilePath { get; set; }
+        public int? TenantId { get; set; }
     }
 }
 

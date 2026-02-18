@@ -213,8 +213,19 @@ const SuperAdminTenantsPage = () => {
         toast.error(detail || 'Failed to delete company')
       }
     } catch (error) {
-      const msg = error?.response?.data?.errors?.[0] || error?.response?.data?.message || error?.message
-      if (!error?._handledByInterceptor) toast.error(msg || 'Failed to delete company')
+      // BUG #2.2 FIX: Enhanced error handling - show detailed error messages from backend
+      const errorMsg = error?.response?.data?.errors?.[0] || 
+                      error?.response?.data?.message || 
+                      error?.message || 
+                      'Failed to delete company. Please check the console for details.'
+      if (!error?._handledByInterceptor) {
+        toast.error(errorMsg, { duration: 6000 }) // Show for 6 seconds for important errors
+      }
+      console.error('Delete tenant error:', {
+        error,
+        response: error?.response?.data,
+        status: error?.response?.status
+      })
     } finally {
       setDeleteLoading(false)
     }

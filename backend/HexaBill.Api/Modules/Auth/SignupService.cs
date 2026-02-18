@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using HexaBill.Api.Modules.Subscription;
+using Npgsql;
 
 namespace HexaBill.Api.Modules.Auth
 {
@@ -96,7 +97,16 @@ namespace HexaBill.Api.Modules.Auth
                 };
 
                 _context.Tenants.Add(tenant);
-                await _context.SaveChangesAsync();
+                try
+                {
+                    await _context.SaveChangesAsync();
+                }
+                catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx && pgEx.SqlState == "23505")
+                {
+                    // BUG #8 FIX: Handle concurrent signup race condition (unique violation on tenant name/email)
+                    await transaction.RollbackAsync();
+                    throw new InvalidOperationException("Company name or email already registered. Please try logging in instead.");
+                }
 
                 // Step 2: Create Owner User
                 var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
@@ -112,7 +122,17 @@ namespace HexaBill.Api.Modules.Auth
                 };
 
                 _context.Users.Add(ownerUser);
-                await _context.SaveChangesAsync();
+                try
+                {
+                    await _context.SaveChangesAsync();
+                }
+                catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx && pgEx.SqlState == "23505")
+                {
+                    // BUG #8 FIX: Handle concurrent signup race condition (unique violation)
+                    // Two users registering with same email simultaneously both pass the check, then both try to insert
+                    await transaction.RollbackAsync();
+                    throw new InvalidOperationException("Email already registered. Please try logging in instead.");
+                }
 
                 // Step 3: Get default plan (Basic plan - ID 1, or create if doesn't exist)
                 var defaultPlan = await _context.SubscriptionPlans

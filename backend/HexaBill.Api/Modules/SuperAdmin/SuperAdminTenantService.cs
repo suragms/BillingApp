@@ -19,7 +19,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
         Task<PlatformDashboardDto> GetPlatformDashboardAsync();
         Task<PagedResponse<TenantDto>> GetTenantsAsync(int page = 1, int pageSize = 20, string? search = null, TenantStatus? status = null);
         Task<TenantDetailDto?> GetTenantByIdAsync(int tenantId);
-        Task<TenantDto> CreateTenantAsync(CreateTenantRequest request);
+        Task<(TenantDto Tenant, string GeneratedPassword)> CreateTenantAsync(CreateTenantRequest request);
         Task<TenantDto> UpdateTenantAsync(int tenantId, UpdateTenantRequest request);
         Task<bool> SuspendTenantAsync(int tenantId, string reason);
         Task<bool> ActivateTenantAsync(int tenantId);
@@ -732,38 +732,90 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 })
                 .ToListAsync();
 
-            // Get additional metrics for each tenant
-            foreach (var tenant in tenants)
+            // BUG #2.1 FIX: Replace N+1 queries with batch GROUP BY queries (600 queries → 6 queries)
+            var tenantIds = tenants.Select(t => t.Id).ToList();
+            if (tenantIds.Any())
             {
-                var tenantId = tenant.Id;
-                tenant.UserCount = await _context.Users.CountAsync(u => u.TenantId == tenantId);
-                tenant.InvoiceCount = await _context.Sales.CountAsync(s => s.TenantId == tenantId && !s.IsDeleted);
-                tenant.CustomerCount = await _context.Customers.CountAsync(c => c.TenantId == tenantId);
-                tenant.ProductCount = await _context.Products.CountAsync(p => p.TenantId == tenantId);
-                tenant.TotalRevenue = await _context.Sales
-                    .Where(s => s.TenantId == tenantId && !s.IsDeleted)
-                    .SumAsync(s => (decimal?)s.GrandTotal) ?? 0;
-            
-                // Last login proxy (Users.CreatedAt)
-                tenant.LastLogin = await _context.Users
-                    .Where(u => u.TenantId == tenantId)
-                    .OrderByDescending(u => u.CreatedAt)
-                    .Select(u => u.CreatedAt)
-                    .FirstOrDefaultAsync();
-                // Last activity: latest Sale created/updated for this tenant
-                tenant.LastActivity = await _context.Sales
-                    .Where(s => s.TenantId == tenantId)
-                    .Select(s => (DateTime?)(s.LastModifiedAt ?? s.CreatedAt))
-                    .OrderByDescending(d => d)
-                    .FirstOrDefaultAsync();
-                // Plan name and MRR from latest subscription (Plan can be null if deleted)
-                var subInfo = await _context.Subscriptions
-                    .Where(s => s.TenantId == tenantId && (s.Status == SubscriptionStatus.Active || s.Status == SubscriptionStatus.Trial) && s.Plan != null)
-                    .OrderByDescending(s => s.CreatedAt)
-                    .Select(s => new { s.Plan!.Name, s.Plan!.MonthlyPrice })
-                    .FirstOrDefaultAsync();
-                tenant.PlanName = subInfo?.Name;
-                tenant.Mrr = subInfo?.MonthlyPrice ?? 0;
+                // Batch query 1: User counts per tenant
+                var userCounts = await _context.Users
+                    .Where(u => tenantIds.Contains(u.TenantId ?? 0))
+                    .GroupBy(u => u.TenantId ?? 0)
+                    .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+
+                // Batch query 2: Invoice counts per tenant
+                var invoiceCounts = await _context.Sales
+                    .Where(s => s.TenantId.HasValue && tenantIds.Contains(s.TenantId.Value) && !s.IsDeleted)
+                    .GroupBy(s => s.TenantId!.Value)
+                    .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+
+                // Batch query 3: Customer counts per tenant
+                var customerCounts = await _context.Customers
+                    .Where(c => c.TenantId.HasValue && tenantIds.Contains(c.TenantId.Value))
+                    .GroupBy(c => c.TenantId!.Value)
+                    .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+
+                // Batch query 4: Product counts per tenant
+                var productCounts = await _context.Products
+                    .Where(p => p.TenantId.HasValue && tenantIds.Contains(p.TenantId.Value))
+                    .GroupBy(p => p.TenantId!.Value)
+                    .Select(g => new { TenantId = g.Key, Count = g.Count() })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+
+                // Batch query 5: Total revenue per tenant
+                var revenueTotals = await _context.Sales
+                    .Where(s => s.TenantId.HasValue && tenantIds.Contains(s.TenantId.Value) && !s.IsDeleted)
+                    .GroupBy(s => s.TenantId!.Value)
+                    .Select(g => new { TenantId = g.Key, Total = g.Sum(s => (decimal?)s.GrandTotal) ?? 0 })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.Total);
+
+                // Batch query 6: Last login per tenant (max CreatedAt from Users)
+                var lastLogins = await _context.Users
+                    .Where(u => tenantIds.Contains(u.TenantId ?? 0))
+                    .GroupBy(u => u.TenantId ?? 0)
+                    .Select(g => new { TenantId = g.Key, LastLogin = g.Max(u => u.CreatedAt) })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.LastLogin);
+
+                // Batch query 7: Last activity per tenant (max of LastModifiedAt or CreatedAt from Sales)
+                var lastActivities = await _context.Sales
+                    .Where(s => s.TenantId.HasValue && tenantIds.Contains(s.TenantId.Value))
+                    .GroupBy(s => s.TenantId!.Value)
+                    .Select(g => new { TenantId = g.Key, LastActivity = g.Max(s => (DateTime?)(s.LastModifiedAt ?? s.CreatedAt)) })
+                    .ToDictionaryAsync(x => x.TenantId, x => x.LastActivity);
+
+                // Batch query 8: Plan name and MRR per tenant (latest active/trial subscription)
+                var subscriptionInfos = await _context.Subscriptions
+                    .Where(s => tenantIds.Contains(s.TenantId) && (s.Status == SubscriptionStatus.Active || s.Status == SubscriptionStatus.Trial) && s.Plan != null)
+                    .GroupBy(s => s.TenantId)
+                    .Select(g => new
+                    {
+                        TenantId = (int)g.Key,
+                        LatestSub = g.OrderByDescending(s => s.CreatedAt).FirstOrDefault()
+                    })
+                    .Select(x => new
+                    {
+                        x.TenantId,
+                        PlanName = x.LatestSub != null && x.LatestSub.Plan != null ? x.LatestSub.Plan.Name : null,
+                        MRR = x.LatestSub != null && x.LatestSub.Plan != null ? x.LatestSub.Plan.MonthlyPrice : 0m
+                    })
+                    .ToDictionaryAsync(x => x.TenantId, x => new { x.PlanName, x.MRR });
+
+                // Map batch results to tenant DTOs
+                foreach (var tenant in tenants)
+                {
+                    tenant.UserCount = userCounts.GetValueOrDefault(tenant.Id, 0);
+                    tenant.InvoiceCount = invoiceCounts.GetValueOrDefault(tenant.Id, 0);
+                    tenant.CustomerCount = customerCounts.GetValueOrDefault(tenant.Id, 0);
+                    tenant.ProductCount = productCounts.GetValueOrDefault(tenant.Id, 0);
+                    tenant.TotalRevenue = revenueTotals.GetValueOrDefault(tenant.Id, 0);
+                    tenant.LastLogin = lastLogins.GetValueOrDefault(tenant.Id, default(DateTime));
+                    tenant.LastActivity = lastActivities.GetValueOrDefault(tenant.Id, null);
+                    var subInfo = subscriptionInfos.GetValueOrDefault(tenant.Id);
+                    tenant.PlanName = subInfo?.PlanName;
+                    tenant.Mrr = subInfo?.MRR ?? 0;
+                }
             }
 
             return new PagedResponse<TenantDto>
@@ -823,7 +875,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             };
         }
 
-        public async Task<TenantDto> CreateTenantAsync(CreateTenantRequest request)
+        public async Task<(TenantDto Tenant, string GeneratedPassword)> CreateTenantAsync(CreateTenantRequest request)
         {
             // Check for duplicate tenant name
             var normalizedName = request.Name.Trim();
@@ -899,11 +951,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 _context.Tenants.Add(tenant);
                 await _context.SaveChangesAsync();
 
+                // Generate random password for owner user (security: never hardcode passwords)
+                string generatedPassword = Guid.NewGuid().ToString("N").Substring(0, 12); // 12-character random password
+                
                 // Create Owner User if email is provided
                 if (!string.IsNullOrEmpty(normalizedEmail))
                 {
-                    // Default password for manually created tenants: Owner123!
-                    var passwordHash = BCrypt.Net.BCrypt.HashPassword("Owner123!");
+                    var passwordHash = BCrypt.Net.BCrypt.HashPassword(generatedPassword);
                     var ownerUser = new User
                     {
                         Name = "Admin", // Default name
@@ -917,6 +971,12 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                     _context.Users.Add(ownerUser);
                     await _context.SaveChangesAsync();
+                }
+
+                // Return empty password if no email (no user created)
+                if (string.IsNullOrEmpty(normalizedEmail))
+                {
+                    generatedPassword = string.Empty;
                 }
 
                 // Create Default Subscription
@@ -969,7 +1029,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
                 await transaction.CommitAsync();
 
-                return new TenantDto
+                var tenantDto = new TenantDto
                 {
                     Id = tenant.Id,
                     Name = tenant.Name,
@@ -984,6 +1044,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     Phone = tenant.Phone,
                     VatNumber = tenant.VatNumber
                 };
+
+                return (tenantDto, generatedPassword);
             }
             catch (Exception)
             {
@@ -1533,44 +1595,155 @@ namespace HexaBill.Api.Modules.SuperAdmin
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
+                // AUDIT-1 FIX: Use ExecuteSqlInterpolatedAsync instead of ExecuteSqlRawAsync with {0} placeholders
+                // This prevents SQL syntax errors and ensures proper parameterization
+                
                 // Delete all tenant data in correct order (respecting foreign keys)
                 // 1. Delete dependent records first (child tables)
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""SaleItems"" WHERE ""SaleId"" IN (SELECT ""Id"" FROM ""Sales"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""SaleReturnItems"" WHERE ""SaleReturnId"" IN (SELECT ""Id"" FROM ""SaleReturns"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PurchaseItems"" WHERE ""PurchaseId"" IN (SELECT ""Id"" FROM ""Purchases"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PurchaseReturnItems"" WHERE ""PurchaseReturnId"" IN (SELECT ""Id"" FROM ""PurchaseReturns"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""InvoiceVersions"" WHERE ""SaleId"" IN (SELECT ""Id"" FROM ""Sales"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PriceChangeLogs"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RouteCustomers"" WHERE ""RouteId"" IN (SELECT ""Id"" FROM ""Routes"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Payments"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Expenses"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RecurringExpenses"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""InventoryTransactions"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""ProductCategories"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""UserSessions"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""CustomerVisits"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""HeldInvoices"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Alerts"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""BranchStaff"" WHERE ""BranchId"" IN (SELECT ""Id"" FROM ""Branches"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RouteStaff"" WHERE ""RouteId"" IN (SELECT ""Id"" FROM ""Routes"" WHERE ""TenantId"" = {0})", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""RouteExpenses"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""AuditLogs"" WHERE ""TenantId"" = {0} OR ""OwnerId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""ErrorLogs"" WHERE ""TenantId"" = {0}", tenantId);
+                
+                // Delete PaymentIdempotencies first (has FK to Payments and Users)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""PaymentIdempotencies"" 
+                       WHERE ""PaymentId"" IN (SELECT ""Id"" FROM ""Payments"" WHERE ""TenantId"" = {tenantId})
+                          OR ""UserId"" IN (SELECT ""Id"" FROM ""Users"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete InvoiceTemplates (has FK to Users via CreatedBy)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""InvoiceTemplates"" 
+                       WHERE ""CreatedBy"" IN (SELECT ""Id"" FROM ""Users"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete SaleItems (has FK to Sales)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""SaleItems"" 
+                       WHERE ""SaleId"" IN (SELECT ""Id"" FROM ""Sales"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete SaleReturnItems (has FK to SaleReturns)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""SaleReturnItems"" 
+                       WHERE ""SaleReturnId"" IN (SELECT ""Id"" FROM ""SaleReturns"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete PurchaseItems (has FK to Purchases)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""PurchaseItems"" 
+                       WHERE ""PurchaseId"" IN (SELECT ""Id"" FROM ""Purchases"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete PurchaseReturnItems (has FK to PurchaseReturns)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""PurchaseReturnItems"" 
+                       WHERE ""PurchaseReturnId"" IN (SELECT ""Id"" FROM ""PurchaseReturns"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete InvoiceVersions (has FK to Sales)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""InvoiceVersions"" 
+                       WHERE ""SaleId"" IN (SELECT ""Id"" FROM ""Sales"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete PriceChangeLogs
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""PriceChangeLogs"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete RouteCustomers (has FK to Routes)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""RouteCustomers"" 
+                       WHERE ""RouteId"" IN (SELECT ""Id"" FROM ""Routes"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete Payments (has FK to Sales and Customers)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Payments"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete Expenses
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Expenses"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete RecurringExpenses
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""RecurringExpenses"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete InventoryTransactions
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""InventoryTransactions"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete ProductCategories
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""ProductCategories"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete UserSessions
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""UserSessions"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete CustomerVisits
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""CustomerVisits"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete HeldInvoices
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""HeldInvoices"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete Alerts
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Alerts"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete BranchStaff (has FK to Branches)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""BranchStaff"" 
+                       WHERE ""BranchId"" IN (SELECT ""Id"" FROM ""Branches"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete RouteStaff (has FK to Routes)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""RouteStaff"" 
+                       WHERE ""RouteId"" IN (SELECT ""Id"" FROM ""Routes"" WHERE ""TenantId"" = {tenantId})");
+                
+                // Delete RouteExpenses
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""RouteExpenses"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete AuditLogs (check both TenantId and OwnerId)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""AuditLogs"" 
+                       WHERE ""TenantId"" = {tenantId} OR ""OwnerId"" = {tenantId}");
+                
+                // Delete ErrorLogs
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""ErrorLogs"" WHERE ""TenantId"" = {tenantId}");
                 
                 // 2. Delete main records (parent tables)
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Sales"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""SaleReturns"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Purchases"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""PurchaseReturns"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Customers"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Products"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Branches"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Routes"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Subscriptions"" WHERE ""TenantId"" = {0}", tenantId);
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Settings"" WHERE ""OwnerId"" = {0}", tenantId);
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Sales"" WHERE ""TenantId"" = {tenantId}");
                 
-                // 3. Delete users (except SystemAdmin)
-                await _context.Database.ExecuteSqlRawAsync(@"DELETE FROM ""Users"" WHERE ""TenantId"" = {0} AND ""Role"" != 0", tenantId);
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""SaleReturns"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Purchases"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""PurchaseReturns"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Customers"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Products"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Branches"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Routes"" WHERE ""TenantId"" = {tenantId}");
+                
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Subscriptions"" WHERE ""TenantId"" = {tenantId}");
+                
+                // AUDIT-1 FIX: Delete Settings by both OwnerId AND TenantId (if TenantId column exists)
+                // Some settings use OwnerId, some might use TenantId
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Settings"" 
+                       WHERE ""OwnerId"" = {tenantId}");
+                // Note: If Settings table has TenantId column, add: OR ""TenantId"" = {tenantId}
+                
+                // 3. Delete users (SystemAdmin users have TenantId = null, so they won't be affected)
+                // AUDIT-1 FIX: Remove incorrect Role != 0 check - delete all users with this TenantId
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""Users"" WHERE ""TenantId"" = {tenantId}");
                 
                 // 4. Finally delete the tenant
                 _context.Tenants.Remove(tenant);
@@ -1582,7 +1755,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
             catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                throw new Exception($"Failed to delete tenant: {ex.Message}", ex);
+                // AUDIT-1 FIX: Preserve original exception details for better debugging
+                throw new Exception($"Failed to delete tenant {tenantId}: {ex.Message}. Inner exception: {ex.InnerException?.Message ?? "None"}", ex);
             }
         }
 

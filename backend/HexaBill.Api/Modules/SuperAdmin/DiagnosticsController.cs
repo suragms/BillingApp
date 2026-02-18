@@ -7,6 +7,7 @@ using HexaBill.Api.Modules.SuperAdmin;
 using HexaBill.Api.Shared.Extensions;
 using HexaBill.Api.Shared.Security;
 using HexaBill.Api.Shared.Services;
+using System.Diagnostics;
 
 namespace HexaBill.Api.Modules.SuperAdmin
 {
@@ -27,11 +28,104 @@ namespace HexaBill.Api.Modules.SuperAdmin
             _errorLogService = errorLogService;
         }
 
+        /// <summary>
+        /// PROD-1: Comprehensive health check endpoint
+        /// Checks: DB connection, memory usage, server uptime, tenant count
+        /// </summary>
         [HttpGet("health")]
         [AllowAnonymous]
-        public IActionResult Health()
+        public async Task<IActionResult> Health()
         {
-            return Ok(new { status = "healthy", timestamp = DateTime.UtcNow });
+            var health = new
+            {
+                status = "healthy",
+                timestamp = DateTime.UtcNow,
+                checks = new Dictionary<string, object>()
+            };
+
+            try
+            {
+                // Check database connection
+                var canConnect = await _db.Database.CanConnectAsync();
+                health.checks["database"] = new { connected = canConnect };
+
+                if (canConnect)
+                {
+                    // Check tenant count (basic data access test)
+                    var tenantCount = await _db.Tenants.CountAsync();
+                    health.checks["tenants"] = new { count = tenantCount };
+
+                    // Check memory usage
+                    var memoryUsed = GC.GetTotalMemory(false);
+                    var memoryMB = memoryUsed / (1024.0 * 1024.0);
+                    var memoryLimitMB = Environment.WorkingSet / (1024.0 * 1024.0);
+                    var memoryUsagePercent = (memoryMB / memoryLimitMB) * 100;
+                    health.checks["memory"] = new { 
+                        usedMB = Math.Round(memoryMB, 2),
+                        maxMB = memoryLimitMB,
+                        usagePercent = Math.Round(memoryUsagePercent, 2),
+                        status = memoryUsagePercent > 90 ? "critical" : memoryUsagePercent > 75 ? "warning" : "healthy"
+                    };
+
+                    // AUDIT-11 FIX: Add connection pool monitoring (PostgreSQL only)
+                    if (_db.Database.IsNpgsql())
+                    {
+                        try
+                        {
+                            var connectionCount = await _db.Database.SqlQueryRaw<int>(
+                                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                            ).FirstOrDefaultAsync();
+                            
+                            // Default PostgreSQL max connections (can be configured)
+                            var maxConnections = 100; // Default for Render PostgreSQL
+                            var connectionPoolUsage = (double)connectionCount / maxConnections * 100;
+                            
+                            health.checks["database"] = new { 
+                                connected = canConnect,
+                                activeConnections = connectionCount,
+                                maxConnections = maxConnections,
+                                connectionPoolUsage = Math.Round(connectionPoolUsage, 2),
+                                status = connectionPoolUsage > 90 ? "critical" : connectionPoolUsage > 75 ? "warning" : "healthy"
+                            };
+                        }
+                        catch (Exception ex)
+                        {
+                            // If query fails, just log and continue with basic connection check
+                            health.checks["database"] = new { 
+                                connected = canConnect,
+                                connectionPoolError = "Unable to query connection pool stats"
+                            };
+                        }
+                    }
+                    else
+                    {
+                        health.checks["database"] = new { connected = canConnect };
+                    }
+                }
+                else
+                {
+                    health.checks["database"] = new { connected = false };
+                }
+
+                // Server uptime (approximate)
+                var uptime = DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime();
+                health.checks["uptime"] = new { 
+                    seconds = (int)uptime.TotalSeconds,
+                    formatted = $"{uptime.Days}d {uptime.Hours}h {uptime.Minutes}m"
+                };
+
+                return Ok(health);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(503, new
+                {
+                    status = "unhealthy",
+                    timestamp = DateTime.UtcNow,
+                    error = ex.Message,
+                    checks = health.checks
+                });
+            }
         }
 
         /// <summary>Platform health for Super Admin: DB, migrations, company count. Use for monitoring / status page.</summary>

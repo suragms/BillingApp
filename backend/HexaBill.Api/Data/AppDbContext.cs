@@ -55,6 +55,8 @@ namespace HexaBill.Api.Data
         public DbSet<InvoiceTemplate> InvoiceTemplates { get; set; }
         public DbSet<Alert> Alerts { get; set; }
         public DbSet<ErrorLog> ErrorLogs { get; set; }
+        // BUG #2.7 FIX: Persistent login lockout tracking
+        public DbSet<FailedLoginAttempt> FailedLoginAttempts { get; set; }
         public DbSet<DemoRequest> DemoRequests { get; set; }
         public DbSet<Branch> Branches { get; set; }
         public DbSet<HexaBill.Api.Models.Route> Routes { get; set; }
@@ -431,6 +433,22 @@ namespace HexaBill.Api.Data
                 entity.HasIndex(e => e.CreatedAt);
                 entity.HasIndex(e => e.TenantId);
                 entity.HasIndex(e => e.ResolvedAt);
+            });
+
+            // BUG #2.7 FIX: FailedLoginAttempt configuration - persistent login lockout tracking
+            modelBuilder.Entity<FailedLoginAttempt>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Email).IsRequired().HasMaxLength(100);
+                entity.Property(e => e.FailedCount).IsRequired().HasDefaultValue(1);
+                entity.Property(e => e.LastAttemptAt).IsRequired();
+                entity.Property(e => e.CreatedAt).IsRequired();
+                // Unique index on Email for fast lookups
+                entity.HasIndex(e => e.Email).IsUnique();
+                // Index on LockoutUntil for cleanup queries
+                entity.HasIndex(e => e.LockoutUntil);
+                // Index on LastAttemptAt for pruning old attempts
+                entity.HasIndex(e => e.LastAttemptAt);
             });
 
             modelBuilder.Entity<DemoRequest>(entity =>

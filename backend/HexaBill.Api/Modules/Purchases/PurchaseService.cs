@@ -282,7 +282,21 @@ namespace HexaBill.Api.Modules.Purchases
                     purchaseItems.Add(purchaseItem);
 
                     // Calculate base quantity and update stock (reuse validated baseQty from above)
-                    product.StockQty += baseQty;
+                    // PROD-19: Atomic stock update to prevent race conditions
+                    var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                        $@"UPDATE ""Products"" 
+                           SET ""StockQty"" = ""StockQty"" + {baseQty}, 
+                               ""UpdatedAt"" = {DateTime.UtcNow}
+                           WHERE ""Id"" = {product.Id} 
+                             AND ""TenantId"" = {tenantId}");
+                    
+                    if (rowsAffected == 0)
+                    {
+                        throw new InvalidOperationException($"Product {product.Id} not found or does not belong to your tenant.");
+                    }
+                    
+                    // Reload product to get updated stock value and RowVersion
+                    await _context.Entry(product).ReloadAsync();
                     product.UpdatedAt = DateTime.UtcNow;
                     
                     // CRITICAL: Update cost price with VAT-EXCLUDED cost
@@ -394,7 +408,18 @@ namespace HexaBill.Api.Modules.Purchases
                     {
                         var conv = product.ConversionToBase > 0 ? product.ConversionToBase : 1m;
                         var oldBaseQty = oldItem.Qty * conv;
-                        product.StockQty -= oldBaseQty; // Reverse old purchase
+                        // PROD-19: Atomic stock reverse (remove old purchase stock)
+                        var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $@"UPDATE ""Products"" 
+                               SET ""StockQty"" = ""StockQty"" - {oldBaseQty}, 
+                                   ""UpdatedAt"" = {DateTime.UtcNow}
+                               WHERE ""Id"" = {product.Id} 
+                                 AND ""TenantId"" = {tenantId}");
+                        
+                        if (rowsAffected > 0)
+                        {
+                            await _context.Entry(product).ReloadAsync();
+                        }
                     }
                 }
 
@@ -472,7 +497,21 @@ namespace HexaBill.Api.Modules.Purchases
                     _context.PurchaseItems.Add(purchaseItem);
 
                     // Update stock with new quantity
-                    product.StockQty += baseQty;
+                    // PROD-19: Atomic stock update to prevent race conditions
+                    var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                        $@"UPDATE ""Products"" 
+                           SET ""StockQty"" = ""StockQty"" + {baseQty}, 
+                               ""UpdatedAt"" = {DateTime.UtcNow}
+                           WHERE ""Id"" = {product.Id} 
+                             AND ""TenantId"" = {tenantId}");
+                    
+                    if (rowsAffected == 0)
+                    {
+                        throw new InvalidOperationException($"Product {product.Id} not found or does not belong to your tenant.");
+                    }
+                    
+                    // Reload product to get updated stock value and RowVersion
+                    await _context.Entry(product).ReloadAsync();
                     product.UpdatedAt = DateTime.UtcNow;
                     
                     if (unitCostExclVat > 0 && conversionToBase > 0)
@@ -538,13 +577,25 @@ namespace HexaBill.Api.Modules.Purchases
                 // CRITICAL: Reverse all stock changes before deleting (guard ConversionToBase <= 0)
                 foreach (var item in purchase.Items)
                 {
-                    var product = await _context.Products.FindAsync(item.ProductId);
+                    // PROD-4: Filter by TenantId for tenant isolation
+                    var product = await _context.Products
+                        .FirstOrDefaultAsync(p => p.Id == item.ProductId && p.TenantId == tenantId);
                     if (product != null)
                     {
                         var conv = product.ConversionToBase > 0 ? product.ConversionToBase : 1m;
                         var baseQty = item.Qty * conv;
-                        product.StockQty -= baseQty;
-                        product.UpdatedAt = DateTime.UtcNow;
+                        // PROD-19: Atomic stock reverse (remove purchase stock on delete)
+                        var rowsAffected = await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $@"UPDATE ""Products"" 
+                               SET ""StockQty"" = ""StockQty"" - {baseQty}, 
+                                   ""UpdatedAt"" = {DateTime.UtcNow}
+                               WHERE ""Id"" = {product.Id} 
+                                 AND ""TenantId"" = {tenantId}");
+                        
+                        if (rowsAffected > 0)
+                        {
+                            await _context.Entry(product).ReloadAsync();
+                        }
 
                         // Log the reversal
                         Console.WriteLine($"?? Reversing stock for {product.NameEn}: -{baseQty} (Purchase ID: {id})");
