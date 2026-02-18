@@ -445,7 +445,8 @@ namespace HexaBill.Api.Modules.Auth
                 {
                     return BadRequest(new ApiResponse<UserProfileDto> { Success = false, Message = "No file uploaded" });
                 }
-                var relativePath = await _fileUploadService.UploadProfilePhotoAsync(file, userId);
+                var tenantId = CurrentTenantId;
+                var relativePath = await _fileUploadService.UploadProfilePhotoAsync(file, userId, tenantId);
                 var result = await _authService.SetProfilePhotoAsync(userId, relativePath);
                 if (result == null)
                 {

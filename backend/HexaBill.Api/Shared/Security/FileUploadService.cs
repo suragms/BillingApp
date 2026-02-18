@@ -11,13 +11,13 @@ namespace HexaBill.Api.Shared.Security
 {
     public interface IFileUploadService
     {
-        Task<string> UploadLogoAsync(IFormFile file);
-        Task<string> UploadInvoiceAttachmentAsync(IFormFile file, int purchaseId);
-        Task<string> UploadProductImageAsync(IFormFile file, int productId);
-        Task<string> UploadProfilePhotoAsync(IFormFile file, int userId);
+        Task<string> UploadLogoAsync(IFormFile file, int tenantId);
+        Task<string> UploadInvoiceAttachmentAsync(IFormFile file, int purchaseId, int tenantId);
+        Task<string> UploadProductImageAsync(IFormFile file, int productId, int tenantId);
+        Task<string> UploadProfilePhotoAsync(IFormFile file, int userId, int tenantId);
         Task<bool> DeleteFileAsync(string filePath);
         Task<string> GetFileUrlAsync(string filePath);
-        Task<List<string>> GetUploadedFilesAsync();
+        Task<List<string>> GetUploadedFilesAsync(int tenantId);
     }
 
     public class FileUploadService : IFileUploadService
@@ -39,7 +39,17 @@ namespace HexaBill.Api.Shared.Security
             }
         }
 
-        public async Task<string> UploadLogoAsync(IFormFile file)
+        private string GetTenantUploadPath(int tenantId)
+        {
+            var tenantPath = Path.Combine(_uploadPath, tenantId.ToString());
+            if (!Directory.Exists(tenantPath))
+            {
+                Directory.CreateDirectory(tenantPath);
+            }
+            return tenantPath;
+        }
+
+        public async Task<string> UploadLogoAsync(IFormFile file, int tenantId)
         {
             if (file == null || file.Length == 0)
                 throw new ArgumentException("No file provided");
@@ -53,24 +63,29 @@ namespace HexaBill.Api.Shared.Security
             if (file.Length > 5 * 1024 * 1024)
                 throw new ArgumentException("File size too large. Maximum 5MB allowed.");
 
+            // Use tenant-specific subfolder for file isolation
+            var tenantUploadPath = GetTenantUploadPath(tenantId);
             var fileName = $"logo_{Guid.NewGuid()}{Path.GetExtension(file.FileName)}";
-            var filePath = Path.Combine(_uploadPath, fileName);
+            var filePath = Path.Combine(tenantUploadPath, fileName);
 
             using (var stream = new FileStream(filePath, FileMode.Create))
             {
                 await file.CopyToAsync(stream);
             }
 
-            // Save logo path to settings
+            // CRITICAL FIX: Save logo path to settings with TenantId filter to prevent cross-contamination
+            var relativePath = $"{tenantId}/{fileName}";
             var setting = await _context.Settings
-                .FirstOrDefaultAsync(s => s.Key == "company_logo");
+                .FirstOrDefaultAsync(s => s.Key == "company_logo" && (s.OwnerId == tenantId || s.TenantId == tenantId));
 
             if (setting == null)
             {
                 setting = new Setting
                 {
                     Key = "company_logo",
-                    Value = fileName,
+                    Value = relativePath,
+                    OwnerId = tenantId,
+                    TenantId = tenantId,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
                 };
@@ -88,16 +103,18 @@ namespace HexaBill.Api.Shared.Security
                     }
                 }
 
-                setting.Value = fileName;
+                setting.Value = relativePath;
+                setting.OwnerId = tenantId;
+                setting.TenantId = tenantId;
                 setting.UpdatedAt = DateTime.UtcNow;
             }
 
             await _context.SaveChangesAsync();
 
-            return fileName;
+            return relativePath;
         }
 
-        public async Task<string> UploadInvoiceAttachmentAsync(IFormFile file, int purchaseId)
+        public async Task<string> UploadInvoiceAttachmentAsync(IFormFile file, int purchaseId, int tenantId)
         {
             if (file == null || file.Length == 0)
                 throw new ArgumentException("No file provided");
@@ -116,18 +133,19 @@ namespace HexaBill.Api.Shared.Security
             if (file.Length > 10 * 1024 * 1024)
                 throw new ArgumentException("File size too large. Maximum 10MB allowed.");
 
+            var tenantUploadPath = GetTenantUploadPath(tenantId);
             var fileName = $"invoice_{purchaseId}_{Guid.NewGuid()}{Path.GetExtension(file.FileName)}";
-            var filePath = Path.Combine(_uploadPath, fileName);
+            var filePath = Path.Combine(tenantUploadPath, fileName);
 
             using (var stream = new FileStream(filePath, FileMode.Create))
             {
                 await file.CopyToAsync(stream);
             }
 
-            return fileName;
+            return $"{tenantId}/{fileName}";
         }
 
-        public async Task<string> UploadProductImageAsync(IFormFile file, int productId)
+        public async Task<string> UploadProductImageAsync(IFormFile file, int productId, int tenantId)
         {
             if (file == null || file.Length == 0)
                 throw new ArgumentException("No file provided");
@@ -141,8 +159,9 @@ namespace HexaBill.Api.Shared.Security
             if (file.Length > 5 * 1024 * 1024)
                 throw new ArgumentException("File size too large. Maximum 5MB allowed.");
 
-            // Create products subdirectory
-            var productsDir = Path.Combine(_uploadPath, "products");
+            // Use tenant-specific subfolder for file isolation
+            var tenantUploadPath = GetTenantUploadPath(tenantId);
+            var productsDir = Path.Combine(tenantUploadPath, "products");
             if (!Directory.Exists(productsDir))
             {
                 Directory.CreateDirectory(productsDir);
@@ -157,10 +176,10 @@ namespace HexaBill.Api.Shared.Security
             }
 
             // Return relative path for storage in database
-            return $"products/{fileName}";
+            return $"{tenantId}/products/{fileName}";
         }
 
-        public async Task<string> UploadProfilePhotoAsync(IFormFile file, int userId)
+        public async Task<string> UploadProfilePhotoAsync(IFormFile file, int userId, int tenantId)
         {
             if (file == null || file.Length == 0)
                 throw new ArgumentException("No file provided");
@@ -172,7 +191,9 @@ namespace HexaBill.Api.Shared.Security
             if (file.Length > 2 * 1024 * 1024) // 2MB
                 throw new ArgumentException("File size too large. Maximum 2MB allowed.");
 
-            var profilesDir = Path.Combine(_uploadPath, "profiles");
+            // Use tenant-specific subfolder for file isolation
+            var tenantUploadPath = GetTenantUploadPath(tenantId);
+            var profilesDir = Path.Combine(tenantUploadPath, "profiles");
             if (!Directory.Exists(profilesDir))
                 Directory.CreateDirectory(profilesDir);
 
@@ -184,7 +205,7 @@ namespace HexaBill.Api.Shared.Security
                 await file.CopyToAsync(stream);
             }
 
-            return $"profiles/{fileName}";
+            return $"{tenantId}/profiles/{fileName}";
         }
 
         public Task<bool> DeleteFileAsync(string filePath)
@@ -239,19 +260,20 @@ namespace HexaBill.Api.Shared.Security
             return Task.FromResult(string.Empty);
         }
 
-        public Task<List<string>> GetUploadedFilesAsync()
+        public Task<List<string>> GetUploadedFilesAsync(int tenantId)
         {
             var files = new List<string>();
             
-            if (Directory.Exists(_uploadPath))
+            // CRITICAL FIX: Only return files for the specific tenant
+            var tenantUploadPath = Path.Combine(_uploadPath, tenantId.ToString());
+            if (Directory.Exists(tenantUploadPath))
             {
-                var filePaths = Directory.GetFiles(_uploadPath);
-                var fileNames = filePaths
-                    .Select(Path.GetFileName)
-                    .Where(name => name != null)
-                    .Cast<string>()
+                var filePaths = Directory.GetFiles(tenantUploadPath, "*", SearchOption.AllDirectories);
+                var relativePaths = filePaths
+                    .Select(fp => Path.GetRelativePath(_uploadPath, fp))
+                    .Where(path => !string.IsNullOrEmpty(path))
                     .ToList();
-                files.AddRange(fileNames);
+                files.AddRange(relativePaths);
             }
 
             return Task.FromResult(files);

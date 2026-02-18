@@ -209,13 +209,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     });
                 }
 
-                var fileName = await _fileUploadService.UploadLogoAsync(file);
+                var tenantId = CurrentTenantId;
+                var fileName = await _fileUploadService.UploadLogoAsync(file, tenantId);
                 
                 // Return the full URL path
                 var logoUrl = $"/uploads/{fileName}";
                 
                 // Update COMPANY_LOGO for current tenant (each tenant has own logo)
-                var tenantId = CurrentTenantId;
                 var logoSetting = await _context.Settings
                     .FirstOrDefaultAsync(s => s.Key == "COMPANY_LOGO" && s.OwnerId == tenantId);
                 if (logoSetting == null)
