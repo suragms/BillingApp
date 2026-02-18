@@ -15,14 +15,28 @@ namespace HexaBill.Api.Migrations
             {
                 migrationBuilder.Sql(@"
                     DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Users' AND column_name='SessionVersion') THEN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Users') AND LOWER(column_name)=LOWER('SessionVersion')) THEN
                             ALTER TABLE ""Users"" ADD COLUMN ""SessionVersion"" integer NOT NULL DEFAULT 0;
                         END IF;
                     END $$");
                 
                 migrationBuilder.Sql(@"
                     DO $$ BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Customers' AND column_name='PaymentTerms') THEN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Users') AND LOWER(column_name)=LOWER('LastLoginAt')) THEN
+                            ALTER TABLE ""Users"" ADD COLUMN ""LastLoginAt"" timestamp with time zone NULL;
+                        END IF;
+                    END $$");
+                
+                migrationBuilder.Sql(@"
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Users') AND LOWER(column_name)=LOWER('LastActiveAt')) THEN
+                            ALTER TABLE ""Users"" ADD COLUMN ""LastActiveAt"" timestamp with time zone NULL;
+                        END IF;
+                    END $$");
+                
+                migrationBuilder.Sql(@"
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND LOWER(table_name)=LOWER('Customers') AND LOWER(column_name)=LOWER('PaymentTerms')) THEN
                             ALTER TABLE ""Customers"" ADD COLUMN ""PaymentTerms"" character varying(100) NULL;
                         END IF;
                     END $$");
@@ -33,14 +47,26 @@ namespace HexaBill.Api.Migrations
                 migrationBuilder.AddColumn<int>(
                     name: "SessionVersion",
                     table: "Users",
-                    type: "integer",
+                    type: "INTEGER",
                     nullable: false,
                     defaultValue: 0);
+
+                migrationBuilder.AddColumn<DateTime>(
+                    name: "LastLoginAt",
+                    table: "Users",
+                    type: "TEXT",
+                    nullable: true);
+
+                migrationBuilder.AddColumn<DateTime>(
+                    name: "LastActiveAt",
+                    table: "Users",
+                    type: "TEXT",
+                    nullable: true);
 
                 migrationBuilder.AddColumn<string>(
                     name: "PaymentTerms",
                     table: "Customers",
-                    type: "character varying(100)",
+                    type: "TEXT",
                     maxLength: 100,
                     nullable: true);
             }
