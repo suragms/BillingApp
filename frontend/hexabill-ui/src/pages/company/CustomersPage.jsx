@@ -565,9 +565,18 @@ const CustomersPage = () => {
       {/* Modern Header - Responsive */}
       <div className="bg-white border-b border-gray-200 shadow-sm -mx-6 px-4 sm:px-6 py-3 sm:py-4">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-xs sm:text-sm text-gray-600 mt-1">Manage customer information and accounts</p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate('/dashboard')}
+              className="inline-flex items-center justify-center p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Back to Dashboard"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </button>
+            <div>
+              <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Customers</h1>
+              <p className="text-xs sm:text-sm text-gray-600 mt-1">Manage customer information and accounts</p>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2 w-full sm:w-auto">
             <button

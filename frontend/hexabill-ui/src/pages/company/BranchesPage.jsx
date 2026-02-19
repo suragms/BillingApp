@@ -181,10 +181,19 @@ const BranchesPage = () => {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-semibold text-neutral-900 flex items-center gap-2">
-          <LayoutGrid className="h-6 w-6 text-primary-600" />
-          Branches & Routes
-        </h1>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => window.history.back()}
+            className="inline-flex items-center justify-center p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            title="Go Back"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </button>
+          <h1 className="text-xl font-semibold text-neutral-900 flex items-center gap-2">
+            <LayoutGrid className="h-6 w-6 text-primary-600" />
+            Branches & Routes
+          </h1>
+        </div>
       </div>
 
       {/* Tabs */}

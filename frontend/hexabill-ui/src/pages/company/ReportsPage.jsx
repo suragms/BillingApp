@@ -1093,9 +1093,18 @@ const ReportsPage = () => {
     <div className="w-full max-w-full space-y-6">
       {/* Header — full width */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-[#0F172A]">Reports & Analytics</h1>
-          <p className="text-xs sm:text-sm text-[#475569]">Comprehensive business insights and analytics</p>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="inline-flex items-center justify-center p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            title="Back to Dashboard"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </button>
+          <div>
+            <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-[#0F172A]">Reports & Analytics</h1>
+            <p className="text-xs sm:text-sm text-[#475569]">Comprehensive business insights and analytics</p>
+          </div>
         </div>
         <div className="mt-2 sm:mt-0 flex flex-wrap gap-2 sm:space-x-3">
           <button
