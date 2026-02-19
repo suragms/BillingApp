@@ -31,71 +31,76 @@ namespace HexaBill.Api.Modules.SuperAdmin
         /// <summary>
         /// Get all settings for a specific owner/tenant.
         /// Settings table has composite PK (Key, OwnerId); we also store TenantId. Query by OwnerId or TenantId so legacy and new rows both work.
-        /// TEMPORARY FIX: Handle missing Value column until migration runs
+        /// ROBUST FIX: Check for Value column first, add if missing, then use raw SQL to avoid EF Core issues
         /// </summary>
         public async Task<Dictionary<string, string>> GetOwnerSettingsAsync(int tenantId)
         {
-            try
+            // CRITICAL: Check if Value column exists BEFORE attempting EF Core query
+            // This prevents EF Core from generating invalid SQL
+            if (_context.Database.IsNpgsql())
             {
-                var list = await _context.Settings
-                    .Where(s => s.OwnerId == tenantId || s.TenantId == tenantId)
-                    .ToListAsync();
-
-                // Prefer OwnerId match when same Key exists for both (e.g. after migration)
-                var settings = list
-                    .GroupBy(s => s.Key)
-                    .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.OwnerId == tenantId).First().Value ?? string.Empty);
-
-                if (!settings.Any())
+                var connection = _context.Database.GetDbConnection();
+                var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                if (!wasOpen) await connection.OpenAsync();
+                try
                 {
-                    return GetDefaultSettings();
-                }
-
-                return settings;
-            }
-            catch (Exception ex)
-            {
-                // Check if this is a PostgresException about missing Value column
-                var pgEx = ex as Npgsql.PostgresException
-                    ?? ex.InnerException as Npgsql.PostgresException
-                    ?? (ex.InnerException?.InnerException as Npgsql.PostgresException);
-
-                if (pgEx != null && pgEx.SqlState == "42703" && (pgEx.MessageText.Contains("value") || pgEx.MessageText.Contains("Value")))
-                {
-                    // Value column doesn't exist yet - use raw SQL fallback
-                    Console.WriteLine("⚠️ Settings.Value column not found - using raw SQL fallback. Migration may not have run yet.");
-                    var connection = _context.Database.GetDbConnection();
-                    var wasOpen = connection.State == System.Data.ConnectionState.Open;
-                    if (!wasOpen) await connection.OpenAsync();
-                    try
-                    {
-                        using var command = connection.CreateCommand();
-                        // Check which column name exists and use appropriate query
-                        var checkColumnCmd = connection.CreateCommand();
-                        checkColumnCmd.CommandText = @"
-                            SELECT column_name 
-                            FROM information_schema.columns 
+                    // Check if Value column exists
+                    using var checkCmd = connection.CreateCommand();
+                    checkCmd.CommandText = @"
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.columns 
                             WHERE table_schema = 'public' 
                             AND table_name = 'Settings' 
                             AND column_name IN ('Value', 'value')
-                            LIMIT 1";
-                        string? valueColumnName = null;
-                        using (var checkReader = await checkColumnCmd.ExecuteReaderAsync())
+                        )";
+                    bool hasValueColumn = false;
+                    using (var checkReader = await checkCmd.ExecuteReaderAsync())
+                    {
+                        if (await checkReader.ReadAsync())
                         {
-                            if (await checkReader.ReadAsync())
-                            {
-                                valueColumnName = checkReader.GetString(0);
-                            }
+                            hasValueColumn = checkReader.GetBoolean(0);
                         }
-                        
-                        // If column doesn't exist, return defaults
-                        if (string.IsNullOrEmpty(valueColumnName))
+                    }
+                    
+                    // If column doesn't exist, try to add it
+                    if (!hasValueColumn)
+                    {
+                        try
                         {
-                            Console.WriteLine("⚠️ Settings table has no Value column - returning defaults");
-                            return GetDefaultSettings();
+                            using var addCmd = connection.CreateCommand();
+                            addCmd.CommandText = @"ALTER TABLE ""Settings"" ADD COLUMN IF NOT EXISTS ""Value"" character varying(2000) NULL;";
+                            await addCmd.ExecuteNonQueryAsync();
+                            hasValueColumn = true; // Assume it was added successfully
                         }
-                        
-                        // Use the correct column name (Value or value)
+                        catch (Exception addEx)
+                        {
+                            // Column may already exist or permission issue - continue with raw SQL
+                            Console.WriteLine($"⚠️ Could not add Value column: {addEx.Message}");
+                        }
+                    }
+                    
+                    // Always use raw SQL to avoid EF Core column name issues
+                    string? valueColumnName = null;
+                    using var findColumnCmd = connection.CreateCommand();
+                    findColumnCmd.CommandText = @"
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'Settings' 
+                        AND column_name IN ('Value', 'value')
+                        LIMIT 1";
+                    using (var findReader = await findColumnCmd.ExecuteReaderAsync())
+                    {
+                        if (await findReader.ReadAsync())
+                        {
+                            valueColumnName = findReader.GetString(0);
+                        }
+                    }
+                    
+                    // Use raw SQL with correct column name
+                    using var command = connection.CreateCommand();
+                    if (!string.IsNullOrEmpty(valueColumnName))
+                    {
                         var quotedColumn = valueColumnName == "Value" ? @"""Value""" : "value";
                         command.CommandText = $@"
                             SELECT ""Key"", {quotedColumn}
@@ -115,24 +120,39 @@ namespace HexaBill.Api.Modules.SuperAdmin
                             settings[key] = value;
                         }
 
-                        if (!settings.Any())
+                        if (settings.Any())
                         {
-                            return GetDefaultSettings();
+                            return settings;
                         }
-
-                        return settings;
                     }
-                    finally
-                    {
-                        if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
-                            await connection.CloseAsync();
-                    }
+                    
+                    // No Value column or no settings found - return defaults
+                    return GetDefaultSettings();
                 }
-                else
+                finally
                 {
-                    // Re-throw if it's not the Value column error
-                    throw;
+                    if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
+                        await connection.CloseAsync();
                 }
+            }
+            
+            // For non-PostgreSQL databases, use EF Core normally
+            try
+            {
+                var list = await _context.Settings
+                    .Where(s => s.OwnerId == tenantId || s.TenantId == tenantId)
+                    .ToListAsync();
+
+                var settings = list
+                    .GroupBy(s => s.Key)
+                    .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.OwnerId == tenantId).First().Value ?? string.Empty);
+
+                return settings.Any() ? settings : GetDefaultSettings();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Error loading settings: {ex.Message}");
+                return GetDefaultSettings();
             }
         }
 

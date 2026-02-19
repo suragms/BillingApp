@@ -1159,6 +1159,89 @@ _ = Task.Run(async () =>
                 }
             }
             
+            // CRITICAL: Ensure Settings.Value column exists (run before any settings queries)
+            if (context.Database.IsNpgsql())
+            {
+                try
+                {
+                    initLogger.LogInformation("Ensuring Settings.Value column exists...");
+                    var connection = context.Database.GetDbConnection();
+                    var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                    if (!wasOpen) await connection.OpenAsync();
+                    try
+                    {
+                        // Check if Value column exists (case-insensitive check)
+                        using var checkCmd = connection.CreateCommand();
+                        checkCmd.CommandText = @"
+                            SELECT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = 'Settings' 
+                                AND column_name IN ('Value', 'value')
+                            )";
+                        var exists = false;
+                        using (var reader = await checkCmd.ExecuteReaderAsync())
+                        {
+                            if (await reader.ReadAsync())
+                            {
+                                exists = reader.GetBoolean(0);
+                            }
+                        }
+                        
+                        if (!exists)
+                        {
+                            initLogger.LogInformation("Settings.Value column missing - adding it now...");
+                            using var addCmd = connection.CreateCommand();
+                            addCmd.CommandText = @"ALTER TABLE ""Settings"" ADD COLUMN IF NOT EXISTS ""Value"" character varying(2000) NULL;";
+                            await addCmd.ExecuteNonQueryAsync();
+                            initLogger.LogInformation("✅ Successfully added Settings.Value column");
+                        }
+                        else
+                        {
+                            // Check if it's lowercase 'value' and rename to 'Value' if needed
+                            using var checkCaseCmd = connection.CreateCommand();
+                            checkCaseCmd.CommandText = @"
+                                SELECT column_name 
+                                FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = 'Settings' 
+                                AND column_name IN ('Value', 'value')
+                                LIMIT 1";
+                            string? columnName = null;
+                            using (var reader = await checkCaseCmd.ExecuteReaderAsync())
+                            {
+                                if (await reader.ReadAsync())
+                                {
+                                    columnName = reader.GetString(0);
+                                }
+                            }
+                            
+                            if (columnName == "value")
+                            {
+                                initLogger.LogInformation("Renaming Settings.value to Settings.Value...");
+                                using var renameCmd = connection.CreateCommand();
+                                renameCmd.CommandText = @"ALTER TABLE ""Settings"" RENAME COLUMN value TO ""Value"";";
+                                await renameCmd.ExecuteNonQueryAsync();
+                                initLogger.LogInformation("✅ Successfully renamed Settings.value to Settings.Value");
+                            }
+                            else
+                            {
+                                initLogger.LogInformation("✅ Settings.Value column already exists");
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
+                            await connection.CloseAsync();
+                    }
+                }
+                catch (Exception settingsValueEx)
+                {
+                    initLogger.LogWarning(settingsValueEx, "Could not ensure Settings.Value column exists - SettingsService will handle this");
+                }
+            }
+            
             // CRITICAL: PostgreSQL Production Schema Validation
             if (context.Database.IsNpgsql())
             {

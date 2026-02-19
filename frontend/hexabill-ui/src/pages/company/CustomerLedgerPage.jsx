@@ -3361,6 +3361,10 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                 </tr>
               ) : (
                 displayedEntries.map((entry, idx) => {
+                  // CRITICAL: Initialize all variables at the top to prevent TDZ errors
+                  const invoiceNo = entry.reference || '-'
+                  const entryStatus = entry.status || (entry.type === 'Payment' ? '-' : 'Unpaid')
+                  
                   // Format date - show time only for payments
                   const showTime = entry.type === 'Payment'
                   const dateStr = showTime
@@ -3372,9 +3376,6 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                       day: '2-digit', month: '2-digit', year: 'numeric'
                     })
 
-                  const invoiceNo = entry.reference || '-'
-                  const status = entry.status || (entry.type === 'Payment' ? '-' : 'Unpaid')
-
                   // Color coding: Debit = light red, Credit = light green
                   const rowBgColor = entry.debit > 0
                     ? 'bg-red-50 hover:bg-red-100'
@@ -3382,9 +3383,10 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                       ? 'bg-green-50 hover:bg-green-100'
                       : 'hover:bg-neutral-50'
 
-                  const statusColor = status === 'Paid' ? 'bg-green-100 text-green-800'
-                    : status === 'Partial' ? 'bg-yellow-100 text-yellow-800'
-                      : status === 'Unpaid' ? 'bg-red-100 text-red-800'
+                  // Calculate statusColor AFTER status is defined
+                  const statusColor = entryStatus === 'Paid' ? 'bg-green-100 text-green-800'
+                    : entryStatus === 'Partial' ? 'bg-yellow-100 text-yellow-800'
+                      : entryStatus === 'Unpaid' ? 'bg-red-100 text-red-800'
                         : ''
 
                   return (
@@ -3408,9 +3410,9 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                         {(Number(entry.credit) || 0) > 0 ? formatCurrency(Number(entry.credit) || 0) : '-'}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-center border-r border-neutral-200">
-                        {status !== '-' ? (
+                        {entryStatus !== '-' ? (
                           <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${statusColor}`}>
-                            {status}
+                            {entryStatus}
                           </span>
                         ) : (
                           <span className="text-sm text-neutral-400">-</span>
