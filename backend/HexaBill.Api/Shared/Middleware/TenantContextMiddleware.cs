@@ -91,60 +91,74 @@ namespace HexaBill.Api.Shared.Middleware
                         .AsNoTracking()
                         .FirstOrDefaultAsync(t => t.Id == tenantId);
                 }
-                catch (Npgsql.PostgresException pgEx) when (pgEx.SqlState == "42703" && pgEx.MessageText.Contains("FeaturesJson"))
+                catch (Exception ex)
                 {
-                    // FeaturesJson column doesn't exist yet - query without it using raw SQL
-                    _logger.LogWarning("FeaturesJson column not found - using fallback query. Migration may not have run yet.");
-                    var connection = dbContext.Database.GetDbConnection();
-                    var wasOpen = connection.State == System.Data.ConnectionState.Open;
-                    if (!wasOpen) await connection.OpenAsync();
+                    // Check if this is a PostgresException about missing FeaturesJson column
+                    // EF Core may wrap it, so check both the exception itself and inner exceptions
+                    var pgEx = ex as Npgsql.PostgresException 
+                        ?? ex.InnerException as Npgsql.PostgresException
+                        ?? (ex.InnerException?.InnerException as Npgsql.PostgresException);
                     
-                    try
+                    if (pgEx != null && pgEx.SqlState == "42703" && pgEx.MessageText.Contains("FeaturesJson"))
                     {
-                        using var command = connection.CreateCommand();
-                        command.CommandText = @"
-                            SELECT ""Id"", ""Name"", ""Subdomain"", ""Domain"", ""Country"", ""Currency"", 
-                                   ""VatNumber"", ""CompanyNameEn"", ""CompanyNameAr"", ""Address"", 
-                                   ""Phone"", ""Email"", ""LogoPath"", ""Status"", ""CreatedAt"", 
-                                   ""TrialEndDate"", ""SuspendedAt"", ""SuspensionReason""
-                            FROM ""Tenants""
-                            WHERE ""Id"" = @tenantId";
-                        var param = command.CreateParameter();
-                        param.ParameterName = "@tenantId";
-                        param.Value = tenantId;
-                        command.Parameters.Add(param);
+                        // FeaturesJson column doesn't exist yet - query without it using raw SQL
+                        _logger.LogWarning("FeaturesJson column not found - using fallback query. Migration may not have run yet.");
+                        var connection = dbContext.Database.GetDbConnection();
+                        var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                        if (!wasOpen) await connection.OpenAsync();
                         
-                        using var reader = await command.ExecuteReaderAsync();
-                        if (await reader.ReadAsync())
+                        try
                         {
-                            tenant = new Tenant
+                            using var command = connection.CreateCommand();
+                            command.CommandText = @"
+                                SELECT ""Id"", ""Name"", ""Subdomain"", ""Domain"", ""Country"", ""Currency"", 
+                                       ""VatNumber"", ""CompanyNameEn"", ""CompanyNameAr"", ""Address"", 
+                                       ""Phone"", ""Email"", ""LogoPath"", ""Status"", ""CreatedAt"", 
+                                       ""TrialEndDate"", ""SuspendedAt"", ""SuspensionReason""
+                                FROM ""Tenants""
+                                WHERE ""Id"" = @tenantId";
+                            var param = command.CreateParameter();
+                            param.ParameterName = "@tenantId";
+                            param.Value = tenantId;
+                            command.Parameters.Add(param);
+                            
+                            using var reader = await command.ExecuteReaderAsync();
+                            if (await reader.ReadAsync())
                             {
-                                Id = reader.GetInt32(0),
-                                Name = reader.GetString(1),
-                                Subdomain = reader.IsDBNull(2) ? null : reader.GetString(2),
-                                Domain = reader.IsDBNull(3) ? null : reader.GetString(3),
-                                Country = reader.GetString(4),
-                                Currency = reader.GetString(5),
-                                VatNumber = reader.IsDBNull(6) ? null : reader.GetString(6),
-                                CompanyNameEn = reader.IsDBNull(7) ? null : reader.GetString(7),
-                                CompanyNameAr = reader.IsDBNull(8) ? null : reader.GetString(8),
-                                Address = reader.IsDBNull(9) ? null : reader.GetString(9),
-                                Phone = reader.IsDBNull(10) ? null : reader.GetString(10),
-                                Email = reader.IsDBNull(11) ? null : reader.GetString(11),
-                                LogoPath = reader.IsDBNull(12) ? null : reader.GetString(12),
-                                Status = (TenantStatus)reader.GetInt32(13),
-                                CreatedAt = reader.GetDateTime(14),
-                                TrialEndDate = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
-                                SuspendedAt = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
-                                SuspensionReason = reader.IsDBNull(17) ? null : reader.GetString(17),
-                                FeaturesJson = null // Column doesn't exist yet
-                            };
+                                tenant = new Tenant
+                                {
+                                    Id = reader.GetInt32(0),
+                                    Name = reader.GetString(1),
+                                    Subdomain = reader.IsDBNull(2) ? null : reader.GetString(2),
+                                    Domain = reader.IsDBNull(3) ? null : reader.GetString(3),
+                                    Country = reader.GetString(4),
+                                    Currency = reader.GetString(5),
+                                    VatNumber = reader.IsDBNull(6) ? null : reader.GetString(6),
+                                    CompanyNameEn = reader.IsDBNull(7) ? null : reader.GetString(7),
+                                    CompanyNameAr = reader.IsDBNull(8) ? null : reader.GetString(8),
+                                    Address = reader.IsDBNull(9) ? null : reader.GetString(9),
+                                    Phone = reader.IsDBNull(10) ? null : reader.GetString(10),
+                                    Email = reader.IsDBNull(11) ? null : reader.GetString(11),
+                                    LogoPath = reader.IsDBNull(12) ? null : reader.GetString(12),
+                                    Status = (TenantStatus)reader.GetInt32(13),
+                                    CreatedAt = reader.GetDateTime(14),
+                                    TrialEndDate = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+                                    SuspendedAt = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
+                                    SuspensionReason = reader.IsDBNull(17) ? null : reader.GetString(17),
+                                    FeaturesJson = null // Column doesn't exist yet
+                                };
+                            }
+                        }
+                        finally
+                        {
+                            if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
+                                await connection.CloseAsync();
                         }
                     }
-                    finally
+                    else
                     {
-                        if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
-                            await connection.CloseAsync();
+                        // Re-throw if it's not the FeaturesJson column error
+                        throw;
                     }
                 }
 
