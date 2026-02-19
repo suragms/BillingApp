@@ -28,10 +28,14 @@ export default defineConfig({
         // Prevent variable name conflicts that cause TDZ errors
         keep_fnames: true,
         keep_classnames: true,
+        // Disable property mangling to prevent 'status' -> 'st' transformation
+        properties: false,
       },
       mangle: {
         // Prevent mangling variables that start with 'st' to avoid conflicts
-        reserved: ['st', 'status', 'statusColor', 'entryStatus', 'invoiceStatus', 'safeFilters']
+        reserved: ['st', 'status', 'statusColor', 'entryStatus', 'invoiceStatus', 'safeFilters', 'filterStatusValue', 'filterTypeValue'],
+        // Disable property mangling completely
+        properties: false,
       }
     }
   },
