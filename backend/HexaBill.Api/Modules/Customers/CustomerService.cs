@@ -691,6 +691,8 @@ namespace HexaBill.Api.Modules.Customers
                     throw new ArgumentException("Invalid customer ID");
 
                 // Sales: apply optional branch/route/staff/date filters
+                // CRITICAL: For PostgreSQL, check if BranchId column exists BEFORE building query
+                // This prevents exceptions during query building
                 var salesQuery = _context.Sales
                     .Where(s => s.CustomerId.HasValue && s.CustomerId.Value == customerId && s.TenantId == tenantId && !s.IsDeleted);
             
@@ -699,41 +701,52 @@ namespace HexaBill.Api.Modules.Customers
                 // CRITICAL: toDate is sent as YYYY-MM-DD (midnight). Include full day by using < next day
                 if (toDate.HasValue) salesQuery = salesQuery.Where(s => s.InvoiceDate < toDate.Value.Date.AddDays(1));
                 
-                // CRITICAL: For PostgreSQL, try to apply branch/route/staff filters
-                // If columns don't exist, the query will fail - catch and retry without filters
-                List<Sale> sales;
-                try
+                // CRITICAL: For PostgreSQL, check if BranchId column exists before applying filters
+                // Skip branch/route/staff filters if column doesn't exist to prevent 500 errors
+                if (_context.Database.IsNpgsql())
                 {
-                    // Try to apply branch/route/staff filters
+                    try
+                    {
+                        // Check if BranchId column exists using a test query
+                        var testQuery = _context.Database.ExecuteSqlRaw(@"
+                            SELECT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = 'Sales' 
+                                AND column_name = 'BranchId'
+                            )");
+                        
+                        // If column exists (testQuery returns 1), apply filters
+                        if (testQuery > 0)
+                        {
+                            if (branchId.HasValue) salesQuery = salesQuery.Where(s => s.BranchId == branchId.Value);
+                            if (routeId.HasValue) salesQuery = salesQuery.Where(s => s.RouteId == routeId.Value);
+                            if (staffId.HasValue) salesQuery = salesQuery.Where(s => s.CreatedBy == staffId.Value);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"⚠️ Warning: BranchId column doesn't exist in Sales table, skipping branch/route/staff filters");
+                        }
+                    }
+                    catch (Exception checkEx)
+                    {
+                        // If column check fails, skip filters to prevent complete failure
+                        Console.WriteLine($"⚠️ Warning: Could not check BranchId column existence, skipping filters: {checkEx.Message}");
+                    }
+                }
+                else
+                {
+                    // For non-PostgreSQL databases, apply filters normally
                     if (branchId.HasValue) salesQuery = salesQuery.Where(s => s.BranchId == branchId.Value);
                     if (routeId.HasValue) salesQuery = salesQuery.Where(s => s.RouteId == routeId.Value);
                     if (staffId.HasValue) salesQuery = salesQuery.Where(s => s.CreatedBy == staffId.Value);
-                    
-                    // Execute query with filters
-                    sales = await salesQuery
-                        .OrderBy(s => s.InvoiceDate)
-                        .ThenBy(s => s.Id)
-                        .ToListAsync();
                 }
-                catch (Exception pgEx) when (pgEx.Message.Contains("does not exist") || pgEx.Message.Contains("42703") || 
-                                              pgEx.Message.Contains("BranchId") || pgEx.Message.Contains("RouteId") ||
-                                              (pgEx.InnerException != null && (pgEx.InnerException.Message.Contains("does not exist") || 
-                                                                               pgEx.InnerException.Message.Contains("42703"))))
-                {
-                    // BranchId/RouteId/CreatedBy columns don't exist - retry query without these filters
-                    Console.WriteLine($"⚠️ Warning: BranchId/RouteId/CreatedBy columns don't exist, retrying without filters. Error: {pgEx.Message}");
-                    
-                    // Rebuild query without branch/route/staff filters
-                    var salesQueryRetry = _context.Sales
-                        .Where(s => s.CustomerId.HasValue && s.CustomerId.Value == customerId && s.TenantId == tenantId && !s.IsDeleted);
-                    if (fromDate.HasValue) salesQueryRetry = salesQueryRetry.Where(s => s.InvoiceDate >= fromDate.Value);
-                    if (toDate.HasValue) salesQueryRetry = salesQueryRetry.Where(s => s.InvoiceDate < toDate.Value.Date.AddDays(1));
-                    
-                    sales = await salesQueryRetry
-                        .OrderBy(s => s.InvoiceDate)
-                        .ThenBy(s => s.Id)
-                        .ToListAsync();
-                }
+                
+                // Execute query
+                var sales = await salesQuery
+                    .OrderBy(s => s.InvoiceDate)
+                    .ThenBy(s => s.Id)
+                    .ToListAsync();
 
             var filteredSaleIds = new HashSet<int>(sales.Select(s => s.Id));
 
