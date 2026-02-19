@@ -7,12 +7,14 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using HexaBill.Api.Modules.SuperAdmin;
 using HexaBill.Api.Models;
 using HexaBill.Api.Data;
 using HexaBill.Api.Shared.Extensions; // MULTI-TENANT
 using System.IO;
 using HexaBill.Api.Shared.Security;
+using Npgsql;
 
 namespace HexaBill.Api.Modules.SuperAdmin
 {
@@ -41,9 +43,28 @@ namespace HexaBill.Api.Modules.SuperAdmin
         {
             try
             {
-                var settings = await _context.Settings
-                    .Where(s => s.TenantId == CurrentTenantId)  // CRITICAL: Filter by owner
-                    .ToDictionaryAsync(s => s.Key, s => s.Value ?? "");
+                Dictionary<string, string> settings;
+                try
+                {
+                    settings = await _context.Settings
+                        .Where(s => s.TenantId == CurrentTenantId)  // CRITICAL: Filter by owner
+                        .ToDictionaryAsync(s => s.Key, s => s.Value ?? "");
+                }
+                catch (Exception ex)
+                {
+                    var pgEx = ex as Npgsql.PostgresException ?? ex.InnerException as Npgsql.PostgresException;
+                    if (pgEx != null && pgEx.SqlState == "42703" && pgEx.MessageText.Contains("Value"))
+                    {
+                        // Settings.Value column doesn't exist - use SettingsService which handles this
+                        var settingsService = HttpContext.RequestServices.GetRequiredService<ISettingsService>();
+                        settings = await settingsService.GetOwnerSettingsAsync(CurrentTenantId);
+                    }
+                    else
+                    {
+                        // Return empty settings if error
+                        settings = new Dictionary<string, string>();
+                    }
+                }
                 
                 // Add cloud backup settings from configuration if not in database
                 if (!settings.ContainsKey("CLOUD_BACKUP_ENABLED"))

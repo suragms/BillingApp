@@ -11,6 +11,7 @@ using HexaBill.Api.Modules.Payments;
 using HexaBill.Api.Modules.Billing;
 using HexaBill.Api.Modules.Branches;
 using HexaBill.Api.Shared.Validation;
+using Npgsql;
 
 namespace HexaBill.Api.Modules.Reports
 {
@@ -945,9 +946,28 @@ namespace HexaBill.Api.Modules.Reports
 
         private async Task<InvoiceTemplateService.CompanySettings> GetCompanySettingsAsync(int tenantId)
         {
-            var settings = await _context.Settings
-                .Where(s => s.TenantId == tenantId)  // CRITICAL: Filter by owner
-                .ToDictionaryAsync(s => s.Key, s => s.Value ?? "");
+            Dictionary<string, string> settings;
+            try
+            {
+                settings = await _context.Settings
+                    .Where(s => s.TenantId == tenantId)  // CRITICAL: Filter by owner
+                    .ToDictionaryAsync(s => s.Key, s => s.Value ?? "");
+            }
+            catch (Exception ex)
+            {
+                var pgEx = ex as Npgsql.PostgresException ?? ex.InnerException as Npgsql.PostgresException;
+                if (pgEx != null && pgEx.SqlState == "42703" && pgEx.MessageText.Contains("Value"))
+                {
+                    // Settings.Value column doesn't exist - use SettingsService which handles this
+                    var settingsService = HttpContext.RequestServices.GetRequiredService<HexaBill.Api.Modules.SuperAdmin.ISettingsService>();
+                    settings = await settingsService.GetOwnerSettingsAsync(tenantId);
+                }
+                else
+                {
+                    // Return empty settings if error
+                    settings = new Dictionary<string, string>();
+                }
+            }
             return new InvoiceTemplateService.CompanySettings
             {
                 CompanyNameEn = settings.GetValueOrDefault("COMPANY_NAME_EN", ""),
