@@ -107,6 +107,8 @@ After deploying the latest backend, the **platform-health** API returns `resourc
 - **Recent metrics (from Render):** Memory ~175–208 MB used (under 512 MB). CPU low. Some **500** and **404** responses in the last hour—500s from the tenant list (fixed with `Setting.value` → `value` after deploy); 404s from logo requests (ephemeral disk).
 - To check anytime: use **Render dashboard** → HexaBill service → **Metrics** (memory, CPU, HTTP by status), or **Logs** for errors.
 
+**Fix applied (Feb 2026):** Render logs showed `42703: column s.value does not exist` with hint `Perhaps you meant "s.Value"`. Production PostgreSQL has the Settings column as **"Value"** (PascalCase). `AppDbContext` was updated to `HasColumnName("Value")` so login, tenant list, and startup (maintenance check) no longer return 500. **Slow load** can also be due to Render cold start (Starter plan sleeps after ~15 min); the app already pings `/health` every 9 min when a user is logged in to reduce cold starts.
+
 ---
 
 ## Benefits of Removing Unwanted / Unused Pages
