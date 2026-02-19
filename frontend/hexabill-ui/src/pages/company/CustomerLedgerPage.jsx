@@ -3227,13 +3227,14 @@ const CustomerLedgerPage = () => {
 // Add Customer Modal Component removed - now using inline Modal in main component
 
 // Ledger Statement Tab Component - Tally Style Redesign
-const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters = { status: 'all', type: 'all' }, onFilterChange = () => {} }) => {
+const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters, onFilterChange }) => {
+  // CRITICAL: Initialize safeFilters FIRST before any other code to prevent TDZ errors
+  const safeFilters = filters && typeof filters === 'object' ? filters : { status: 'all', type: 'all' }
+  const safeOnFilterChange = onFilterChange || (() => {})
+  
   const [displayLimit, setDisplayLimit] = React.useState(100) // Show first 100 entries by default
   const INITIAL_DISPLAY_LIMIT = 100
   const LOAD_MORE_INCREMENT = 100
-  
-  // Ensure filters has default values to prevent undefined access errors
-  const safeFilters = filters || { status: 'all', type: 'all' }
 
   // Paginated entries
   const displayedEntries = React.useMemo(() => {
@@ -3281,7 +3282,7 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
           <div className="flex items-center space-x-2 flex-wrap">
             <select
               value={safeFilters.status || 'all'}
-              onChange={(e) => onFilterChange('status', e.target.value)}
+              onChange={(e) => safeOnFilterChange('status', e.target.value)}
               className="px-2 py-1 text-xs border border-neutral-300 rounded focus:outline-none focus:ring-1 focus:ring-primary-500"
             >
               <option value="all">All Status</option>
@@ -3291,7 +3292,7 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
             </select>
             <select
               value={safeFilters.type || 'all'}
-              onChange={(e) => onFilterChange('type', e.target.value)}
+              onChange={(e) => safeOnFilterChange('type', e.target.value)}
               className="px-2 py-1 text-xs border border-neutral-300 rounded focus:outline-none focus:ring-1 focus:ring-primary-500"
             >
               <option value="all">All Types</option>

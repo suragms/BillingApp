@@ -31,24 +31,84 @@ namespace HexaBill.Api.Modules.SuperAdmin
         /// <summary>
         /// Get all settings for a specific owner/tenant.
         /// Settings table has composite PK (Key, OwnerId); we also store TenantId. Query by OwnerId or TenantId so legacy and new rows both work.
+        /// TEMPORARY FIX: Handle missing Value column until migration runs
         /// </summary>
         public async Task<Dictionary<string, string>> GetOwnerSettingsAsync(int tenantId)
         {
-            var list = await _context.Settings
-                .Where(s => s.OwnerId == tenantId || s.TenantId == tenantId)
-                .ToListAsync();
-
-            // Prefer OwnerId match when same Key exists for both (e.g. after migration)
-            var settings = list
-                .GroupBy(s => s.Key)
-                .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.OwnerId == tenantId).First().Value ?? string.Empty);
-
-            if (!settings.Any())
+            try
             {
-                return GetDefaultSettings();
-            }
+                var list = await _context.Settings
+                    .Where(s => s.OwnerId == tenantId || s.TenantId == tenantId)
+                    .ToListAsync();
 
-            return settings;
+                // Prefer OwnerId match when same Key exists for both (e.g. after migration)
+                var settings = list
+                    .GroupBy(s => s.Key)
+                    .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.OwnerId == tenantId).First().Value ?? string.Empty);
+
+                if (!settings.Any())
+                {
+                    return GetDefaultSettings();
+                }
+
+                return settings;
+            }
+            catch (Exception ex)
+            {
+                // Check if this is a PostgresException about missing Value column
+                var pgEx = ex as Npgsql.PostgresException
+                    ?? ex.InnerException as Npgsql.PostgresException
+                    ?? (ex.InnerException?.InnerException as Npgsql.PostgresException);
+
+                if (pgEx != null && pgEx.SqlState == "42703" && (pgEx.MessageText.Contains("value") || pgEx.MessageText.Contains("Value")))
+                {
+                    // Value column doesn't exist yet - use raw SQL fallback
+                    Console.WriteLine("⚠️ Settings.Value column not found - using raw SQL fallback. Migration may not have run yet.");
+                    var connection = _context.Database.GetDbConnection();
+                    var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                    if (!wasOpen) await connection.OpenAsync();
+                    try
+                    {
+                        using var command = connection.CreateCommand();
+                        // Try both lowercase and PascalCase column names
+                        command.CommandText = @"
+                            SELECT ""Key"", 
+                                   COALESCE(""Value"", value, '') AS ""Value""
+                            FROM ""Settings""
+                            WHERE ""OwnerId"" = @tenantId OR ""TenantId"" = @tenantId";
+                        var param = command.CreateParameter();
+                        param.ParameterName = "@tenantId";
+                        param.Value = tenantId;
+                        command.Parameters.Add(param);
+
+                        var settings = new Dictionary<string, string>();
+                        using var reader = await command.ExecuteReaderAsync();
+                        while (await reader.ReadAsync())
+                        {
+                            var key = reader.GetString(0);
+                            var value = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                            settings[key] = value;
+                        }
+
+                        if (!settings.Any())
+                        {
+                            return GetDefaultSettings();
+                        }
+
+                        return settings;
+                    }
+                    finally
+                    {
+                        if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
+                            await connection.CloseAsync();
+                    }
+                }
+                else
+                {
+                    // Re-throw if it's not the Value column error
+                    throw;
+                }
+            }
         }
 
         /// <summary>
