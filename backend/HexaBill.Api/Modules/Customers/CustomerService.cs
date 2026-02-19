@@ -861,8 +861,10 @@ namespace HexaBill.Api.Modules.Customers
         /// </summary>
         public async Task<List<CustomerLedgerEntry>> GetCashCustomerLedgerAsync(int tenantId)
         {
-            // Get ALL cash customer sales (CustomerId is null) - Filter by tenantId
-            var sales = await _context.Sales
+            try
+            {
+                // Get ALL cash customer sales (CustomerId is null) - Filter by tenantId
+                var sales = await _context.Sales
                 .Where(s => s.CustomerId == null && s.TenantId == tenantId && !s.IsDeleted)
                 .OrderBy(s => s.InvoiceDate)
                 .ThenBy(s => s.Id)
@@ -1011,8 +1013,19 @@ namespace HexaBill.Api.Modules.Customers
                 });
             }
 
-            Console.WriteLine($"✅ Cash customer ledger entries generated: {ledgerEntries.Count} transactions");
-            return ledgerEntries;
+                Console.WriteLine($"✅ Cash customer ledger entries generated: {ledgerEntries.Count} transactions");
+                return ledgerEntries;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in GetCashCustomerLedgerAsync for tenant {tenantId}: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                }
+                throw; // Re-throw to be caught by controller
+            }
         }
 
         public async Task<byte[]> GenerateCustomerStatementAsync(int customerId, DateTime fromDate, DateTime toDate, int tenantId)
