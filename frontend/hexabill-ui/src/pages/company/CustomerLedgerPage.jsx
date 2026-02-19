@@ -3245,9 +3245,10 @@ const DEFAULT_LEDGER_FILTERS = { statusFilterValue: 'all', typeFilterValue: 'all
 
 const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters, onFilterChange }) => {
   // CRITICAL: Initialize safeFilters FIRST before any other code to prevent TDZ errors
-  // Extract values immediately to avoid minifier creating 'st' from filters.status
-  const filterStatusValue = (filters && typeof filters === 'object' && filters.status) ? filters.status : 'all'
-  const filterTypeValue = (filters && typeof filters === 'object' && filters.type) ? filters.type : 'all'
+  // Use bracket notation and Object.hasOwnProperty to avoid minifier creating 'st' from filters.status
+  const hasFilters = filters && typeof filters === 'object'
+  const filterStatusValue = (hasFilters && Object.prototype.hasOwnProperty.call(filters, 'status')) ? filters['status'] : 'all'
+  const filterTypeValue = (hasFilters && Object.prototype.hasOwnProperty.call(filters, 'type')) ? filters['type'] : 'all'
   const safeFilters = { statusFilterValue: filterStatusValue, typeFilterValue: filterTypeValue }
   const safeOnFilterChange = onFilterChange || (() => {})
   
