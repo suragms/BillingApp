@@ -1106,6 +1106,59 @@ _ = Task.Run(async () =>
                 initLogger.LogWarning(seedEx, "Damage categories seed skipped (table may not exist yet or already seeded)");
             }
             
+            // CRITICAL: Ensure FeaturesJson column exists in Tenants table (run before any tenant queries)
+            if (context.Database.IsNpgsql())
+            {
+                try
+                {
+                    initLogger.LogInformation("Ensuring FeaturesJson column exists in Tenants table...");
+                    var connection = context.Database.GetDbConnection();
+                    var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                    if (!wasOpen) await connection.OpenAsync();
+                    try
+                    {
+                        using var checkCmd = connection.CreateCommand();
+                        checkCmd.CommandText = @"
+                            SELECT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = 'Tenants' 
+                                AND column_name = 'FeaturesJson'
+                            )";
+                        var exists = false;
+                        using (var reader = await checkCmd.ExecuteReaderAsync())
+                        {
+                            if (await reader.ReadAsync())
+                            {
+                                exists = reader.GetBoolean(0);
+                            }
+                        }
+                        
+                        if (!exists)
+                        {
+                            initLogger.LogInformation("FeaturesJson column missing - adding it now...");
+                            using var addCmd = connection.CreateCommand();
+                            addCmd.CommandText = @"ALTER TABLE ""Tenants"" ADD COLUMN IF NOT EXISTS ""FeaturesJson"" character varying(2000) NULL;";
+                            await addCmd.ExecuteNonQueryAsync();
+                            initLogger.LogInformation("✅ Successfully added FeaturesJson column to Tenants table");
+                        }
+                        else
+                        {
+                            initLogger.LogInformation("✅ FeaturesJson column already exists in Tenants table");
+                        }
+                    }
+                    finally
+                    {
+                        if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
+                            await connection.CloseAsync();
+                    }
+                }
+                catch (Exception featuresJsonEx)
+                {
+                    initLogger.LogWarning(featuresJsonEx, "Could not ensure FeaturesJson column exists - middleware will handle this");
+                }
+            }
+            
             // CRITICAL: PostgreSQL Production Schema Validation
             if (context.Database.IsNpgsql())
             {
