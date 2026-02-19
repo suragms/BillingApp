@@ -1288,7 +1288,60 @@ _ = Task.Run(async () =>
                 }
                 
                 // SEED DEMO TENANTS (so tenant users get valid tenant_id in JWT)
-                var tenant1 = await context.Tenants.FirstOrDefaultAsync(t => t.Name == "Demo Company 1");
+                // TEMPORARY FIX: Handle missing FeaturesJson column until migration runs
+                Tenant? tenant1 = null;
+                Tenant? tenant2 = null;
+                try
+                {
+                    tenant1 = await context.Tenants.FirstOrDefaultAsync(t => t.Name == "Demo Company 1");
+                    tenant2 = await context.Tenants.FirstOrDefaultAsync(t => t.Name == "Demo Company 2");
+                }
+                catch (Exception tenantQueryEx)
+                {
+                    // Check if this is a PostgresException about missing FeaturesJson column
+                    var pgEx = tenantQueryEx as Npgsql.PostgresException
+                        ?? tenantQueryEx.InnerException as Npgsql.PostgresException
+                        ?? (tenantQueryEx.InnerException?.InnerException as Npgsql.PostgresException);
+                    if (pgEx != null && pgEx.SqlState == "42703" && pgEx.MessageText.Contains("FeaturesJson"))
+                    {
+                        initLogger.LogWarning("FeaturesJson column not found during seeding - using raw SQL fallback");
+                        // Use raw SQL to query tenants without FeaturesJson
+                        var connection = context.Database.GetDbConnection();
+                        var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                        if (!wasOpen) await connection.OpenAsync();
+                        try
+                        {
+                            using var cmd1 = connection.CreateCommand();
+                            cmd1.CommandText = @"SELECT ""Id"" FROM ""Tenants"" WHERE ""Name"" = 'Demo Company 1' LIMIT 1";
+                            using var reader1 = await cmd1.ExecuteReaderAsync();
+                            if (await reader1.ReadAsync())
+                            {
+                                var id = reader1.GetInt32(0);
+                                tenant1 = new Tenant { Id = id, Name = "Demo Company 1", Country = "AE", Currency = "AED", Status = TenantStatus.Active, CreatedAt = DateTime.UtcNow, FeaturesJson = null };
+                            }
+                            reader1.Close();
+                            
+                            using var cmd2 = connection.CreateCommand();
+                            cmd2.CommandText = @"SELECT ""Id"" FROM ""Tenants"" WHERE ""Name"" = 'Demo Company 2' LIMIT 1";
+                            using var reader2 = await cmd2.ExecuteReaderAsync();
+                            if (await reader2.ReadAsync())
+                            {
+                                var id = reader2.GetInt32(0);
+                                tenant2 = new Tenant { Id = id, Name = "Demo Company 2", Country = "AE", Currency = "AED", Status = TenantStatus.Active, CreatedAt = DateTime.UtcNow, FeaturesJson = null };
+                            }
+                        }
+                        finally
+                        {
+                            if (!wasOpen && connection.State == System.Data.ConnectionState.Open)
+                                await connection.CloseAsync();
+                        }
+                    }
+                    else
+                    {
+                        throw; // Re-throw if it's not the FeaturesJson column error
+                    }
+                }
+                
                 if (tenant1 == null)
                 {
                     tenant1 = new Tenant { Name = "Demo Company 1", Country = "AE", Currency = "AED", Status = TenantStatus.Active, CreatedAt = DateTime.UtcNow };
@@ -1296,7 +1349,6 @@ _ = Task.Run(async () =>
                     await context.SaveChangesAsync();
                     initLogger.LogInformation("Created demo tenant 1 (Demo Company 1)");
                 }
-                var tenant2 = await context.Tenants.FirstOrDefaultAsync(t => t.Name == "Demo Company 2");
                 if (tenant2 == null)
                 {
                     tenant2 = new Tenant { Name = "Demo Company 2", Country = "AE", Currency = "AED", Status = TenantStatus.Active, CreatedAt = DateTime.UtcNow };
