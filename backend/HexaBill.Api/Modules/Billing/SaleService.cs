@@ -14,6 +14,7 @@ using HexaBill.Api.Modules.Customers;
 using HexaBill.Api.Modules.SuperAdmin;
 using HexaBill.Api.Shared.Services;
 using HexaBill.Api.Shared.Validation;
+using Npgsql;
 
 namespace HexaBill.Api.Modules.Billing
 {
@@ -2383,9 +2384,24 @@ namespace HexaBill.Api.Modules.Billing
         /// <summary>VAT% from company settings (tenant-scoped). Fallback 5 when not set. PRODUCTION_MASTER_TODO #37.</summary>
         private async Task<decimal> GetVatPercentAsync(int tenantId)
         {
-            var setting = await _context.Settings
-                .FirstOrDefaultAsync(s => s.Key == "VAT_PERCENT" && s.OwnerId == tenantId);
-            return decimal.TryParse(setting?.Value, out decimal vatPercent) ? vatPercent : 5;
+            try
+            {
+                var setting = await _context.Settings
+                    .FirstOrDefaultAsync(s => s.Key == "VAT_PERCENT" && s.OwnerId == tenantId);
+                return decimal.TryParse(setting?.Value, out decimal vatPercent) ? vatPercent : 5;
+            }
+            catch (Exception ex)
+            {
+                var pgEx = ex as Npgsql.PostgresException ?? ex.InnerException as Npgsql.PostgresException;
+                if (pgEx != null && pgEx.SqlState == "42703" && pgEx.MessageText.Contains("Value"))
+                {
+                    // Settings.Value column doesn't exist - use default VAT 5%
+                    return 5;
+                }
+                // Log other errors but continue with default
+                Console.WriteLine($"⚠️ Error loading VAT percent: {ex.Message}");
+                return 5;
+            }
         }
 
         /// <summary>

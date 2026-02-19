@@ -3383,11 +3383,14 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                       ? 'bg-green-50 hover:bg-green-100'
                       : 'hover:bg-neutral-50'
 
-                  // Calculate statusColor AFTER status is defined
-                  const statusColor = entryStatus === 'Paid' ? 'bg-green-100 text-green-800'
-                    : entryStatus === 'Partial' ? 'bg-yellow-100 text-yellow-800'
-                      : entryStatus === 'Unpaid' ? 'bg-red-100 text-red-800'
-                        : ''
+                  // CRITICAL: Inline statusColor calculation to prevent minifier conflicts
+                  // Calculate status color directly in JSX to avoid TDZ issues
+                  const getEntryStatusColor = () => {
+                    if (entryStatus === 'Paid') return 'bg-green-100 text-green-800'
+                    if (entryStatus === 'Partial') return 'bg-yellow-100 text-yellow-800'
+                    if (entryStatus === 'Unpaid') return 'bg-red-100 text-red-800'
+                    return ''
+                  }
 
                   return (
                     <tr key={idx} className={rowBgColor}>
@@ -3411,7 +3414,7 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-center border-r border-neutral-200">
                         {entryStatus !== '-' ? (
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${statusColor}`}>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getEntryStatusColor()}`}>
                             {entryStatus}
                           </span>
                         ) : (

@@ -7,6 +7,7 @@ using HexaBill.Api.Models;
 using HexaBill.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using Npgsql;
 
 namespace HexaBill.Api.Shared.Validation
 {
@@ -41,10 +42,27 @@ namespace HexaBill.Api.Shared.Validation
 
         public async Task<string> GetDefaultCurrencyAsync()
         {
-            var setting = await _context.Settings
-                .FirstOrDefaultAsync(s => s.Key == "default_currency");
-            
-            var currency = setting?.Value ?? "AED";
+            string currency = "AED"; // Default fallback
+            try
+            {
+                var setting = await _context.Settings
+                    .FirstOrDefaultAsync(s => s.Key == "default_currency");
+                currency = setting?.Value ?? "AED";
+            }
+            catch (Exception ex)
+            {
+                var pgEx = ex as Npgsql.PostgresException ?? ex.InnerException as Npgsql.PostgresException;
+                if (pgEx != null && pgEx.SqlState == "42703" && pgEx.MessageText.Contains("Value"))
+                {
+                    // Settings.Value column doesn't exist - use default
+                    currency = "AED";
+                }
+                else
+                {
+                    // Log other errors but continue with default
+                    Console.WriteLine($"⚠️ Error loading default currency: {ex.Message}");
+                }
+            }
             
             // PROD-10: Update cache
             lock (_cacheLock)
