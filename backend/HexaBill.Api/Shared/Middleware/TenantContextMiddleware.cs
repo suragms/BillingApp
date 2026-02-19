@@ -126,15 +126,46 @@ namespace HexaBill.Api.Shared.Middleware
                             
                             // Always use raw SQL fallback after attempting to add column
                             // This ensures we get the tenant even if EF Core model cache hasn't refreshed yet
+                            // Check if FeaturesJson column exists before including it in SELECT
+                            using var checkColumnCmd = connection.CreateCommand();
+                            checkColumnCmd.CommandText = @"
+                                SELECT EXISTS (
+                                    SELECT 1 FROM information_schema.columns 
+                                    WHERE table_schema = 'public' 
+                                    AND table_name = 'Tenants' 
+                                    AND column_name = 'FeaturesJson'
+                                )";
+                            var hasFeaturesJson = false;
+                            using (var checkReader = await checkColumnCmd.ExecuteReaderAsync())
+                            {
+                                if (await checkReader.ReadAsync())
+                                {
+                                    hasFeaturesJson = checkReader.GetBoolean(0);
+                                }
+                            }
+                            
                             using var command = connection.CreateCommand();
-                            command.CommandText = @"
-                                SELECT ""Id"", ""Name"", ""Subdomain"", ""Domain"", ""Country"", ""Currency"", 
-                                       ""VatNumber"", ""CompanyNameEn"", ""CompanyNameAr"", ""Address"", 
-                                       ""Phone"", ""Email"", ""LogoPath"", ""Status"", ""CreatedAt"", 
-                                       ""TrialEndDate"", ""SuspendedAt"", ""SuspensionReason"",
-                                       COALESCE(""FeaturesJson"", NULL) AS ""FeaturesJson""
-                                FROM ""Tenants""
-                                WHERE ""Id"" = @tenantId";
+                            if (hasFeaturesJson)
+                            {
+                                command.CommandText = @"
+                                    SELECT ""Id"", ""Name"", ""Subdomain"", ""Domain"", ""Country"", ""Currency"", 
+                                           ""VatNumber"", ""CompanyNameEn"", ""CompanyNameAr"", ""Address"", 
+                                           ""Phone"", ""Email"", ""LogoPath"", ""Status"", ""CreatedAt"", 
+                                           ""TrialEndDate"", ""SuspendedAt"", ""SuspensionReason"",
+                                           ""FeaturesJson""
+                                    FROM ""Tenants""
+                                    WHERE ""Id"" = @tenantId";
+                            }
+                            else
+                            {
+                                command.CommandText = @"
+                                    SELECT ""Id"", ""Name"", ""Subdomain"", ""Domain"", ""Country"", ""Currency"", 
+                                           ""VatNumber"", ""CompanyNameEn"", ""CompanyNameAr"", ""Address"", 
+                                           ""Phone"", ""Email"", ""LogoPath"", ""Status"", ""CreatedAt"", 
+                                           ""TrialEndDate"", ""SuspendedAt"", ""SuspensionReason""
+                                    FROM ""Tenants""
+                                    WHERE ""Id"" = @tenantId";
+                            }
                             var param = command.CreateParameter();
                             param.ParameterName = "@tenantId";
                             param.Value = tenantId;
@@ -143,6 +174,7 @@ namespace HexaBill.Api.Shared.Middleware
                             using var reader = await command.ExecuteReaderAsync();
                             if (await reader.ReadAsync())
                             {
+                                var fieldCount = reader.FieldCount;
                                 tenant = new Tenant
                                 {
                                     Id = reader.GetInt32(0),
@@ -163,7 +195,7 @@ namespace HexaBill.Api.Shared.Middleware
                                     TrialEndDate = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
                                     SuspendedAt = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
                                     SuspensionReason = reader.IsDBNull(17) ? null : reader.GetString(17),
-                                    FeaturesJson = reader.IsDBNull(18) ? null : reader.GetString(18)
+                                    FeaturesJson = hasFeaturesJson && fieldCount > 18 && !reader.IsDBNull(18) ? reader.GetString(18) : null
                                 };
                             }
                         }
