@@ -70,10 +70,35 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     try
                     {
                         using var command = connection.CreateCommand();
-                        // Try both lowercase and PascalCase column names
-                        command.CommandText = @"
-                            SELECT ""Key"", 
-                                   COALESCE(""Value"", value, '') AS ""Value""
+                        // Check which column name exists and use appropriate query
+                        var checkColumnCmd = connection.CreateCommand();
+                        checkColumnCmd.CommandText = @"
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_schema = 'public' 
+                            AND table_name = 'Settings' 
+                            AND column_name IN ('Value', 'value')
+                            LIMIT 1";
+                        string? valueColumnName = null;
+                        using (var checkReader = await checkColumnCmd.ExecuteReaderAsync())
+                        {
+                            if (await checkReader.ReadAsync())
+                            {
+                                valueColumnName = checkReader.GetString(0);
+                            }
+                        }
+                        
+                        // If column doesn't exist, return defaults
+                        if (string.IsNullOrEmpty(valueColumnName))
+                        {
+                            Console.WriteLine("⚠️ Settings table has no Value column - returning defaults");
+                            return GetDefaultSettings();
+                        }
+                        
+                        // Use the correct column name (Value or value)
+                        var quotedColumn = valueColumnName == "Value" ? @"""Value""" : "value";
+                        command.CommandText = $@"
+                            SELECT ""Key"", {quotedColumn}
                             FROM ""Settings""
                             WHERE ""OwnerId"" = @tenantId OR ""TenantId"" = @tenantId";
                         var param = command.CreateParameter();
