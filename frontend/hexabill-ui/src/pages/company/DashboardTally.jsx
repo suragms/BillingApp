@@ -386,7 +386,7 @@ const DashboardTally = () => {
                                 </>
                             )}
                             {/* Branch Selector for Staff with multiple branches */}
-                            {!isAdminOrOwner(user) && staffAssignedBranchIds.length > 1 && (
+                            {!isAdminOrOwner(user) && availableBranches.length > 1 && (
                                 <>
                                     <span className="text-sm font-medium text-neutral-700 ml-2">Branch:</span>
                                     <select

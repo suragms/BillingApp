@@ -44,7 +44,7 @@ import { useBranchesRoutes } from '../../contexts/BranchesRoutesContext'
 const CustomerLedgerPage = () => {
   const { user } = useAuth()
   const { companyName } = useBranding()
-  const { branches, routes } = useBranchesRoutes()
+  const { branches, routes, staffHasNoAssignments } = useBranchesRoutes()
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [paymentLoading, setPaymentLoading] = useState(false) // Separate loading state for payment submission
@@ -275,7 +275,7 @@ const CustomerLedgerPage = () => {
   // Staff: load customers scoped to default (or current) branch/route once filter is set; if no assignments, stop loading
   useEffect(() => {
     if (!user || isAdminOrOwner(user)) return
-    if (staffAssignedBranchIds.length === 0 && staffAssignedRouteIds.length === 0) {
+    if (availableBranches.length === 0 && availableRoutes.length === 0) {
       setLoading(false)
       return
     }
@@ -283,7 +283,7 @@ const CustomerLedgerPage = () => {
     const routeId = filterDraft.routeId || ledgerRouteId
     if (!branchId) return
     fetchCustomers({ branchId, routeId: routeId || undefined })
-  }, [user, filterDraft.branchId, filterDraft.routeId, ledgerBranchId, ledgerRouteId, staffAssignedBranchIds.length, staffAssignedRouteIds.length])
+  }, [user, filterDraft.branchId, filterDraft.routeId, ledgerBranchId, ledgerRouteId, availableBranches.length, availableRoutes.length])
 
   // Load customer from URL parameter
   useEffect(() => {
@@ -1747,7 +1747,7 @@ const CustomerLedgerPage = () => {
   }
 
 
-  if (user && !isAdminOrOwner(user) && staffAssignmentsLoaded && staffAssignedBranchIds.length === 0 && staffAssignedRouteIds.length === 0) {
+  if (user && !isAdminOrOwner(user) && staffAssignmentsLoaded && staffHasNoAssignments) {
     return (
       <div className="min-h-screen flex flex-col bg-neutral-50 items-center justify-center p-6">
         <div className="flex items-center gap-3 px-4 py-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 max-w-md">
