@@ -1484,7 +1484,11 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 try
                 {
                 // Delete all transactional data for this tenant (subscription and settings are NOT touched)
-                
+                // FK order: Payments ref Sales → delete Payments first, then SaleItems, then Sales
+
+                // Payments (must delete before Sales - FK_Payments_Sales_SaleId)
+                await _context.Payments.Where(p => p.TenantId == tenantId).ExecuteDeleteAsync();
+
                 // Sales and Sale Items
                 var saleIds = await _context.Sales.Where(s => s.TenantId == tenantId).Select(s => s.Id).ToListAsync();
                 if (saleIds.Any())
@@ -1492,9 +1496,6 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     await _context.SaleItems.Where(si => saleIds.Contains(si.SaleId)).ExecuteDeleteAsync();
                     await _context.Sales.Where(s => s.TenantId == tenantId).ExecuteDeleteAsync();
                 }
-
-                // Payments
-                await _context.Payments.Where(p => p.TenantId == tenantId).ExecuteDeleteAsync();
 
                 // Expenses
                 await _context.Expenses.Where(e => e.TenantId == tenantId).ExecuteDeleteAsync();

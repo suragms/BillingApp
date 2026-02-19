@@ -1339,6 +1339,12 @@ export const superAdminAPI = {
     return response.data
   },
 
+  /** This tenant's API request count (last 60 min). For usage/rate visibility. */
+  getTenantRequestUsage: async (tenantId) => {
+    const response = await api.get(`/superadmin/tenant/${tenantId}/activity`)
+    return response.data
+  },
+
   getTenantLimits: async (id) => {
     const response = await api.get(`/superadmin/tenant/${id}/limits`)
     return response.data

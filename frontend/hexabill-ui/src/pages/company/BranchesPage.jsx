@@ -188,7 +188,7 @@ const BranchesPage = () => {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-neutral-200 mb-6">
+      <div className="flex border-b border-neutral-200 mb-6 overflow-x-auto scrollbar-hide">
         <button
           onClick={() => setActiveTab('branches')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'branches'

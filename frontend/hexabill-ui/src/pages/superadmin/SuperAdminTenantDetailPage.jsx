@@ -37,7 +37,9 @@ import {
   User as UserIcon,
   Copy,
   Info,
-  Download
+  Download,
+  Zap,
+  AlertTriangle
 } from 'lucide-react'
 import { superAdminAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
@@ -88,6 +90,7 @@ const SuperAdminTenantDetailPage = () => {
   })
 
   const [tenantHealth, setTenantHealth] = useState(null)
+  const [tenantRequestUsage, setTenantRequestUsage] = useState(null)
   const [limitsData, setLimitsData] = useState({ maxRequestsPerMinute: 200, maxConcurrentUsers: 50, maxStorageMb: 1024, maxInvoicesPerMonth: 1000 })
   const [limitsLoading, setLimitsLoading] = useState(false)
   const [limitsSaving, setLimitsSaving] = useState(false)
@@ -112,67 +115,6 @@ const SuperAdminTenantDetailPage = () => {
     role: 'Staff',
     phone: ''
   })
-
-  useEffect(() => {
-    if (id) {
-      fetchTenant()
-      fetchPlans()
-    }
-  }, [id])
-
-  useEffect(() => {
-    if (id && activeTab === 'overview') {
-      superAdminAPI.getTenantHealth(parseInt(id))
-        .then((res) => res?.success && res?.data && setTenantHealth(res.data))
-        .catch(() => setTenantHealth(null))
-    }
-  }, [id, activeTab])
-
-  useEffect(() => {
-    if (id && activeTab === 'invoices') {
-      setInvoicesLoading(true)
-      superAdminAPI.getTenantInvoices(parseInt(id), invoicesPage, 20)
-        .then((res) => {
-          if (res?.success && res?.data) setInvoicesData(res.data)
-          else setInvoicesData(null)
-        })
-        .catch(() => setInvoicesData(null))
-        .finally(() => setInvoicesLoading(false))
-    }
-  }, [id, activeTab, invoicesPage])
-
-  useEffect(() => {
-    if (id && activeTab === 'payments') {
-      setPaymentHistoryLoading(true)
-      superAdminAPI.getTenantPaymentHistory(parseInt(id))
-        .then((res) => {
-          if (res?.success && Array.isArray(res?.data)) setPaymentHistory(res.data)
-          else setPaymentHistory([])
-        })
-        .catch(() => setPaymentHistory([]))
-        .finally(() => setPaymentHistoryLoading(false))
-    }
-  }, [id, activeTab])
-
-  useEffect(() => {
-    if (id && activeTab === 'limits') {
-      setLimitsLoading(true)
-      superAdminAPI.getTenantLimits(parseInt(id))
-        .then((res) => {
-          const d = res?.data ?? res
-          if (d && typeof d === 'object') {
-            setLimitsData({
-              maxRequestsPerMinute: d.maxRequestsPerMinute ?? 200,
-              maxConcurrentUsers: d.maxConcurrentUsers ?? 50,
-              maxStorageMb: d.maxStorageMb ?? 1024,
-              maxInvoicesPerMonth: d.maxInvoicesPerMonth ?? 1000
-            })
-          }
-        })
-        .catch(() => {})
-        .finally(() => setLimitsLoading(false))
-    }
-  }, [id, activeTab])
 
   const fetchPlans = async () => {
     try {
@@ -203,6 +145,74 @@ const SuperAdminTenantDetailPage = () => {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (id) {
+      fetchTenant()
+      fetchPlans()
+    }
+  }, [id])
+
+  useEffect(() => {
+    if (id && activeTab === 'overview') {
+      superAdminAPI.getTenantHealth(parseInt(id))
+        .then((res) => res?.success && res?.data && setTenantHealth(res.data))
+        .catch(() => setTenantHealth(null))
+    }
+  }, [id, activeTab])
+
+  useEffect(() => {
+    if (!id || (activeTab !== 'overview' && activeTab !== 'limits')) return
+    superAdminAPI.getTenantRequestUsage(parseInt(id))
+      .then((res) => res?.success && res?.data != null && setTenantRequestUsage(res.data))
+      .catch(() => setTenantRequestUsage(null))
+  }, [id, activeTab])
+
+  useEffect(() => {
+    if (id && activeTab === 'invoices') {
+      setInvoicesLoading(true)
+      superAdminAPI.getTenantInvoices(parseInt(id), invoicesPage, 20)
+        .then((res) => {
+          if (res?.success && res?.data) setInvoicesData(res.data)
+          else setInvoicesData(null)
+        })
+        .catch(() => setInvoicesData(null))
+        .finally(() => setInvoicesLoading(false))
+    }
+  }, [id, activeTab, invoicesPage])
+
+  useEffect(() => {
+    if (id && activeTab === 'payments') {
+      setPaymentHistoryLoading(true)
+      superAdminAPI.getTenantPaymentHistory(parseInt(id))
+        .then((res) => {
+          if (res?.success && Array.isArray(res?.data)) setPaymentHistory(res.data)
+          else setPaymentHistory([])
+        })
+        .catch(() => setPaymentHistory([]))
+        .finally(() => setPaymentHistoryLoading(false))
+    }
+  }, [id, activeTab])
+
+  useEffect(() => {
+    if (id && (activeTab === 'limits' || activeTab === 'overview')) {
+      if (activeTab === 'limits') setLimitsLoading(true)
+      superAdminAPI.getTenantLimits(parseInt(id))
+        .then((res) => {
+          const d = res?.data ?? res
+          if (d && typeof d === 'object') {
+            setLimitsData({
+              maxRequestsPerMinute: d.maxRequestsPerMinute ?? 200,
+              maxConcurrentUsers: d.maxConcurrentUsers ?? 50,
+              maxStorageMb: d.maxStorageMb ?? 1024,
+              maxInvoicesPerMonth: d.maxInvoicesPerMonth ?? 1000
+            })
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLimitsLoading(false))
+    }
+  }, [id, activeTab])
 
   const handleSuspend = async () => {
     if (!tenant || !suspendReason.trim()) return
@@ -644,9 +654,9 @@ const SuperAdminTenantDetailPage = () => {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-200 mb-6 font-bold">
-        <nav className="-mb-px flex space-x-8">
+      {/* Tabs - overflow-x-auto for mobile to prevent overlapping */}
+      <div className="border-b border-gray-200 mb-6 font-bold overflow-x-auto scrollbar-hide">
+        <nav className="-mb-px flex space-x-4 sm:space-x-8 min-w-max">
           {['overview', 'users', 'invoices', 'payments', 'subscription', 'usage', 'limits', 'reports'].map((tab) => (
             <button
               key={tab}
@@ -713,6 +723,92 @@ const SuperAdminTenantDetailPage = () => {
               </div>
             </div>
           )}
+
+          {/* Client controls – single block: Suspend, Activate, Clear data, Lockout, Limits */}
+          <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <Shield className="h-5 w-5 text-indigo-600" />
+              Client controls
+            </h2>
+            <p className="text-sm text-gray-600 mb-4">Account actions and limits. Use Limits tab for rate/storage caps.</p>
+            <div className="flex flex-wrap gap-3">
+              {tenant?.status?.toLowerCase() === 'suspended' ? (
+                <button type="button" onClick={handleActivate} className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 font-medium">
+                  <CheckCircle className="h-4 w-4" /> Activate account
+                </button>
+              ) : (
+                <button type="button" onClick={() => setShowSuspendModal(true)} className="flex items-center gap-2 bg-amber-600 text-white px-4 py-2 rounded-lg hover:bg-amber-700 font-medium">
+                  <Ban className="h-4 w-4" /> Suspend access
+                </button>
+              )}
+              <button type="button" onClick={() => setShowClearDataModal(true)} className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 font-medium">
+                <Trash2 className="h-4 w-4" /> Clear data
+              </button>
+              <button type="button" onClick={() => { setLockoutAction('unlock'); setLockoutEmail(tenant?.users?.[0]?.email || ''); setShowLockoutModal(true) }} className="flex items-center gap-2 bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 font-medium">
+                <Lock className="h-4 w-4" /> Login lockout
+              </button>
+              <button type="button" onClick={() => setActiveTab('limits')} className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 font-medium">
+                <Sliders className="h-4 w-4" /> Limits & rate
+              </button>
+            </div>
+          </div>
+
+          {/* Usage, storage, and upgrade reminder */}
+          <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <TrendingUp className="h-5 w-5 text-indigo-600" />
+              Usage & storage
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm mb-4">
+              <div>
+                <p className="text-gray-500 mb-1">API requests (last 60 min)</p>
+                <p className="font-semibold text-gray-900 flex items-center gap-2">
+                  {tenantRequestUsage != null ? tenantRequestUsage.requestCountLast60Min ?? 0 : '—'}
+                  {tenantRequestUsage?.isHighVolume && <span className="text-xs font-medium text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">High volume</span>}
+                </p>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-1">Storage (estimate)</p>
+                <p className="font-semibold text-gray-900">
+                  {tenant?.usageMetrics != null ? `${(tenant.usageMetrics.storageEstimate ?? 0).toLocaleString()} rows` : '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-1">Limits</p>
+                <p className="font-semibold text-gray-900">
+                  {limitsData.maxRequestsPerMinute}/min · {limitsData.maxStorageMb} MB
+                </p>
+              </div>
+            </div>
+            {/* Upgrade reminder: trial ending or storage/usage near limit */}
+            {(tenant?.subscription?.trialEndDate || tenant?.trialEndDate) && (() => {
+              const endDate = new Date(tenant.subscription?.trialEndDate || tenant.trialEndDate)
+              const daysLeft = Math.ceil((endDate - new Date()) / (24 * 60 * 60 * 1000))
+              if (daysLeft <= 14 && daysLeft >= 0) {
+                return (
+                  <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                    <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-amber-800">Trial ends in {daysLeft} day{daysLeft !== 1 ? 's' : ''}</p>
+                      <p className="text-sm text-amber-700">Remind this client to upgrade before {endDate.toLocaleDateString()} to avoid service interruption.</p>
+                    </div>
+                  </div>
+                )
+              }
+              if (daysLeft < 0) {
+                return (
+                  <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                    <AlertTriangle className="h-5 w-5 text-red-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-red-800">Trial ended</p>
+                      <p className="text-sm text-red-700">Consider activating or upgrading this client.</p>
+                    </div>
+                  </div>
+                )
+              }
+              return null
+            })()}
+          </div>
 
           <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Basic Information</h2>
@@ -1274,13 +1370,24 @@ const SuperAdminTenantDetailPage = () => {
 
       {activeTab === 'limits' && (
         <div className="bg-white rounded-lg border border-neutral-200 shadow-sm p-6">
-          <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+          <h2 className="text-xl font-bold text-gray-900 mb-2 flex items-center gap-2">
             <Sliders className="h-6 w-6 text-indigo-600" />
             Per-Tenant Limits & Rate Limiting
           </h2>
-          <p className="text-sm text-gray-600 mb-6">
+          <p className="text-sm text-gray-600 mb-4">
             Configure API rate limits and quotas for this company. When limits are exceeded, requests return 429.
           </p>
+          {/* Request usage visibility */}
+          <div className="mb-6 p-3 bg-neutral-50 border border-neutral-200 rounded-lg flex flex-wrap items-center gap-4">
+            <span className="text-sm text-gray-600">Requests (last 60 min):</span>
+            <span className="font-semibold text-gray-900">{tenantRequestUsage != null ? (tenantRequestUsage.requestCountLast60Min ?? 0) : '—'}</span>
+            {tenantRequestUsage?.isHighVolume && (
+              <span className="text-xs font-medium text-amber-600 bg-amber-100 px-2 py-1 rounded">High volume</span>
+            )}
+            {tenantRequestUsage?.lastActiveAt && (
+              <span className="text-xs text-gray-500">Last active: {new Date(tenantRequestUsage.lastActiveAt).toLocaleString()}</span>
+            )}
+          </div>
           {limitsLoading ? (
             <LoadingCard />
           ) : (

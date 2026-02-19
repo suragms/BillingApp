@@ -12,6 +12,8 @@ namespace HexaBill.Api.Shared.Services
     {
         void RecordRequest(int tenantId);
         List<TenantActivityDto> GetTopTenantsByRequestsLast60Min(int limit = 10);
+        /// <summary>Get request count for a single tenant in the last 60 minutes.</summary>
+        (int RequestCount, DateTime? LastActiveAt) GetRequestCountForTenantLast60Min(int tenantId);
     }
 
     public class TenantActivityDto
@@ -86,6 +88,21 @@ namespace HexaBill.Api.Shared.Services
                     LastActiveAt = x.Value.Last
                 })
                 .ToList();
+        }
+
+        public (int RequestCount, DateTime? LastActiveAt) GetRequestCountForTenantLast60Min(int tenantId)
+        {
+            if (tenantId <= 0) return (0, null);
+            var cutoff = DateTime.UtcNow.AddMinutes(-60);
+            int count = 0;
+            DateTime? last = null;
+            foreach (var (tid, at) in _requests)
+            {
+                if (tid != tenantId || at <= cutoff) continue;
+                count++;
+                if (!last.HasValue || at > last) last = at;
+            }
+            return (count, last);
         }
     }
 }

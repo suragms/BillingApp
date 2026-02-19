@@ -468,12 +468,13 @@ namespace HexaBill.Api.Data
                 entity.HasIndex(e => e.CreatedAt);
             });
 
-            // Setting configuration
+            // Setting configuration - Value is reserved in PostgreSQL; explicit mapping ensures correct SQL
             modelBuilder.Entity<Setting>(entity =>
             {
                 // MULTI-TENANT: Composite key (Key + OwnerId)
                 entity.HasKey(e => new { e.Key, e.OwnerId });
                 entity.HasIndex(e => e.OwnerId);
+                entity.Property(e => e.Value).HasColumnName("Value");
             });
 
             // PriceChangeLog configuration

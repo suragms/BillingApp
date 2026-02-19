@@ -14,7 +14,9 @@ import {
   Zap,
   TrendingUp,
   ClipboardCheck,
-  XCircle
+  XCircle,
+  Server,
+  Link2
 } from 'lucide-react'
 import { superAdminAPI } from '../../services'
 import { formatCurrency } from '../../utils/currency'
@@ -36,9 +38,16 @@ const SuperAdminDashboard = () => {
   const [onboardingReport, setOnboardingReport] = useState(null)
   const [onboardingIncompleteOnly, setOnboardingIncompleteOnly] = useState(false)
   const [onboardingLoading, setOnboardingLoading] = useState(false)
+  const [platformHealth, setPlatformHealth] = useState(null)
 
   useEffect(() => {
     fetchDashboard()
+  }, [])
+
+  useEffect(() => {
+    superAdminAPI.getPlatformHealth()
+      .then((data) => setPlatformHealth(data))
+      .catch(() => setPlatformHealth(null))
   }, [])
 
   useEffect(() => {
@@ -179,6 +188,46 @@ const SuperAdminDashboard = () => {
             <Activity className="h-4 w-4" />
             <span>Live</span>
           </div>
+        </div>
+
+        {/* Platform & connection – Backend URL + DB status (from platform-health) */}
+        <div className="mb-6 p-4 bg-white border border-neutral-200 rounded-xl">
+          <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-3">
+            <Server className="h-5 w-5 text-indigo-600" />
+            Platform & connection
+          </h3>
+          {platformHealth == null ? (
+            <p className="text-sm text-neutral-500">Loading…</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div>
+                <p className="text-neutral-500 mb-1">Backend API</p>
+                <a
+                  href={platformHealth.backendUrl ? `${platformHealth.backendUrl}/api/health` : '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-indigo-600 hover:underline font-mono"
+                >
+                  <Link2 className="h-4 w-4" />
+                  {platformHealth.backendUrl || '—'}
+                </a>
+              </div>
+              <div>
+                <p className="text-neutral-500 mb-1">Database</p>
+                <span className={`flex items-center gap-1.5 ${platformHealth.database?.connected ? 'text-green-600' : 'text-red-600'}`}>
+                  {platformHealth.database?.connected ? <CheckCircle className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                  {platformHealth.database?.connected ? 'Connected' : (platformHealth.database?.error || 'Disconnected')}
+                </span>
+              </div>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => navigate('/superadmin/health')}
+            className="mt-3 text-sm text-indigo-600 hover:underline"
+          >
+            Infrastructure & health →
+          </button>
         </div>
 
         {/* Live Activity - Top tenants by API calls (last 60 min). In-memory; resets on server restart. */}

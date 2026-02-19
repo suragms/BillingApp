@@ -878,6 +878,32 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
         }
 
+        /// <summary>Get this tenant's API request count (last 60 min). SystemAdmin only. For usage/rate visibility.</summary>
+        [HttpGet("{id}/activity")]
+        public async Task<ActionResult<ApiResponse<object>>> GetTenantActivity(int id)
+        {
+            if (!IsSystemAdmin) return Forbid();
+            try
+            {
+                var (requestCount, lastActiveAt) = _activityService.GetRequestCountForTenantLast60Min(id);
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Data = new
+                    {
+                        requestCountLast60Min = requestCount,
+                        isHighVolume = requestCount > 500,
+                        lastActiveAt
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting tenant activity for {TenantId}", id);
+                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+            }
+        }
+
         /// <summary>Get per-tenant rate limits and quotas. SystemAdmin only.</summary>
         [HttpGet("{id}/limits")]
         public async Task<ActionResult<ApiResponse<TenantLimitsDto>>> GetTenantLimits(int id)

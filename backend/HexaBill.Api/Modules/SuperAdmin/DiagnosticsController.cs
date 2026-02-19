@@ -157,10 +157,12 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 error = ex.Message;
             }
 
+            var backendUrl = $"{Request.Scheme}://{Request.Host}";
             return Ok(new
             {
                 success = error == null,
                 timestamp = ts,
+                backendUrl,
                 database = new { connected = dbOk, error },
                 migrations = new { lastApplied = lastMigration, pending },
                 companyCount
