@@ -187,7 +187,7 @@ const CustomerLedgerPage = () => {
           entry.paymentMode || entry.PaymentMode || '-',
           debit > 0 ? debit.toFixed(2) : '',
           credit > 0 ? credit.toFixed(2) : '',
-          (entry['status'] || '-'),
+          (entry[STATUS_PROP] || '-'),
           balance.toFixed(2)
         ]
       })
@@ -1733,7 +1733,7 @@ const CustomerLedgerPage = () => {
                   <td>${entry.paymentMode || entry.PaymentMode || '-'}</td>
                   <td>${(Number(entry.debit) || 0) > 0 ? formatCurrency(Number(entry.debit) || 0) : '-'}</td>
                   <td>${(Number(entry.credit) || 0) > 0 ? formatCurrency(Number(entry.credit) || 0) : '-'}</td>
-                  <td>${(entry['status'] || '-')}</td>
+                  <td>${(entry[STATUS_PROP] || '-')}</td>
                   <td>${formatBalance(Number(entry.balance) || 0)}</td>
                 </tr>`
     }).join('')}
@@ -2361,10 +2361,10 @@ const CustomerLedgerPage = () => {
                             if (!inDateRange) return false
 
                             // Apply filters
-                            // Use bracket notation to prevent minifier from creating 'st' variable
-                            if (ledgerFilters['status'] !== 'all') {
-                              const entryStatusValue = entry['status'] || ''
-                              const filterStatusValue = ledgerFilters['status'] || ''
+                            // Use constant property name to prevent minifier from creating 'st' variable
+                            if (ledgerFilters[STATUS_PROP] !== 'all') {
+                              const entryStatusValue = entry[STATUS_PROP] || ''
+                              const filterStatusValue = ledgerFilters[STATUS_PROP] || ''
                               const statusMatch = entryStatusValue?.toLowerCase() === filterStatusValue.toLowerCase()
                               if (!statusMatch && entry.type !== 'Payment') return false
                             }
@@ -2384,11 +2384,11 @@ const CustomerLedgerPage = () => {
                           setLedgerFilters(prev => {
                             const updated = { ...prev }
                             // Map 'status' key to maintain compatibility
-                            // Use bracket notation to prevent minifier from creating 'st' variable
-                            if (key === 'status') {
-                              updated['status'] = value
-                            } else if (key === 'type') {
-                              updated['type'] = value
+                            // Use constant property name to prevent minifier from creating 'st' variable
+                            if (key === STATUS_PROP) {
+                              updated[STATUS_PROP] = value
+                            } else if (key === TYPE_PROP) {
+                              updated[TYPE_PROP] = value
                             } else {
                               updated[key] = value
                             }
@@ -3247,12 +3247,16 @@ const CustomerLedgerPage = () => {
 // CRITICAL: Define default filters OUTSIDE component to prevent TDZ errors
 const DEFAULT_LEDGER_FILTERS = { statusFilterValue: 'all', typeFilterValue: 'all' }
 
+// CRITICAL: Define status property name as constant to prevent minifier from creating 'st'
+const STATUS_PROP = 'status'
+const TYPE_PROP = 'type'
+
 const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters, onFilterChange }) => {
   // CRITICAL: Initialize safeFilters FIRST before any other code to prevent TDZ errors
-  // Use bracket notation and Object.hasOwnProperty to avoid minifier creating 'st' from filters.status
+  // Use constant property name to prevent minifier from creating 'st' from filters.status
   const hasFilters = filters && typeof filters === 'object'
-  const filterStatusValue = (hasFilters && Object.prototype.hasOwnProperty.call(filters, 'status')) ? filters['status'] : 'all'
-  const filterTypeValue = (hasFilters && Object.prototype.hasOwnProperty.call(filters, 'type')) ? filters['type'] : 'all'
+  const filterStatusValue = (hasFilters && Object.prototype.hasOwnProperty.call(filters, STATUS_PROP)) ? filters[STATUS_PROP] : 'all'
+  const filterTypeValue = (hasFilters && Object.prototype.hasOwnProperty.call(filters, TYPE_PROP)) ? filters[TYPE_PROP] : 'all'
   const safeFilters = { statusFilterValue: filterStatusValue, typeFilterValue: filterTypeValue }
   const safeOnFilterChange = onFilterChange || (() => {})
   
@@ -3386,9 +3390,9 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
               ) : (
                 displayedEntries.map((entry, idx) => {
                   // CRITICAL: Initialize all variables at the top to prevent TDZ errors
-                  // Use bracket notation to prevent minifier from creating 'st' from entry.status
+                  // Use constant property name to prevent minifier from creating 'st' from entry.status
                   const invoiceNo = entry.reference || '-'
-                  const entryStatus = (entry['status'] || (entry.type === 'Payment' ? '-' : 'Unpaid'))
+                  const entryStatus = (entry[STATUS_PROP] || (entry.type === 'Payment' ? '-' : 'Unpaid'))
                   
                   // Format date - show time only for payments
                   const showTime = entry.type === 'Payment'
@@ -3506,8 +3510,8 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
           <>
             {displayedEntries.map((entry, idx) => {
             // CRITICAL: Initialize all variables at the top to prevent TDZ errors
-            // Use bracket notation to prevent minifier from creating 'st' from entry.status
-            const entryStatus = (entry['status'] || (entry.type === 'Payment' ? '-' : 'Unpaid'))
+            // Use constant property name to prevent minifier from creating 'st' from entry.status
+            const entryStatus = (entry[STATUS_PROP] || (entry.type === 'Payment' ? '-' : 'Unpaid'))
             const dateStr = entry.type === 'Payment'
               ? new Date(entry.date).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
               : new Date(entry.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
