@@ -272,6 +272,11 @@ const CustomerLedgerPage = () => {
     }
   }, [user])
 
+  // CRITICAL: Branches/routes from context MUST be declared BEFORE useEffect hooks that use them
+  // Move these declarations BEFORE any useEffect that references them to prevent TDZ errors
+  const availableBranches = useMemo(() => branches || [], [branches])
+  const availableRoutes = useMemo(() => routes || [], [routes])
+
   // Staff: load customers scoped to default (or current) branch/route once filter is set; if no assignments, stop loading
   useEffect(() => {
     if (!user || isAdminOrOwner(user)) return
@@ -337,10 +342,6 @@ const CustomerLedgerPage = () => {
     }
     load()
   }, [user])
-
-  // Branches/routes from context - already filtered for Staff
-  const availableBranches = useMemo(() => branches || [], [branches])
-  const availableRoutes = useMemo(() => routes || [], [routes])
 
   const availableStaff = useMemo(() => {
     if (!user) return []
