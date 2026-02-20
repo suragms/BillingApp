@@ -182,18 +182,18 @@ namespace HexaBill.Api.Modules.Reports
             catch (Exception ex)
             {
                 // Log the full exception details for debugging
-                Console.WriteLine($"Error in GetSummaryReport: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Console.WriteLine($"❌ Error in GetSummaryReport: {ex.Message}");
+                Console.WriteLine($"❌ Stack trace: {ex.StackTrace}");
                 if (ex.InnerException != null)
                 {
-                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                    Console.WriteLine($"❌ Inner exception: {ex.InnerException.Message}");
                 }
                 
                 return StatusCode(500, new ApiResponse<SummaryReportDto>
                 {
                     Success = false,
                     Message = "An error occurred while generating the summary report",
-                    Errors = new List<string> { ex.Message }
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
                 });
             }
         }

@@ -24,8 +24,11 @@ namespace HexaBill.Api.Shared.Extensions
         public static IServiceCollection AddSecurityServices(this IServiceCollection services, IConfiguration configuration)
         {
             // JWT Authentication with enhanced security
+            // Priority: JWT_SECRET_KEY env (production) > appsettings JwtSettings:SecretKey
             var jwtSettings = configuration.GetSection("JwtSettings");
-            var secretKey = jwtSettings["SecretKey"] ?? throw new InvalidOperationException("JWT SecretKey not configured");
+            var secretKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY")
+                ?? jwtSettings["SecretKey"]
+                ?? throw new InvalidOperationException("JWT SecretKey not configured. Set JwtSettings:SecretKey in appsettings or JWT_SECRET_KEY environment variable.");
 
             services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 .AddJwtBearer(options =>
@@ -140,43 +143,32 @@ namespace HexaBill.Api.Shared.Extensions
             // Support both appsettings.json and ALLOWED_ORIGINS environment variable
             string[] allowedOrigins;
             var allowedOriginsEnv = Environment.GetEnvironmentVariable("ALLOWED_ORIGINS");
-            
+
             if (!string.IsNullOrEmpty(allowedOriginsEnv))
             {
                 // Parse comma-separated origins from environment variable
-                var envOrigins = allowedOriginsEnv.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                allowedOrigins = allowedOriginsEnv
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries)
                     .Select(o => o.Trim())
                     .Where(o => !string.IsNullOrEmpty(o))
-                    .ToList();
-                
-                // Always ensure known frontend origins are included
-                var knownOrigins = new[] { "https://hexabill.netlify.app", "https://hexabill.vercel.app", "https://hexabill.onrender.com", "https://hexabill.company", "https://www.hexabill.company" };
-                foreach (var origin in knownOrigins)
-                {
-                    if (!envOrigins.Contains(origin))
-                    {
-                        envOrigins.Add(origin);
-                        Console.WriteLine($"CORS: Auto-added origin: {origin}");
-                    }
-                }
-                
-                allowedOrigins = envOrigins.ToArray();
-                Console.WriteLine($"CORS: Using ALLOWED_ORIGINS environment variable with {allowedOrigins.Length} origins");
+                    .ToArray();
+                Console.WriteLine($"CORS: Using ALLOWED_ORIGINS env var with {allowedOrigins.Length} origins");
             }
             else
             {
-                // Fallback to appsettings.json configuration with default frontend URLs
-                allowedOrigins = configuration.GetSection("AllowedOrigins").Get<string[]>() ?? 
-                                new[] { 
-                                    "http://localhost:3000", 
+                // Fallback to appsettings.json — NO hardcoded production URLs
+                allowedOrigins = configuration.GetSection("AllowedOrigins").Get<string[]>() ??
+                                new[]
+                                {
+                                    "http://localhost:3000",
                                     "https://localhost:3000",
-                                    "https://hexabill.netlify.app",
-                                    "https://hexabill.company",
-                                    "https://www.hexabill.company"
+                                    "http://localhost:5173",
+                                    "https://localhost:5173",
+                                    "http://localhost:5174"
                                 };
                 Console.WriteLine($"CORS: Using appsettings.json with {allowedOrigins.Length} origins");
             }
-            
+
             // Log all allowed origins for debugging
             foreach (var origin in allowedOrigins)
             {
@@ -195,11 +187,21 @@ namespace HexaBill.Api.Shared.Extensions
 
                 options.AddPolicy("Development", policy =>
                 {
-                    policy.AllowAnyOrigin() // Allow ALL origins in development
+                    // Use explicit origins + AllowCredentials so browser accepts CORS when sending auth/cookies
+                    policy.WithOrigins(
+                            "http://localhost:3000",
+                            "https://localhost:3000",
+                            "http://localhost:5173",
+                            "https://localhost:5173",
+                            "http://localhost:5174",
+                            "https://localhost:5174",
+                            "http://127.0.0.1:3000",
+                            "http://127.0.0.1:5173",
+                            "http://127.0.0.1:5174"
+                          )
                           .AllowAnyMethod()
-                          .AllowAnyHeader();
-                    // Note: AllowAnyOrigin() and AllowCredentials() are mutually exclusive
-                    // For development, we allow any origin without credentials
+                          .AllowAnyHeader()
+                          .AllowCredentials();
                 });
                 
                 // Default policy for fallback

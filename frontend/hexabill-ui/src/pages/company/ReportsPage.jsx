@@ -968,7 +968,11 @@ const ReportsPage = () => {
 
   const handleApplyFilters = () => {
     setAppliedFilters({ ...filters })
-    tabDataCacheRef.current = {}
+    tabDataCacheRef.current = {} // Clear cache to force refresh
+    // Trigger immediate refresh by calling fetchReportData if available
+    if (fetchReportDataRef.current && !isFetchingRef.current) {
+      fetchReportDataRef.current(false) // false = not initial load
+    }
   }
 
   // routesList derived from context (filtered by filters.branch) - no fetch
@@ -2430,8 +2434,9 @@ const ReportsPage = () => {
                 </div>
 
                 {reportData.outstandingBills && reportData.outstandingBills.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
+                  // CRITICAL FIX: Ensure table doesn't overflow on mobile/tablet - add horizontal scroll wrapper
+                  <div className="overflow-x-auto w-full">
+                    <table className="min-w-[1000px] w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50 sticky top-0 z-10">
                         <tr>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Invoice No</th>

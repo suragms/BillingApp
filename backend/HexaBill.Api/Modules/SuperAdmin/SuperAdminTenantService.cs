@@ -5,6 +5,8 @@ Date: 2026-02-11
 */
 using System.Globalization;
 using System.IO.Compression;
+using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Data;
@@ -847,22 +849,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     .ToDictionary(x => x.TenantId, x => x.LastActivity);
 
                 // Batch query 8: Plan name and MRR per tenant (latest active/trial subscription)
-                var subscriptionInfos = (await _context.Subscriptions
-                    .Where(s => tenantIds.Contains(s.TenantId) && (s.Status == SubscriptionStatus.Active || s.Status == SubscriptionStatus.Trial) && s.Plan != null)
+                // Fetch in memory then take latest per tenant (avoids EF/SQLite GroupBy+FirstOrDefault translation issues)
+                var subsWithPlan = await _context.Subscriptions
+                    .Where(s => tenantIds.Contains(s.TenantId) && (s.Status == SubscriptionStatus.Active || s.Status == SubscriptionStatus.Trial))
+                    .Select(s => new { s.TenantId, s.CreatedAt, PlanName = s.Plan != null ? s.Plan.Name : null, MRR = s.Plan != null ? s.Plan.MonthlyPrice : 0m })
+                    .ToListAsync();
+                var subscriptionInfos = subsWithPlan
                     .GroupBy(s => s.TenantId)
-                    .Select(g => new
-                    {
-                        TenantId = (int)g.Key,
-                        LatestSub = g.OrderByDescending(s => s.CreatedAt).FirstOrDefault()
-                    })
-                    .Select(x => new
-                    {
-                        x.TenantId,
-                        PlanName = x.LatestSub != null && x.LatestSub.Plan != null ? x.LatestSub.Plan.Name : null,
-                        MRR = x.LatestSub != null && x.LatestSub.Plan != null ? x.LatestSub.Plan.MonthlyPrice : 0m
-                    })
-                    .ToListAsync())
-                    .ToDictionary(x => x.TenantId, x => new { x.PlanName, x.MRR });
+                    .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.CreatedAt).First());
 
                 // Map batch results to tenant DTOs
                 foreach (var tenant in tenants)
@@ -1013,8 +1007,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 _context.Tenants.Add(tenant);
                 await _context.SaveChangesAsync();
 
-                // Generate random password for owner user (security: never hardcode passwords)
-                string generatedPassword = Guid.NewGuid().ToString("N").Substring(0, 12); // 12-character random password
+                // Generate secure random password for owner user (security: never hardcode passwords)
+                string generatedPassword = GenerateDefaultPassword();
                 
                 // Create Owner User if email is provided
                 if (!string.IsNullOrEmpty(normalizedEmail))
@@ -1114,6 +1108,15 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 await transaction.RollbackAsync();
                 throw;
             }
+        }
+
+        /// <summary>Generate a secure random default password (no hardcoded passwords).</summary>
+        private static string GenerateDefaultPassword()
+        {
+            const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#";
+            var random = new byte[12];
+            RandomNumberGenerator.Fill(random);
+            return new string(random.Select(b => chars[b % chars.Length]).ToArray());
         }
 
         public async Task<TenantDto> UpdateTenantAsync(int tenantId, UpdateTenantRequest request)
@@ -1299,6 +1302,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 Email = user.Email,
                 Role = user.Role.ToString(),
                 Phone = user.Phone,
+                DashboardPermissions = user.DashboardPermissions,
+                PageAccess = user.PageAccess,
                 CreatedAt = user.CreatedAt
             };
         }
@@ -1332,6 +1337,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 Email = user.Email,
                 Role = user.Role.ToString(),
                 Phone = user.Phone,
+                DashboardPermissions = user.DashboardPermissions,
+                PageAccess = user.PageAccess,
                 CreatedAt = user.CreatedAt
             };
         }

@@ -162,6 +162,16 @@ const Dashboard = () => {
           profitChange: 15
         })
         setLowStockProducts(data.lowStockProducts || [])
+        
+        // Use dailySalesTrend from summary report instead of separate API call
+        if (data.dailySalesTrend && Array.isArray(data.dailySalesTrend)) {
+          const trendData = data.dailySalesTrend.map(item => ({
+            date: item.date || item.Date,
+            sales: item.sales || item.Sales || 0
+          }))
+          console.log('Using dailySalesTrend from summary:', trendData)
+          setSalesData(trendData)
+        }
       } else {
         console.error('Summary response not successful:', summaryResponse)
         toast.error(summaryResponse?.message || 'Failed to load summary data')
@@ -192,34 +202,8 @@ const Dashboard = () => {
         setAiSuggestions(null)
       }
 
-      console.log('Fetching sales report:', { salesFrom: salesFromDate, salesTo: salesToDate })
-
-      const salesResponse = await reportsAPI.getSalesReport({
-        fromDate: salesFromDate,
-        toDate: salesToDate,
-        pageSize: 100
-      })
-
-      console.log('Sales report response:', salesResponse)
-
-      if (salesResponse?.success && salesResponse.data?.items) {
-        const items = salesResponse.data.items || []
-        console.log(`Loaded ${items.length} sales records`)
-        const grouped = items.reduce((acc, sale) => {
-          const date = sale.invoiceDate?.split('T')[0] || new Date(sale.invoiceDate).toISOString().split('T')[0]
-          if (!acc[date]) {
-            acc[date] = { date, sales: 0, purchases: 0 }
-          }
-          acc[date].sales += sale.grandTotal || 0
-          return acc
-        }, {})
-        const salesDataArray = Object.values(grouped).sort((a, b) => a.date.localeCompare(b.date))
-        console.log('Grouped sales data:', salesDataArray)
-        setSalesData(salesDataArray)
-      } else {
-        console.warn('Sales report not successful or no items:', salesResponse)
-        setSalesData([])
-      }
+      // REMOVED: Separate sales report call - now using dailySalesTrend from summary report
+      // This eliminates duplicate API call and ensures chart respects date filters
 
       if (isAdminOrOwner(user)) {
         try {
@@ -228,20 +212,83 @@ const Dashboard = () => {
             setLastBackup(backupsResponse.data[0])
           }
 
-          // Fetch Allocations Data
-          const [branchesRes, routesRes, usersRes] = await Promise.all([
-            branchesAPI.getBranches(),
-            routesAPI.getRoutes(),
-            adminAPI.getUsers()
-          ])
-
-          if (branchesRes.success && routesRes.success && usersRes.success) {
-            const allUsers = Array.isArray(usersRes.data) ? usersRes.data : (usersRes.data.items || [])
-            setAllocations({
-              branches: branchesRes.data || [],
-              routes: routesRes.data || [],
-              users: allUsers
+          // OPTIMIZATION: Use batch endpoint to fetch branches, routes, and users in one call
+          // This reduces 3 API calls to 1, reducing server load and improving performance
+          try {
+            const batchResponse = await reportsAPI.getDashboardBatch({
+              fromDate: todayFrom,
+              toDate: todayTo
             })
+            
+            if (batchResponse?.success && batchResponse.data) {
+              const batchData = batchResponse.data
+              // Batch endpoint returns summary, branches, routes, and users
+              // Update summary if not already set (batch includes it)
+              if (batchData.summary && !summaryResponse?.success) {
+                const data = batchData.summary
+                setSummary({
+                  salesToday: data.salesToday || 0,
+                  purchasesToday: data.purchasesToday || 0,
+                  expensesToday: data.expensesToday || 0,
+                  profitToday: data.profitToday || 0,
+                  salesChange: 12,
+                  purchasesChange: 8,
+                  expensesChange: -5,
+                  profitChange: 15
+                })
+                // Use dailySalesTrend from batch if available
+                if (data.dailySalesTrend && Array.isArray(data.dailySalesTrend)) {
+                  const trendData = data.dailySalesTrend.map(item => ({
+                    date: item.date || item.Date,
+                    sales: item.sales || item.Sales || 0
+                  }))
+                  setSalesData(trendData)
+                }
+              }
+              
+              // Set allocations from batch data
+              const allUsers = Array.isArray(batchData.users) ? batchData.users : []
+              setAllocations({
+                branches: batchData.branches || [],
+                routes: batchData.routes || [],
+                users: allUsers
+              })
+              console.log('✅ Dashboard batch data loaded successfully')
+            } else {
+              // Fallback to individual calls if batch fails
+              console.warn('Batch endpoint failed, falling back to individual calls')
+              const [branchesRes, routesRes, usersRes] = await Promise.all([
+                branchesAPI.getBranches(),
+                routesAPI.getRoutes(),
+                adminAPI.getUsers()
+              ])
+
+              if (branchesRes.success && routesRes.success && usersRes.success) {
+                const allUsers = Array.isArray(usersRes.data) ? usersRes.data : (usersRes.data.items || [])
+                setAllocations({
+                  branches: branchesRes.data || [],
+                  routes: routesRes.data || [],
+                  users: allUsers
+                })
+              }
+            }
+          } catch (batchError) {
+            console.warn('Batch endpoint error, using individual calls:', batchError)
+            // Fallback to individual calls
+            const [branchesRes, routesRes, usersRes] = await Promise.all([
+              branchesAPI.getBranches(),
+              routesAPI.getRoutes(),
+              adminAPI.getUsers()
+            ])
+
+            if (branchesRes.success && routesRes.success && usersRes.success) {
+              const allUsers = Array.isArray(usersRes.data) ? usersRes.data : (usersRes.data.items || [])
+              setAllocations({
+                branches: branchesRes.data || [],
+                routes: routesRes.data || [],
+                users: allUsers
+              })
+            }
           }
 
         } catch (error) {
@@ -263,13 +310,13 @@ const Dashboard = () => {
   // Throttle dashboard refreshes to prevent too many requests
   const lastFetchTimeRef = useRef(0)
   const isFetchingRef = useRef(false)
-  const DASHBOARD_THROTTLE_MS = 30000 // 30 seconds minimum between auto-refreshes
+  const DASHBOARD_THROTTLE_MS = 60000 // 60 seconds minimum between auto-refreshes (increased from 30s to reduce API requests)
 
   useEffect(() => {
     fetchDashboardData()
   }, [pendingFilter, pendingSearch])
 
-  // Auto-refresh dashboard every 60 seconds (with throttling)
+  // Auto-refresh dashboard every 120 seconds (with throttling) - increased from 60s to reduce API requests
   useEffect(() => {
     const autoRefreshInterval = setInterval(() => {
       const now = Date.now()
@@ -280,7 +327,7 @@ const Dashboard = () => {
         lastFetchTimeRef.current = now
         fetchDashboardData()
       }
-    }, 60000) // Check every 60 seconds
+    }, 120000) // Check every 120 seconds (2 minutes) - increased from 60s to reduce API requests
 
     return () => clearInterval(autoRefreshInterval)
   }, [])

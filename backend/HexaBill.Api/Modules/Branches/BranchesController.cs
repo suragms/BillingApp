@@ -27,6 +27,17 @@ namespace HexaBill.Api.Modules.Branches
             {
                 var tenantId = CurrentTenantId;
                 if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+                
+                // Check database connection
+                if (!await _branchService.CheckDatabaseConnectionAsync())
+                {
+                    return StatusCode(503, new ApiResponse<List<BranchDto>>
+                    {
+                        Success = false,
+                        Message = "Database connection unavailable. Please try again later."
+                    });
+                }
+                
                 var list = await _branchService.GetBranchesAsync(tenantId);
                 return Ok(new ApiResponse<List<BranchDto>> { Success = true, Data = list });
             }
@@ -34,11 +45,13 @@ namespace HexaBill.Api.Modules.Branches
             {
                 Console.WriteLine($"❌ GetBranches Error: {ex.Message}");
                 if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
+                
                 return StatusCode(500, new ApiResponse<List<BranchDto>>
                 {
                     Success = false,
                     Message = "Failed to load branches. Check that the Branches table exists and migrations are applied.",
-                    Errors = new List<string> { ex.Message }
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
                 });
             }
         }

@@ -58,6 +58,7 @@ const SuperAdminTenantDetailPage = () => {
   const navigate = useNavigate()
   const { impersonateTenant } = useAuth()
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [tenant, setTenant] = useState(null)
   const [activeTab, setActiveTab] = useState('overview')
 
@@ -131,20 +132,24 @@ const SuperAdminTenantDetailPage = () => {
     }
   }
 
-  const fetchTenant = async () => {
+  const fetchTenant = async (tenantId) => {
+    const tid = tenantId ?? id
+    if (!tid) return
     try {
       setLoading(true)
-      const response = await superAdminAPI.getTenant(parseInt(id))
-      if (response.success) {
+      setError(null)
+      setTenant(null)
+      const response = await superAdminAPI.getTenant(parseInt(tid))
+      if (response?.success && response?.data) {
         setTenant(response.data)
       } else {
-        toast.error(response.message || 'Failed to load company')
-        navigate('/superadmin/tenants')
+        setError(response?.message || 'Failed to load company details')
       }
-    } catch (error) {
-      console.error('Error loading tenant:', error)
-      if (!error?._handledByInterceptor) toast.error('Failed to load company')
-      navigate('/superadmin/tenants')
+    } catch (err) {
+      console.error('Error loading tenant:', err)
+      if (!err?._handledByInterceptor) {
+        setError(err?.response?.data?.message || 'Failed to load company details')
+      }
     } finally {
       setLoading(false)
     }
@@ -152,7 +157,7 @@ const SuperAdminTenantDetailPage = () => {
 
   useEffect(() => {
     if (id) {
-      fetchTenant()
+      fetchTenant(id)
       fetchPlans()
     }
   }, [id])
@@ -557,17 +562,50 @@ const SuperAdminTenantDetailPage = () => {
 
   if (loading) {
     return (
-      <div className="p-6">
+      <div className="min-h-screen bg-neutral-50 p-4 sm:p-6">
         <LoadingCard />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-neutral-50 p-4 sm:p-6">
+        <div className="max-w-4xl mx-auto">
+          <button
+            onClick={() => navigate('/superadmin/tenants')}
+            className="flex items-center gap-2 text-sm text-neutral-600 hover:text-neutral-900 mb-4"
+          >
+            <ArrowLeft className="h-4 w-4" /> Back to companies
+          </button>
+          <div className="bg-white border border-red-200 rounded-xl p-6">
+            <p className="font-medium text-red-700 text-sm mb-1">Failed to load company</p>
+            <p className="text-sm text-neutral-500">{error}</p>
+            <button
+              onClick={() => { setError(null); fetchTenant(id); }}
+              className="mt-4 px-4 py-2 text-sm bg-neutral-900 text-white rounded-lg hover:bg-neutral-700"
+            >
+              Try again
+            </button>
+          </div>
+        </div>
       </div>
     )
   }
 
   if (!tenant) {
     return (
-      <div className="p-6">
-        <div className="bg-red-50 border border-red-200 rounded-lg shadow-sm p-4">
-          <p className="text-red-800">Company not found</p>
+      <div className="min-h-screen bg-neutral-50 p-4 sm:p-6">
+        <div className="max-w-4xl mx-auto">
+          <button
+            onClick={() => navigate('/superadmin/tenants')}
+            className="flex items-center gap-2 text-sm text-neutral-600 hover:text-neutral-900 mb-4"
+          >
+            <ArrowLeft className="h-4 w-4" /> Back to companies
+          </button>
+          <div className="bg-white border border-neutral-200 rounded-xl p-6">
+            <p className="text-sm text-neutral-500">Company not found.</p>
+          </div>
         </div>
       </div>
     )

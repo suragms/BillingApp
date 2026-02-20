@@ -60,6 +60,7 @@ const SuperAdminTenantsPage = () => {
   const [showCredentialsModal, setShowCredentialsModal] = useState(false)
   const [credentialsData, setCredentialsData] = useState(null)
   const [credentialsAcknowledged, setCredentialsAcknowledged] = useState(false)
+  const [createdTenantId, setCreatedTenantId] = useState(null) // Navigate to detail after credentials modal closes
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [showBulkExtendModal, setShowBulkExtendModal] = useState(false)
   const [showBulkAnnouncementModal, setShowBulkAnnouncementModal] = useState(false)
@@ -721,6 +722,8 @@ const SuperAdminTenantsPage = () => {
               trialEndDate: undefined // Let backend handle via trialDays
             })
 
+            const newId = response?.data?.tenant?.id ?? response?.data?.tenantId ?? response?.data?.id ?? response?.data?.Id ?? response?.data?.TenantId
+
             if (response.success && response.data?.clientCredentials) {
               setCredentialsData(response.data.clientCredentials)
               setCredentialsAcknowledged(false)
@@ -738,6 +741,7 @@ const SuperAdminTenantsPage = () => {
                 status: 'Trial',
                 trialDays: 14
               })
+              if (newId != null) setCreatedTenantId(newId)
               setShowCredentialsModal(true)
               fetchTenants()
             } else if (response.success) {
@@ -756,7 +760,12 @@ const SuperAdminTenantsPage = () => {
                 status: 'Trial',
                 trialDays: 14
               })
-              fetchTenants()
+              if (newId != null) {
+                await new Promise(r => setTimeout(r, 400))
+                navigate(`/superadmin/tenants/${newId}`)
+              } else {
+                fetchTenants()
+              }
             } else {
               toast.error(response.message || 'Failed to create company')
             }
@@ -1039,11 +1048,18 @@ const SuperAdminTenantsPage = () => {
             <button
               type="button"
               disabled={!credentialsAcknowledged}
-              onClick={() => {
+              onClick={async () => {
+                const tenantIdToOpen = createdTenantId
                 setShowCredentialsModal(false)
                 setCredentialsData(null)
                 setCredentialsAcknowledged(false)
-                fetchTenants() // Refresh list after closing credentials modal
+                setCreatedTenantId(null)
+                if (tenantIdToOpen != null) {
+                  await new Promise(r => setTimeout(r, 400))
+                  navigate(`/superadmin/tenants/${tenantIdToOpen}`)
+                } else {
+                  fetchTenants()
+                }
               }}
               className="px-5 py-2.5 bg-primary-600 text-white font-medium rounded-xl disabled:opacity-50 disabled:cursor-not-allowed hover:bg-primary-700"
             >

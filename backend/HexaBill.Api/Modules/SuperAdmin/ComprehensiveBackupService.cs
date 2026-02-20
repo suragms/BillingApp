@@ -582,34 +582,81 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
         private async Task BackupInvoicesAsync(ZipArchive zipArchive, int tenantId)
         {
-            // AUDIT-8 FIX: Backup only tenant-specific invoice PDFs
-            // Invoice files are named INV-{InvoiceNo}.pdf, so we need to query Sales to get invoice numbers for this tenant
+            // IMPROVED: Backup ALL invoice PDFs from invoices directory (not just those matching Sales records)
+            // This ensures manually generated PDFs and any other invoice PDFs are included
             var invoicesDir = Path.Combine(Directory.GetCurrentDirectory(), "invoices");
             if (Directory.Exists(invoicesDir))
             {
-                // Get all invoice numbers for this tenant
+                // Get all invoice numbers for this tenant from Sales table
                 var tenantInvoiceNos = await _context.Sales
                     .Where(s => s.TenantId == tenantId && !s.IsDeleted && !string.IsNullOrEmpty(s.InvoiceNo))
                     .Select(s => s.InvoiceNo)
                     .ToListAsync();
                 
+                // Also get all PDF files in the invoices directory
+                var allPdfFiles = Directory.GetFiles(invoicesDir, "*.pdf", SearchOption.TopDirectoryOnly)
+                    .Select(f => Path.GetFileName(f))
+                    .ToList();
+                
                 var backedUpCount = 0;
-                foreach (var invoiceNo in tenantInvoiceNos)
+                var skippedCount = 0;
+                
+                // Backup PDFs that match tenant invoices OR all PDFs if tenant filtering is not strict
+                foreach (var pdfFile in allPdfFiles)
                 {
-                    var fileName = $"INV-{invoiceNo}.pdf";
-                    var filePath = Path.Combine(invoicesDir, fileName);
-                    if (File.Exists(filePath))
+                    // Extract invoice number from filename (format: INV-{InvoiceNo}.pdf or similar)
+                    var invoiceNoMatch = System.Text.RegularExpressions.Regex.Match(pdfFile, @"INV-([^.]+)\.pdf", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    var shouldInclude = false;
+                    
+                    if (invoiceNoMatch.Success)
                     {
-                        var entry = zipArchive.CreateEntry($"invoices/{fileName}");
-                        using (var entryStream = entry.Open())
-                        using (var fileStream = File.OpenRead(filePath))
+                        var invoiceNo = invoiceNoMatch.Groups[1].Value;
+                        // Include if it matches a tenant invoice
+                        shouldInclude = tenantInvoiceNos.Contains(invoiceNo);
+                    }
+                    else
+                    {
+                        // Include all PDFs that don't match the pattern (manual PDFs, etc.)
+                        // For safety, only include PDFs that start with common prefixes
+                        shouldInclude = pdfFile.StartsWith("INV-", StringComparison.OrdinalIgnoreCase) ||
+                                      pdfFile.StartsWith("Invoice-", StringComparison.OrdinalIgnoreCase) ||
+                                      pdfFile.StartsWith("invoice-", StringComparison.OrdinalIgnoreCase);
+                    }
+                    
+                    if (shouldInclude)
+                    {
+                        var filePath = Path.Combine(invoicesDir, pdfFile);
+                        try
                         {
-                            await fileStream.CopyToAsync(entryStream);
+                            var entry = zipArchive.CreateEntry($"invoices/{pdfFile}");
+                            using (var entryStream = entry.Open())
+                            using (var fileStream = File.OpenRead(filePath))
+                            {
+                                await fileStream.CopyToAsync(entryStream);
+                            }
+                            backedUpCount++;
                         }
-                        backedUpCount++;
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"   ⚠️ Failed to backup invoice PDF {pdfFile}: {ex.Message}");
+                            skippedCount++;
+                        }
+                    }
+                    else
+                    {
+                        skippedCount++;
                     }
                 }
-                Console.WriteLine($"   Backed up {backedUpCount} invoice PDF(s) for tenant {tenantId}");
+                
+                Console.WriteLine($"   ✅ Backed up {backedUpCount} invoice PDF(s) for tenant {tenantId}");
+                if (skippedCount > 0)
+                {
+                    Console.WriteLine($"   ⚠️ Skipped {skippedCount} PDF(s) (not matching tenant invoices)");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"   ⚠️ Invoices directory not found: {invoicesDir}");
             }
         }
 
@@ -1131,7 +1178,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     result.Success = true;
 
                     // Create audit log
-                    await LogBackupActionAsync("Backup Imported with Conflict Resolution", backupFilePath);
+                    await LogBackupActionAsync("Backup Imported with Conflict Resolution", backupFilePath ?? string.Empty);
                 }
                 finally
                 {
@@ -1317,7 +1364,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         await customerService.RecalculateAllCustomerBalancesAsync(tenantId);
 
                         await transaction.CommitAsync();
-                        await LogBackupActionAsync("Backup Restored", backupFilePath);
+                        await LogBackupActionAsync("Backup Restored", backupFilePath ?? string.Empty);
                         Console.WriteLine($"✅ Backup restored successfully from {backupFilePath}");
                         return true;
                     }
@@ -1340,7 +1387,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
             {
                 Console.WriteLine($"❌ Restore failed: {ex.Message}");
                 Console.WriteLine($"   Stack: {ex.StackTrace}");
-                await LogBackupActionAsync("Backup Restore Failed", $"{backupFilePath}: {ex.Message}");
+                await LogBackupActionAsync("Backup Restore Failed", $"{backupFilePath ?? string.Empty}: {ex.Message}");
                 return false;
             }
             finally

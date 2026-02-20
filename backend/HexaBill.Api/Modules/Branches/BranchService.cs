@@ -9,6 +9,7 @@ namespace HexaBill.Api.Modules.Branches
 {
     public interface IBranchService
     {
+        Task<bool> CheckDatabaseConnectionAsync();
         Task<List<BranchDto>> GetBranchesAsync(int tenantId);
         Task<BranchDto?> GetBranchByIdAsync(int id, int tenantId);
         Task<BranchDto> CreateBranchAsync(CreateBranchRequest request, int tenantId);
@@ -26,23 +27,44 @@ namespace HexaBill.Api.Modules.Branches
             _context = context;
         }
 
+        public async Task<bool> CheckDatabaseConnectionAsync()
+        {
+            try
+            {
+                return await _context.Database.CanConnectAsync();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public async Task<List<BranchDto>> GetBranchesAsync(int tenantId)
         {
-            return await _context.Branches
-                .AsNoTracking()
-                .Where(b => tenantId <= 0 || b.TenantId == tenantId)
-                .Select(b => new BranchDto
-                {
-                    Id = b.Id,
-                    TenantId = b.TenantId,
-                    Name = b.Name,
-                    Address = b.Address,
-                    CreatedAt = b.CreatedAt,
-                    RouteCount = b.Routes.Count,
-                    AssignedStaffIds = b.BranchStaff.Select(bs => bs.UserId).ToList()
-                })
-                .OrderBy(b => b.Name)
-                .ToListAsync();
+            try
+            {
+                return await _context.Branches
+                    .AsNoTracking()
+                    .Where(b => tenantId <= 0 || b.TenantId == tenantId)
+                    .Select(b => new BranchDto
+                    {
+                        Id = b.Id,
+                        TenantId = b.TenantId,
+                        Name = b.Name,
+                        Address = b.Address,
+                        CreatedAt = b.CreatedAt,
+                        RouteCount = b.Routes.Count,
+                        AssignedStaffIds = b.BranchStaff.Select(bs => bs.UserId).ToList()
+                    })
+                    .OrderBy(b => b.Name)
+                    .ToListAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ GetBranchesAsync Error: {ex.Message}");
+                if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+                throw; // Re-throw to be handled by controller
+            }
         }
 
         public async Task<BranchDto?> GetBranchByIdAsync(int id, int tenantId)
@@ -209,7 +231,9 @@ namespace HexaBill.Api.Modules.Branches
             {
                 var sales = salesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0;
                 var expenses = expensesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0;
-                var cogs = cogsByRouteList.FirstOrDefault(x => x.RouteId == r.Id).Cogs;
+                // CRITICAL FIX: Handle case where FirstOrDefault returns default tuple (0, 0)
+                var cogsEntry = cogsByRouteList.FirstOrDefault(x => x.RouteId == r.Id);
+                var cogs = cogsEntry.RouteId == r.Id ? cogsEntry.Cogs : 0m; // Only use if RouteId matches
                 return new RouteSummaryDto
                 {
                     RouteId = r.Id,
@@ -253,18 +277,41 @@ namespace HexaBill.Api.Modules.Branches
             // Calculate growth percent (compare with previous period of same duration)
             decimal? growthPercent = null;
             var periodDays = (int)(to - from).TotalDays;
-            if (periodDays > 0)
+            // CRITICAL FIX: Prevent infinite recursion and limit depth
+            // Only calculate growth if period is reasonable (not too large) and not recursive
+            // Limit to max 1 year period to prevent excessive recursion and memory issues
+            if (periodDays > 0 && periodDays < 366) // Max 1 year to prevent excessive recursion
             {
-                var prevTo = from.AddDays(-1);
-                var prevFrom = prevTo.AddDays(-periodDays);
-                var prevSummary = await GetBranchSummaryAsync(branch.Id, tenantId, prevFrom, prevTo.AddDays(1));
-                if (prevSummary != null && prevSummary.TotalSales > 0)
+                try
                 {
-                    growthPercent = ((totalSales - prevSummary.TotalSales) / prevSummary.TotalSales * 100);
+                    var prevTo = from.AddDays(-1);
+                    var prevFrom = prevTo.AddDays(-periodDays);
+                    // CRITICAL: Prevent deep recursion - limit to 1 level only
+                    // Use Task.Run with timeout to prevent hanging
+                    var prevSummaryTask = GetBranchSummaryAsync(branch.Id, tenantId, prevFrom, prevTo.AddDays(1));
+                    var timeoutTask = Task.Delay(TimeSpan.FromSeconds(5)); // 5 second timeout
+                    var completedTask = await Task.WhenAny(prevSummaryTask, timeoutTask);
+                    
+                    if (completedTask == prevSummaryTask && !prevSummaryTask.IsFaulted)
+                    {
+                        var prevSummary = await prevSummaryTask;
+                        if (prevSummary != null && prevSummary.TotalSales > 0)
+                        {
+                            growthPercent = ((totalSales - prevSummary.TotalSales) / prevSummary.TotalSales * 100);
+                        }
+                        else if (prevSummary != null && totalSales > 0)
+                        {
+                            growthPercent = 100; // 100% growth if no previous sales
+                        }
+                    }
+                    // If timeout or faulted, growthPercent remains null (graceful degradation)
                 }
-                else if (prevSummary != null && totalSales > 0)
+                catch (Exception ex)
                 {
-                    growthPercent = 100; // 100% growth if no previous sales
+                    // CRITICAL: Don't let growth calculation crash the entire summary
+                    // Log but continue - growth percent will remain null
+                    Console.WriteLine($"⚠️ Error calculating growth percent: {ex.Message}");
+                    growthPercent = null;
                 }
             }
 

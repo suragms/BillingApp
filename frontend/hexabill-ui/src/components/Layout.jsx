@@ -69,7 +69,7 @@ const Layout = () => {
       }
     }
     ping()
-    const interval = setInterval(ping, 90000)
+    const interval = setInterval(ping, 180000) // Increased from 90s to 180s (3 minutes) to reduce API requests
     return () => clearInterval(interval)
   }, [user?.id])
 

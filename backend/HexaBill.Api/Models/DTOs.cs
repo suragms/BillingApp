@@ -26,6 +26,8 @@ namespace HexaBill.Api.Models
         public string Name { get; set; } = string.Empty;
         public string CompanyName { get; set; } = string.Empty;
         public string? DashboardPermissions { get; set; }
+        /// <summary>Comma-separated page access for Staff. Frontend uses for route guards.</summary>
+        public string? PageAccess { get; set; }
         public DateTime ExpiresAt { get; set; }
         /// <summary>Tenant ID (0 = Super Admin, >0 = tenant user). Used by frontend for access control.</summary>
         public int? TenantId { get; set; }
@@ -49,6 +51,10 @@ namespace HexaBill.Api.Models
         public string Role { get; set; } = "Staff";
         [MaxLength(20)]
         public string? Phone { get; set; }
+        [MaxLength(500)]
+        public string? DashboardPermissions { get; set; }
+        [MaxLength(500)]
+        public string? PageAccess { get; set; }
     }
 
     public class RegisterResponse
@@ -95,6 +101,8 @@ namespace HexaBill.Api.Models
         public string? Phone { get; set; }
         [MaxLength(500)]
         public string? DashboardPermissions { get; set; }
+        [MaxLength(500)]
+        public string? PageAccess { get; set; }
         public List<int>? AssignedBranchIds { get; set; }
         public List<int>? AssignedRouteIds { get; set; }
     }
@@ -105,6 +113,8 @@ namespace HexaBill.Api.Models
         public string? Phone { get; set; }
         public string? Role { get; set; }
         public string? DashboardPermissions { get; set; }
+        [MaxLength(500)]
+        public string? PageAccess { get; set; }
         public List<int>? AssignedBranchIds { get; set; }
         public List<int>? AssignedRouteIds { get; set; }
     }

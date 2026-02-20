@@ -36,11 +36,91 @@ namespace HexaBill.Api.Modules.Customers
     public class CustomerService : ICustomerService
     {
         private readonly AppDbContext _context;
+        
+        // Cache BranchId column check result to avoid repeated database queries
+        private static bool? _cachedHasBranchIdColumn = null;
+        private static DateTime? _cacheTimestamp = null;
+        private static readonly TimeSpan CacheExpiry = TimeSpan.FromMinutes(30); // Refresh cache every 30 minutes
+        private static readonly object _cacheLock = new object();
 
         public CustomerService(AppDbContext context)
         {
             _context = context;
             QuestPDF.Settings.License = LicenseType.Community;
+        }
+        
+        /// <summary>
+        /// Check if BranchId column exists in Sales table (cached result)
+        /// </summary>
+        private async Task<bool> CheckBranchIdColumnExistsAsync()
+        {
+            lock (_cacheLock)
+            {
+                // Return cached result if still valid
+                if (_cachedHasBranchIdColumn.HasValue && _cacheTimestamp.HasValue)
+                {
+                    var cacheAge = DateTime.UtcNow - _cacheTimestamp.Value;
+                    if (cacheAge < CacheExpiry)
+                    {
+                        return _cachedHasBranchIdColumn.Value;
+                    }
+                }
+            }
+            
+            // Cache expired or not set - check database
+            bool hasColumn = false;
+            if (_context.Database.IsNpgsql())
+            {
+                try
+                {
+                    var connection = _context.Database.GetDbConnection();
+                    var wasOpen = connection.State == System.Data.ConnectionState.Open;
+                    if (!wasOpen) await connection.OpenAsync();
+                    
+                    try
+                    {
+                        using var checkCmd = connection.CreateCommand();
+                        checkCmd.CommandText = @"
+                            SELECT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = 'Sales' 
+                                AND column_name = 'BranchId'
+                            )";
+                        using (var checkReader = await checkCmd.ExecuteReaderAsync())
+                        {
+                            if (await checkReader.ReadAsync())
+                            {
+                                hasColumn = checkReader.GetBoolean(0);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        if (!wasOpen) await connection.CloseAsync();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Warning: Could not check BranchId column existence: {ex.Message}");
+                    // Default to false (safer - skip filters) if check fails
+                    hasColumn = false;
+                }
+            }
+            else
+            {
+                // For non-PostgreSQL databases, assume column exists
+                hasColumn = true;
+            }
+            
+            // Update cache
+            lock (_cacheLock)
+            {
+                _cachedHasBranchIdColumn = hasColumn;
+                _cacheTimestamp = DateTime.UtcNow;
+            }
+            
+            return hasColumn;
         }
 
         public async Task<PagedResponse<CustomerDto>> GetCustomersAsync(int tenantId, int page = 1, int pageSize = 10, string? search = null, int? branchId = null, int? routeId = null, IReadOnlyList<int>? restrictToBranchIds = null, IReadOnlyList<int>? restrictToRouteIds = null)
@@ -58,9 +138,27 @@ namespace HexaBill.Api.Modules.Customers
                 .AsNoTracking() // Performance: No change tracking needed
                 .AsQueryable();
 
-            if (branchId.HasValue)
+            // FIX: When both branchId and routeId are provided, include customers that match branch OR are on route
+            // This ensures customers assigned via RouteCustomers table are shown even if they have different branchId
+            if (branchId.HasValue && routeId.HasValue)
+            {
+                // Get customers assigned to this route via RouteCustomers table
+                var routeCustomerIds = await _context.RouteCustomers
+                    .Where(rc => rc.RouteId == routeId.Value)
+                    .Select(rc => rc.CustomerId)
+                    .ToListAsync();
+                
+                // Include customers that match branch OR are assigned to route (via RouteCustomers or direct RouteId)
+                query = query.Where(c => 
+                    c.BranchId == branchId.Value || 
+                    c.RouteId == routeId.Value || 
+                    routeCustomerIds.Contains(c.Id));
+            }
+            else if (branchId.HasValue)
+            {
                 query = query.Where(c => c.BranchId == branchId.Value);
-            if (routeId.HasValue)
+            }
+            else if (routeId.HasValue)
             {
                 // Customers on route: either Customer.RouteId or in RouteCustomers
                 var routeCustomerIds = await _context.RouteCustomers
@@ -75,7 +173,12 @@ namespace HexaBill.Api.Modules.Customers
                 var hasBranch = restrictToBranchIds != null && restrictToBranchIds.Count > 0;
                 var hasRoute = restrictToRouteIds != null && restrictToRouteIds.Count > 0;
                 if (!hasBranch && !hasRoute)
-                    query = query.Where(c => false); // Staff with no assignments see no customers
+                {
+                    // Staff with no assignments: return empty result (frontend will show helpful message)
+                    // This is intentional - staff must be assigned to branches/routes to see customers
+                    query = query.Where(c => false);
+                    Console.WriteLine("⚠️ Staff user has no branch/route assignments - returning empty customer list");
+                }
                 else
                 {
                     List<int> routeCustomerIdsForRestrict = new List<int>();
@@ -87,9 +190,12 @@ namespace HexaBill.Api.Modules.Customers
                             .Distinct()
                             .ToListAsync();
                     }
+                    // Include customers from assigned branches OR assigned routes (via RouteCustomers table)
                     query = query.Where(c =>
                         (hasBranch && c.BranchId.HasValue && restrictToBranchIds!.Contains(c.BranchId.Value)) ||
                         (hasRoute && (c.RouteId.HasValue && restrictToRouteIds!.Contains(c.RouteId.Value) || routeCustomerIdsForRestrict.Contains(c.Id))));
+                    
+                    Console.WriteLine($"✅ Staff user filtered to {restrictToBranchIds?.Count ?? 0} branches and {restrictToRouteIds?.Count ?? 0} routes");
                 }
             }
 
@@ -703,59 +809,16 @@ namespace HexaBill.Api.Modules.Customers
                 
                 // CRITICAL: For PostgreSQL, check if BranchId column exists before applying filters
                 // Skip branch/route/staff filters if column doesn't exist to prevent 500 errors
-                bool hasBranchIdColumn = false;
-                if (_context.Database.IsNpgsql())
+                // Use cached result to avoid repeated database queries
+                bool hasBranchIdColumn = await CheckBranchIdColumnExistsAsync();
+                
+                if (hasBranchIdColumn)
                 {
-                    try
-                    {
-                        // Check if BranchId column exists using raw SQL with reader
-                        var connection = _context.Database.GetDbConnection();
-                        var wasOpen = connection.State == System.Data.ConnectionState.Open;
-                        if (!wasOpen) await connection.OpenAsync();
-                        
-                        try
-                        {
-                            using var checkCmd = connection.CreateCommand();
-                            checkCmd.CommandText = @"
-                                SELECT EXISTS (
-                                    SELECT 1 FROM information_schema.columns 
-                                    WHERE table_schema = 'public' 
-                                    AND table_name = 'Sales' 
-                                    AND column_name = 'BranchId'
-                                )";
-                            using (var checkReader = await checkCmd.ExecuteReaderAsync())
-                            {
-                                if (await checkReader.ReadAsync())
-                                {
-                                    hasBranchIdColumn = checkReader.GetBoolean(0);
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            if (!wasOpen) await connection.CloseAsync();
-                        }
-                        
-                        if (hasBranchIdColumn)
-                        {
-                            Console.WriteLine($"✅ BranchId column exists, applying branch/route/staff filters");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"⚠️ Warning: BranchId column doesn't exist in Sales table, skipping branch/route/staff filters");
-                        }
-                    }
-                    catch (Exception checkEx)
-                    {
-                        // If column check fails, skip filters to prevent complete failure
-                        Console.WriteLine($"⚠️ Warning: Could not check BranchId column existence, skipping filters: {checkEx.Message}");
-                        hasBranchIdColumn = false;
-                    }
+                    Console.WriteLine($"✅ BranchId column exists (cached), applying branch/route/staff filters");
                 }
                 else
                 {
-                    // For non-PostgreSQL databases, assume column exists
-                    hasBranchIdColumn = true;
+                    Console.WriteLine($"⚠️ Warning: BranchId column doesn't exist in Sales table (cached), skipping branch/route/staff filters");
                 }
                 
                 // Apply filters only if column exists
@@ -786,13 +849,76 @@ namespace HexaBill.Api.Modules.Customers
             if (toDate.HasValue) payments = payments.Where(p => p.PaymentDate < toDate.Value.Date.AddDays(1)).ToList();
 
             // Sales returns: filter by date if provided (returns don't have branch/route)
+            // CRITICAL FIX: SQLite may not have BranchId/RouteId columns in SaleReturns table
+            // Use projection to only select columns we actually use, avoiding BranchId/RouteId
             var salesReturnsQuery = _context.SaleReturns
                 .Where(sr => sr.CustomerId.HasValue && sr.CustomerId.Value == customerId && sr.TenantId == tenantId);
             if (fromDate.HasValue) salesReturnsQuery = salesReturnsQuery.Where(sr => sr.ReturnDate >= fromDate.Value);
             if (toDate.HasValue) salesReturnsQuery = salesReturnsQuery.Where(sr => sr.ReturnDate < toDate.Value.Date.AddDays(1));
-            var salesReturns = await salesReturnsQuery
-                .OrderBy(sr => sr.ReturnDate)
-                .ToListAsync();
+            
+            // CRITICAL FIX: SQLite may not have BranchId, RouteId, or ReturnType columns
+            // Use try-catch to handle missing columns gracefully
+            List<SaleReturn> salesReturns;
+            try
+            {
+                // Try to query with all columns first (for PostgreSQL)
+                salesReturns = await salesReturnsQuery
+                    .OrderBy(sr => sr.ReturnDate)
+                    .ToListAsync();
+            }
+            catch (Microsoft.Data.Sqlite.SqliteException sqlEx) when (sqlEx.Message.Contains("no such column"))
+            {
+                // SQLite database - use projection to exclude columns that don't exist
+                Console.WriteLine($"⚠️ SQLite detected - using projection to exclude missing columns");
+                var salesReturnsData = await salesReturnsQuery
+                    .Select(sr => new
+                    {
+                        sr.Id,
+                        sr.CustomerId,
+                        sr.TenantId,
+                        sr.ReturnDate,
+                        sr.ReturnNo,
+                        sr.GrandTotal,
+                        sr.Subtotal,
+                        sr.VatTotal,
+                        sr.Discount,
+                        sr.SaleId,
+                        sr.Status,
+                        sr.Reason,
+                        sr.IsBadItem,
+                        sr.RestoreStock,
+                        sr.CreatedAt,
+                        sr.CreatedBy,
+                        sr.OwnerId
+                        // Intentionally exclude BranchId, RouteId, and ReturnType - they may not exist in SQLite
+                    })
+                    .OrderBy(sr => sr.ReturnDate)
+                    .ToListAsync();
+                
+                // Map back to SaleReturn objects (without BranchId/RouteId/ReturnType)
+                salesReturns = salesReturnsData.Select(sr => new SaleReturn
+                {
+                    Id = sr.Id,
+                    CustomerId = sr.CustomerId,
+                    TenantId = sr.TenantId,
+                    ReturnDate = sr.ReturnDate,
+                    ReturnNo = sr.ReturnNo,
+                    GrandTotal = sr.GrandTotal,
+                    Subtotal = sr.Subtotal,
+                    VatTotal = sr.VatTotal,
+                    Discount = sr.Discount,
+                    SaleId = sr.SaleId,
+                    Status = sr.Status,
+                    ReturnType = null, // May not exist in SQLite
+                    Reason = sr.Reason,
+                    IsBadItem = sr.IsBadItem,
+                    RestoreStock = sr.RestoreStock,
+                    CreatedAt = sr.CreatedAt,
+                    CreatedBy = sr.CreatedBy,
+                    OwnerId = sr.OwnerId
+                    // BranchId and RouteId remain null (default) - they're not used in ledger anyway
+                }).ToList();
+            }
 
             // Create lookup for invoice numbers by SaleId
             var invoiceLookup = sales.ToDictionary(s => s.Id, s => s.InvoiceNo);

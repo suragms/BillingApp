@@ -31,6 +31,9 @@ namespace HexaBill.Api.Models
         [MaxLength(20)]
         public string? Phone { get; set; }
         public string? DashboardPermissions { get; set; } // Comma-separated list of allowed items
+        /// <summary>Comma-separated page access list for Staff. Null = all pages allowed.</summary>
+        [MaxLength(500)]
+        public string? PageAccess { get; set; }
         public DateTime CreatedAt { get; set; }
         /// <summary>Incremented when Force Logout is triggered. JWT session_version must match or 401.</summary>
         public int SessionVersion { get; set; }

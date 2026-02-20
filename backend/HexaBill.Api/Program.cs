@@ -4,6 +4,7 @@ Author: AI Assistant
 Date: 2024
 */
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 using HexaBill.Api.Data;
 using HexaBill.Api.Modules.Auth;
 using HexaBill.Api.Modules.Billing;
@@ -33,8 +34,17 @@ using System.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Serilog for production error tracking
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .WriteTo.File("logs/hexabill-.txt", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
+
+builder.Host.UseSerilog();
 
 // Configure logging early for better visibility
 builder.Logging.ClearProviders();
@@ -551,6 +561,46 @@ using (var scope = app.Services.CreateScope())
             var startupLogger = app.Services.GetService<ILoggerFactory>()?.CreateLogger("MigrationCheck");
             startupLogger?.LogWarning("Pending migrations detected: {Count} - {Migrations}", pendingMigrations.Count(), string.Join(", ", pendingMigrations));
         }
+        
+        // CRITICAL FIX: Check if PageAccess column exists (for SQLite databases that missed migration)
+        if (!db.Database.IsNpgsql())
+        {
+            var dbFixLogger = app.Services.GetService<ILoggerFactory>()?.CreateLogger("DatabaseFix");
+            try
+            {
+                dbFixLogger?.LogInformation("Checking for PageAccess column...");
+                
+                // Try direct ALTER TABLE - SQLite will fail silently if column exists
+                // But we'll catch the error to verify
+                try
+                {
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE Users ADD COLUMN PageAccess TEXT NULL");
+                    dbFixLogger?.LogInformation("✅ Successfully added PageAccess column");
+                }
+                catch (Microsoft.Data.Sqlite.SqliteException sqlEx) when (sqlEx.SqliteErrorCode == 1 && sqlEx.Message.Contains("duplicate column"))
+                {
+                    // Column already exists - this is fine
+                    dbFixLogger?.LogInformation("✅ PageAccess column already exists");
+                }
+                catch (Exception ex)
+                {
+                    // Try alternative: check by querying
+                    try
+                    {
+                        var testQuery = await db.Database.ExecuteSqlRawAsync("SELECT PageAccess FROM Users LIMIT 1");
+                        dbFixLogger?.LogInformation("✅ PageAccess column exists (verified by query)");
+                    }
+                    catch
+                    {
+                        dbFixLogger?.LogError(ex, "❌ Failed to add/verify PageAccess column: {Error}", ex.Message);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                dbFixLogger?.LogError(ex, "❌ Error checking PageAccess column: {Error}", ex.Message);
+            }
+        }
     }
     catch (Exception ex)
     {
@@ -565,11 +615,20 @@ app.UseMiddleware<HexaBill.Api.Shared.Middleware.GlobalExceptionHandlerMiddlewar
 // Get logger from app services
 var appLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Application");
 
-// Initialize fonts early at startup
+// Initialize fonts early at startup - wrapped in try-catch to prevent startup crashes
 appLogger.LogInformation("Initializing font registration...");
-var fontService = app.Services.GetRequiredService<IFontService>();
-fontService.RegisterFonts();
-appLogger.LogInformation("Font registration completed. Arabic font: {Font}", fontService.GetArabicFontFamily());
+try
+{
+    var fontService = app.Services.GetRequiredService<IFontService>();
+    fontService.RegisterFonts();
+    appLogger.LogInformation("Font registration completed. Arabic font: {Font}", fontService.GetArabicFontFamily());
+}
+catch (Exception fontEx)
+{
+    // CRITICAL: Don't let font registration crash the entire server
+    appLogger.LogError(fontEx, "❌ Font registration failed, but continuing startup. Error: {Error}", fontEx.Message);
+    appLogger.LogWarning("⚠️ Server will continue without custom fonts - PDF generation may use system fonts");
+}
 
 // Configure URLs - Support Render deployment (PORT env var) and local development
 app.Urls.Clear();
@@ -588,7 +647,27 @@ else
 }
 
 // Configure the HTTP request pipeline.
-// Forwarded headers first when behind Render/reverse proxy (so HTTPS redirect works)
+// CORS very first: so /api/health and all endpoints get Access-Control-Allow-Origin from Vite (localhost:5173)
+app.Use(async (context, next) =>
+{
+    var origin = context.Request.Headers.Origin.ToString();
+    var isLocalhost = origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) || origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase);
+    if (!string.IsNullOrEmpty(origin) && (isLocalhost || origin.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)))
+    {
+        context.Response.Headers.Append("Access-Control-Allow-Origin", origin);
+        context.Response.Headers.Append("Access-Control-Allow-Credentials", "true");
+        context.Response.Headers.Append("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+        context.Response.Headers.Append("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Tenant-Id, Idempotency-Key");
+    }
+    if (context.Request.Method == "OPTIONS")
+    {
+        context.Response.StatusCode = 204;
+        return;
+    }
+    await next();
+});
+
+// Forwarded headers when behind Render/reverse proxy (so HTTPS redirect works)
 if (!app.Environment.IsDevelopment())
     app.UseForwardedHeaders();
 
@@ -624,7 +703,55 @@ if (!Directory.Exists(uploadsPath))
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(uploadsPath),
-    RequestPath = "/uploads"
+    RequestPath = "/uploads",
+    OnPrepareResponse = ctx =>
+    {
+        // CRITICAL FIX: Add cache headers for images
+        var path = ctx.File.Name;
+        if (path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || 
+            path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) || 
+            path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
+        {
+            // Cache images for 1 year (with cache busting via query params)
+            ctx.Context.Response.Headers.Append("Cache-Control", "public, max-age=31536000, immutable");
+        }
+    }
+});
+
+// CRITICAL FIX: Handle missing logo/images gracefully - return 204 No Content instead of 404
+// This prevents console errors when logos are missing (frontend will show fallback)
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/uploads"))
+    {
+        // Check if file exists before calling next
+        var requestPath = context.Request.Path.Value ?? "";
+        if (requestPath.Contains("logo", StringComparison.OrdinalIgnoreCase) ||
+            requestPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+            requestPath.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
+            requestPath.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase))
+        {
+            // Remove /uploads prefix to get relative path
+            var relativePath = requestPath.StartsWith("/uploads/") 
+                ? requestPath.Substring("/uploads/".Length) 
+                : requestPath.TrimStart('/');
+            
+            var filePath = Path.Combine(uploadsPath, relativePath);
+            var fileExists = File.Exists(filePath);
+            
+            if (!fileExists)
+            {
+                // Return 204 No Content for missing logos/images (frontend will show fallback)
+                context.Response.StatusCode = 204;
+                context.Response.ContentLength = 0;
+                await context.Response.CompleteAsync();
+                return;
+            }
+        }
+    }
+    await next();
 });
 
 // Only enforce HTTPS in non-development (forwarded headers already applied above)
@@ -632,7 +759,9 @@ if (!app.Environment.IsDevelopment())
     app.UseHttpsRedirection();
 
 // CORS MUST be before authentication/authorization
-app.UseCors(app.Environment.IsDevelopment() ? "Development" : "Production");
+// Use Development policy when not explicitly Production so localhost:5173 works without ALLOWED_ORIGINS
+var useCorsDevelopment = !app.Environment.IsProduction();
+app.UseCors(useCorsDevelopment ? "Development" : "Production");
 
 // CRITICAL: PostgreSQL Error Monitoring Middleware
 app.UseMiddleware<HexaBill.Api.Shared.Middleware.PostgreSqlErrorMonitoringMiddleware>();
@@ -688,8 +817,11 @@ app.MapGet("/api/cors-check", (HttpContext context) =>
     };
 }).AllowAnonymous();
 
-// PROD-1: Health check endpoint - handled by DiagnosticsController for comprehensive checks
-// Basic health endpoint removed - use /api/health for full diagnostics
+// Health check endpoints for Render and frontend (must return quickly)
+// NOTE: /api/health is handled by DiagnosticsController.Health - removed duplicate to prevent ambiguous route
+app.MapGet("/health", () => Results.Ok(new { status = "ok", timestamp = DateTime.UtcNow })).AllowAnonymous();
+
+// PROD-1: Readiness check with DB (for k8s/Render advanced checks)
 app.MapGet("/health/ready", async (HttpContext ctx) =>
 {
     try
@@ -746,6 +878,7 @@ app.MapGet("/api/diagnostics/errors", () =>
 }).AllowAnonymous();
 
 // AUDIT-5 FIX: Check for pending migrations on startup
+// CRITICAL: Wrap in Task.Run with ContinueWith to prevent unhandled exceptions from crashing the process
 _ = Task.Run(async () =>
 {
     try
@@ -776,21 +909,46 @@ _ = Task.Run(async () =>
     }
     catch (Exception ex)
     {
-        var logger = app.Services.GetRequiredService<ILogger<Program>>();
-        logger.LogError(ex, "❌ Error checking migrations");
-        // Don't throw - allow app to start even if migration check fails
-    }
-});
-
-// Database initialization - run in background, don't block server startup
-_ = Task.Run(async () =>
-{
-    await Task.Delay(3000); // Wait 3 seconds for server to start responding to health checks
-    using (var scope = app.Services.CreateScope())
-    {
-        var initLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseInit");
         try
         {
+            var logger = app.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogError(ex, "❌ Error checking migrations");
+        }
+        catch
+        {
+            // Even logging failed - don't crash the process
+        }
+        // Don't throw - allow app to start even if migration check fails
+    }
+}).ContinueWith(task =>
+{
+    // CRITICAL: Catch any unhandled exceptions from the Task.Run
+    if (task.IsFaulted && task.Exception != null)
+    {
+        try
+        {
+            var logger = app.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogError(task.Exception, "❌ Unhandled exception in migration check task");
+        }
+        catch
+        {
+            // Even logging failed - don't crash the process
+        }
+    }
+}, TaskContinuationOptions.OnlyOnFaulted);
+
+// Database initialization - run in background, don't block server startup
+// CRITICAL: Wrap in Task.Run with ContinueWith to prevent unhandled exceptions from crashing the process
+_ = Task.Run(async () =>
+{
+    try
+    {
+        await Task.Delay(3000); // Wait 3 seconds for server to start responding to health checks
+        using (var scope = app.Services.CreateScope())
+        {
+            var initLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseInit");
+            try
+            {
             var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             
             // CRITICAL: Ensure all required columns exist (fixes login when migrations haven't run)
@@ -1715,13 +1873,49 @@ _ = Task.Run(async () =>
             {
                 initLogger.LogError(diagEx, "❌ CRITICAL: Startup diagnostics failed with exception");
             }
-        }
-        catch (Exception ex)
-        {
-            initLogger.LogError(ex, "Database initialization error");
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    initLogger.LogError(ex, "Database initialization error");
+                }
+                catch
+                {
+                    // Even logging failed - don't crash the process
+                }
+            }
         }
     }
-});
+    catch (Exception outerEx)
+    {
+        // CRITICAL: Catch any exceptions from the entire Task.Run block
+        try
+        {
+            var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseInit");
+            logger.LogError(outerEx, "❌ Fatal error in database initialization task");
+        }
+        catch
+        {
+            // Even logging failed - don't crash the process
+        }
+    }
+}).ContinueWith(task =>
+{
+    // CRITICAL: Catch any unhandled exceptions from the Task.Run
+    if (task.IsFaulted && task.Exception != null)
+    {
+        try
+        {
+            var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseInit");
+            logger.LogError(task.Exception, "❌ Unhandled exception in database initialization task");
+        }
+        catch
+        {
+            // Even logging failed - don't crash the process
+        }
+    }
+}, TaskContinuationOptions.OnlyOnFaulted);
 
 // Start the server - this blocks forever until shutdown signal received
 appLogger.LogInformation("Starting server...");

@@ -185,7 +185,7 @@ namespace HexaBill.Api.Modules.Billing
                                     trnRow.AutoItem().Text(settings.CompanyTrn).FontSize(10).Bold();
                                     trnRow.RelativeItem();
                                     trnRow.AutoItem().Text("DATE : ").FontSize(10).Bold();
-                                    trnRow.AutoItem().Text(sale.InvoiceDate.ToString("dd-MM-yyyy")).FontSize(10).Bold();
+                                    trnRow.AutoItem().Text(FormatInvoiceDate(sale.InvoiceDate, settings)).FontSize(10).Bold();
                                 });
 
                                 // TAX INVOICE title - compact with borders
@@ -604,7 +604,7 @@ namespace HexaBill.Api.Modules.Billing
                     });
 
                     metaTable.Cell().Padding(3).Text($"INVOICE : NO : {sale.InvoiceNo}").FontSize(9).Bold();
-                    metaTable.Cell().Padding(3).AlignCenter().Text($"DATE : {sale.InvoiceDate:dd-MM-yyyy}").FontSize(9).Bold();
+                    metaTable.Cell().Padding(3).AlignCenter().Text($"DATE : {FormatInvoiceDate(sale.InvoiceDate, settings)}").FontSize(9).Bold();
                     metaTable.Cell().Padding(3).AlignRight().Text($"CUSTOMER TRN : NO : {trnDisplay}").FontSize(9).Bold();
                     
                     var customerDisplayName = string.IsNullOrWhiteSpace(sale.CustomerName) ? "Cash Customer" : sale.CustomerName;
@@ -809,15 +809,39 @@ namespace HexaBill.Api.Modules.Billing
             // MULTI-TENANT: Get owner-specific settings from database
             var companySettings = await _settingsService.GetCompanySettingsAsync(tenantId);
 
+            // Validate required settings are present
+            if (string.IsNullOrWhiteSpace(companySettings.LegalNameEn))
+            {
+                Console.WriteLine($"⚠️ Warning: Company LegalNameEn is empty for tenant {tenantId}");
+            }
+            if (string.IsNullOrWhiteSpace(companySettings.VatNumber))
+            {
+                Console.WriteLine($"⚠️ Warning: Company VatNumber is empty for tenant {tenantId}");
+            }
+
             return new InvoiceTemplateService.CompanySettings
             {
-                CompanyNameEn = companySettings.LegalNameEn,
-                CompanyNameAr = companySettings.LegalNameAr,
-                CompanyAddress = companySettings.Address,
-                CompanyTrn = companySettings.VatNumber,
-                CompanyPhone = companySettings.Mobile,
-                Currency = companySettings.Currency
+                CompanyNameEn = companySettings.LegalNameEn ?? "Company Name",
+                CompanyNameAr = companySettings.LegalNameAr ?? "",
+                CompanyAddress = companySettings.Address ?? "",
+                CompanyTrn = companySettings.VatNumber ?? "",
+                CompanyPhone = companySettings.Mobile ?? "",
+                Currency = companySettings.Currency ?? "AED",
+                VatPercent = companySettings.VatPercent,
+                InvoicePrefix = companySettings.InvoicePrefix ?? "INV",
+                VatEffectiveDate = companySettings.VatEffectiveDate ?? "",
+                VatLegalText = companySettings.VatLegalText ?? ""
             };
+        }
+        
+        /// <summary>
+        /// Format date according to company settings or default format
+        /// </summary>
+        private string FormatInvoiceDate(DateTime date, InvoiceTemplateService.CompanySettings? settings = null)
+        {
+            // Default format: dd-MM-yyyy (UAE standard)
+            // Can be extended to use settings.DateFormat if added to CompanySettings
+            return date.ToString("dd-MM-yyyy");
         }
 
         private async Task<string> GetCustomerTrnAsync(int? customerId)

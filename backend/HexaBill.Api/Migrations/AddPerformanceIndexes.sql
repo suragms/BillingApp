@@ -61,3 +61,21 @@ CREATE INDEX IF NOT EXISTS "IX_Routes_TenantId_BranchId" ON "Routes"("TenantId",
 
 -- BRANCHES TABLE INDEXES (PROD-5: Added)
 CREATE INDEX IF NOT EXISTS "IX_Branches_TenantId_IsActive" ON "Branches"("TenantId", "IsActive") WHERE "IsActive" = true;
+
+-- USERS TABLE INDEXES (Production Stabilization Plan)
+CREATE INDEX IF NOT EXISTS idx_users_tenantid ON "Users"("TenantId");
+CREATE INDEX IF NOT EXISTS idx_users_ownerid ON "Users"("OwnerId") WHERE "OwnerId" IS NOT NULL;
+
+-- SIMPLE TENANT ID INDEXES (Production Stabilization Plan - for quick tenant filtering)
+CREATE INDEX IF NOT EXISTS idx_sales_tenantid ON "Sales"("TenantId");
+CREATE INDEX IF NOT EXISTS idx_customers_tenantid ON "Customers"("TenantId");
+CREATE INDEX IF NOT EXISTS idx_products_tenantid ON "Products"("TenantId");
+CREATE INDEX IF NOT EXISTS idx_expenses_tenantid ON "Expenses"("TenantId");
+CREATE INDEX IF NOT EXISTS idx_purchases_tenantid ON "Purchases"("TenantId");
+CREATE INDEX IF NOT EXISTS idx_payments_tenantid ON "Payments"("TenantId");
+
+-- CREATED AT INDEXES (Production Stabilization Plan - for date filtering)
+CREATE INDEX IF NOT EXISTS idx_sales_createdat ON "Sales"("CreatedAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_expenses_createdat ON "Expenses"("CreatedAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_purchases_createdat ON "Purchases"("CreatedAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_payments_createdat ON "Payments"("CreatedAt" DESC);

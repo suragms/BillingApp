@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.Security.Claims;
 using System.Text.Json;
+using System;
 using HexaBill.Api.Shared.Services;
 using HexaBill.Api.Shared.Extensions;
 
@@ -93,6 +94,16 @@ namespace HexaBill.Api.Shared.Middleware
 
             context.Response.StatusCode = 500;
             context.Response.ContentType = "application/json";
+            
+            // CRITICAL FIX: Add CORS headers even on errors so frontend can read the error response
+            var origin = context.Request.Headers.Origin.ToString();
+            var isLocalhost = origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) || 
+                             origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(origin) && (isLocalhost || origin.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)))
+            {
+                context.Response.Headers.Append("Access-Control-Allow-Origin", origin);
+                context.Response.Headers.Append("Access-Control-Allow-Credentials", "true");
+            }
 
             var response = new
             {

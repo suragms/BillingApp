@@ -26,6 +26,7 @@ import Modal from '../../components/Modal'
 import { LoadingCard } from '../../components/Loading'
 import { TabNavigation } from '../../components/ui'
 import { adminAPI, settingsAPI } from '../../services'
+import { clearAllCache, clearCache } from '../../services/api'
 import { getApiBaseUrlNoSuffix } from '../../services/apiConfig'
 import toast from 'react-hot-toast'
 import { isAdminOrOwner } from '../../utils/roles'  // CRITICAL: Multi-tenant role checking
@@ -368,6 +369,10 @@ const SettingsPage = () => {
 
       const response = await adminAPI.updateSettings(backendSettings)
       if (response.success) {
+        clearAllCache()
+        // Explicit cache clearing for settings endpoints
+        clearCache('/api/settings')
+        clearCache('/api/settings/company')
         setSettings(data)
         setInitialSettings(JSON.parse(JSON.stringify(data))) // Update initial state
         setHasUnsavedChanges(false)
@@ -423,6 +428,10 @@ const SettingsPage = () => {
       const response = await adminAPI.uploadLogo(file)
       if (response?.success) {
         const logoUrl = response.data || `/uploads/${file.name}`
+        clearAllCache()
+        // Explicit cache clearing for settings endpoints
+        clearCache('/api/settings')
+        clearCache('/api/settings/company')
         setSettings(prev => ({ ...prev, logoUrl }))
         setValue('logoUrl', logoUrl)
         await updateAppIcon(logoUrl)

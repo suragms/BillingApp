@@ -541,9 +541,9 @@ const ExpensesPage = () => {
 
   // TALLY ERP LEDGER STYLE
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-slate-50">
+    <div className="min-h-screen bg-neutral-50">
       {/* Top Bar - Mobile Responsive */}
-      <div className="bg-blue-100 border-b-2 border-blue-200 px-2 sm:px-4 py-2">
+      <div className="bg-white border-b border-neutral-200 px-2 sm:px-4 py-2">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
           <div>
             <h1 className="text-base sm:text-lg font-bold text-gray-900">Expenses Ledger</h1>
@@ -585,7 +585,7 @@ const ExpensesPage = () => {
 
       <div className="p-2 sm:p-4">
         {/* Filters */}
-        <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm p-3 sm:p-4 mb-4">
+        <div className="bg-white rounded-xl border border-neutral-200 p-3 sm:p-4 mb-4">
           <div className="flex items-center mb-3">
             <Filter className="h-4 w-4 text-blue-600 mr-2" />
             <h3 className="text-sm font-semibold text-gray-900">Filters</h3>
@@ -674,7 +674,7 @@ const ExpensesPage = () => {
         {/* Summary Cards - Mobile Responsive */}
         {expenseSummary && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-4 sm:mb-6">
-            <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm p-3 sm:p-4">
+            <div className="bg-white rounded-xl border border-neutral-200 p-3 sm:p-4">
               <div className="flex items-center">
                 <TrendingDown className="h-5 w-5 sm:h-6 sm:w-6 lg:h-8 lg:w-8 text-red-600 flex-shrink-0" />
                 <div className="ml-2 sm:ml-3 lg:ml-4 min-w-0">
@@ -686,7 +686,7 @@ const ExpensesPage = () => {
               </div>
             </div>
 
-            <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm p-3 sm:p-4">
+            <div className="bg-white rounded-xl border border-neutral-200 p-3 sm:p-4">
               <div className="flex items-center">
                 <Calendar className="h-5 w-5 sm:h-6 sm:w-6 lg:h-8 lg:w-8 text-blue-600 flex-shrink-0" />
                 <div className="ml-2 sm:ml-3 lg:ml-4 min-w-0">
@@ -698,7 +698,7 @@ const ExpensesPage = () => {
               </div>
             </div>
 
-            <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm p-3 sm:p-4">
+            <div className="bg-white rounded-xl border border-neutral-200 p-3 sm:p-4">
               <div className="flex items-center">
                 <Tag className="h-5 w-5 sm:h-6 sm:w-6 lg:h-8 lg:w-8 text-green-600 flex-shrink-0" />
                 <div className="ml-2 sm:ml-3 lg:ml-4 min-w-0">
@@ -714,8 +714,8 @@ const ExpensesPage = () => {
 
         {/* Chart - Tally Style */}
         {chartData.length > 0 && (
-          <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm p-4 mb-6">
-            <div className="flex items-center mb-4 border-b-2 border-lime-400 pb-2">
+          <div className="bg-white rounded-xl border border-neutral-200 p-4 mb-6">
+            <div className="flex items-center mb-4 border-b border-neutral-200 pb-2">
               <PieChart className="h-6 w-6 text-blue-600 mr-2" />
               <h3 className="text-lg font-semibold text-gray-900">Expense Breakdown</h3>
             </div>
@@ -744,7 +744,7 @@ const ExpensesPage = () => {
         )}
 
         {/* Search and Filters - Tally Style */}
-        <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm p-4 mb-6">
+        <div className="bg-white rounded-xl border border-neutral-200 p-4 mb-6">
           <div className="flex flex-col sm:flex-row gap-4">
             <div className="flex-1">
               <div className="relative">
@@ -754,7 +754,7 @@ const ExpensesPage = () => {
                   placeholder="Search expenses..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="pl-10 pr-4 py-2 w-full border-2 border-lime-300 rounded-md focus:ring-2 focus:ring-lime-400 focus:border-lime-400 text-sm"
+                  className="pl-10 pr-4 py-2 w-full border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 text-sm"
                 />
               </div>
             </div>
@@ -763,8 +763,8 @@ const ExpensesPage = () => {
 
         {/* Aggregated View */}
         {showAggregated && aggregatedData.length > 0 && (
-          <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm overflow-hidden mb-6">
-            <div className="p-3 border-b-2 border-lime-400 bg-lime-100">
+          <div className="bg-white rounded-xl border border-neutral-200 overflow-hidden mb-6">
+            <div className="p-3 border-b border-neutral-200 bg-neutral-50">
               <h3 className="text-sm font-bold text-gray-900">
                 Expenses Aggregated by {groupBy.charAt(0).toUpperCase() + groupBy.slice(1)}
               </h3>
@@ -773,17 +773,17 @@ const ExpensesPage = () => {
             {/* Desktop Table */}
             <div className="hidden md:block overflow-x-auto">
               <table className="min-w-full text-xs">
-                <thead className="bg-lime-100">
+                <thead className="bg-neutral-50">
                   <tr>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Period</th>
-                    <th className="px-4 py-3 text-right font-semibold text-gray-700 border-r border-lime-300">Total Amount</th>
-                    <th className="px-4 py-3 text-center font-semibold text-gray-700 border-r border-lime-300">Count</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-neutral-200">Period</th>
+                    <th className="px-4 py-3 text-right font-semibold text-gray-700 border-r border-neutral-200">Total Amount</th>
+                    <th className="px-4 py-3 text-center font-semibold text-gray-700 border-r border-neutral-200">Count</th>
                     <th className="px-4 py-3 text-left font-semibold text-gray-700">By Category</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-lime-200">
+                <tbody className="divide-y divide-neutral-100">
                   {aggregatedData.map((agg, idx) => (
-                    <tr key={idx} className="hover:bg-lime-50">
+                    <tr key={idx} className="hover:bg-neutral-50">
                       <td className="px-4 py-4 whitespace-nowrap font-medium text-gray-900">
                         {agg.period}
                       </td>
@@ -851,27 +851,27 @@ const ExpensesPage = () => {
 
         {/* Expenses Table - Tally Ledger Style */}
         {!showAggregated && (
-          <div className="bg-white rounded-lg border-2 border-lime-300 shadow-sm overflow-hidden">
-            <div className="p-3 border-b-2 border-lime-400 bg-lime-100">
+          <div className="bg-white rounded-xl border border-neutral-200 overflow-hidden">
+            <div className="p-3 border-b border-neutral-200 bg-neutral-50">
               <h3 className="text-sm font-bold text-gray-900">Expenses Ledger</h3>
             </div>
 
             {/* Desktop Table */}
             <div className="hidden md:block overflow-x-auto">
               <table className="min-w-full text-xs">
-                <thead className="bg-lime-100">
+                <thead className="bg-neutral-50">
                   <tr>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Category</th>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Branch</th>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Route</th>
-                    <th className="px-4 py-3 text-right font-semibold text-gray-700 border-r border-lime-300">Amount</th>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Date</th>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-lime-300">Status</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-neutral-200">Category</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-neutral-200">Branch</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-neutral-200">Route</th>
+                    <th className="px-4 py-3 text-right font-semibold text-gray-700 border-r border-neutral-200">Amount</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-neutral-200">Date</th>
+                    <th className="px-4 py-3 text-left font-semibold text-gray-700 border-r border-neutral-200">Status</th>
                     <th className="px-4 py-3 text-left font-semibold text-gray-700">Note</th>
                     <th className="px-4 py-3 text-center font-semibold text-gray-700">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-lime-200">
+                <tbody className="divide-y divide-neutral-100">
                   {filteredExpenses.length === 0 ? (
                     <tr>
                       <td colSpan="9" className="px-6 py-8 text-center text-gray-500">
@@ -882,7 +882,7 @@ const ExpensesPage = () => {
                     </tr>
                   ) : (
                     filteredExpenses.map((expense) => (
-                      <tr key={expense.id} className="hover:bg-lime-50">
+                      <tr key={expense.id} className="hover:bg-neutral-50">
                         <td className="px-4 py-4 whitespace-nowrap">
                           <div className="flex items-center">
                             <div
@@ -892,10 +892,10 @@ const ExpensesPage = () => {
                             <span className="font-medium text-gray-900">{expense.categoryName}</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-lime-300">
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-neutral-200">
                           {expense.branchName || '-'}
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-lime-300">
+                        <td className="px-4 py-3 text-sm text-gray-700 border-r border-neutral-200">
                           {expense.routeName || '-'}
                         </td>
                         <td className="px-4 py-4 whitespace-nowrap text-right font-medium text-gray-900">
@@ -1068,7 +1068,7 @@ const ExpensesPage = () => {
                   <button
                     onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                     disabled={currentPage === 1}
-                    className="px-3 py-1 border-2 border-lime-300 rounded text-xs disabled:opacity-50"
+                    className="px-3 py-1 border border-neutral-200 rounded-lg text-xs disabled:opacity-50"
                   >
                     Previous
                   </button>
@@ -1078,7 +1078,7 @@ const ExpensesPage = () => {
                   <button
                     onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                     disabled={currentPage === totalPages}
-                    className="px-3 py-1 border-2 border-lime-300 rounded text-xs disabled:opacity-50"
+                    className="px-3 py-1 border border-neutral-200 rounded-lg text-xs disabled:opacity-50"
                   >
                     Next
                   </button>
@@ -1238,7 +1238,7 @@ const ExpensesPage = () => {
                 setAttachmentPreview(null)
                 reset()
               }}
-              className="px-4 py-2 border-2 border-lime-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-lime-50"
+              className="px-4 py-2 border border-neutral-200 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-neutral-50"
             >
               Cancel
             </button>
@@ -1417,7 +1417,7 @@ const ExpensesPage = () => {
                 setAttachmentPreview(null)
                 reset()
               }}
-              className="px-4 py-2 border-2 border-lime-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-lime-50"
+              className="px-4 py-2 border border-neutral-200 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-neutral-50"
             >
               Cancel
             </button>

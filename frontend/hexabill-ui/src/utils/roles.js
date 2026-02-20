@@ -76,3 +76,22 @@ export const getRoleDisplayName = (user) => {
  * @returns {boolean} - True if user can access admin features
  */
 export const canAccessAdminFeatures = isAdminOrOwner
+
+/**
+ * Check if user can access a given page (for Staff page-level restrictions).
+ * Owner, Admin, SystemAdmin can access all pages. Staff can access only pages in user.pageAccess (comma-separated).
+ * @param {object} user - User object with role and optional pageAccess
+ * @param {string} pageId - Page id (e.g. 'pos', 'invoices', 'products', 'customers', 'expenses', 'reports')
+ * @returns {boolean} - True if user can access the page
+ */
+export const canAccessPage = (user, pageId) => {
+  if (!user) return false
+  const role = user.role?.toLowerCase()
+  if (role === 'owner' || role === 'admin' || role === 'systemadmin') return true
+  if (role === 'staff') {
+    if (!user.pageAccess) return true // No restriction = all allowed
+    const allowed = (user.pageAccess || '').split(',').map(s => s.trim()).filter(Boolean)
+    return allowed.includes(pageId)
+  }
+  return false
+}

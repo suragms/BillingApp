@@ -71,6 +71,8 @@ namespace HexaBill.Api.Modules.Users
                         Email = u.Email,
                         Role = u.Role.ToString(),
                         Phone = u.Phone,
+                        DashboardPermissions = u.DashboardPermissions,
+                        PageAccess = u.PageAccess,
                         CreatedAt = u.CreatedAt,
                         LastLoginAt = u.LastLoginAt,
                         LastActiveAt = u.LastActiveAt,
@@ -127,7 +129,16 @@ namespace HexaBill.Api.Modules.Users
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+                Console.WriteLine($"❌ PingMe Error: {ex.Message}");
+                if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
+                
+                return StatusCode(500, new ApiResponse<object> 
+                { 
+                    Success = false, 
+                    Message = "An error occurred while updating user activity",
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
+                });
             }
         }
 
@@ -184,6 +195,8 @@ namespace HexaBill.Api.Modules.Users
                         Email = u.Email,
                         Role = u.Role.ToString(),
                         Phone = u.Phone,
+                        DashboardPermissions = u.DashboardPermissions,
+                        PageAccess = u.PageAccess,
                         CreatedAt = u.CreatedAt,
                         LastLoginAt = u.LastLoginAt,
                         LastActiveAt = u.LastActiveAt,
@@ -253,19 +266,26 @@ namespace HexaBill.Api.Modules.Users
                     Email = request.Email,
                     Password = request.Password,
                     Role = request.Role,
-                    Phone = request.Phone
+                    Phone = request.Phone,
+                    DashboardPermissions = request.DashboardPermissions,
+                    PageAccess = request.PageAccess
                 };
 
                 var result = await _authService.RegisterAsync(registerRequest, currentUserId, CurrentTenantId);
 
+                var tenantId = CurrentTenantId;
 
-                // Assign branches and routes if provided
-                if ((request.AssignedBranchIds != null && request.AssignedBranchIds.Any()) || 
+                // Assign branches and routes if provided (SECURITY: only IDs belonging to current tenant)
+                if ((request.AssignedBranchIds != null && request.AssignedBranchIds.Any()) ||
                     (request.AssignedRouteIds != null && request.AssignedRouteIds.Any()))
                 {
                     if (request.AssignedBranchIds != null)
                     {
-                        foreach (var branchId in request.AssignedBranchIds)
+                        var validBranchIds = await _context.Branches
+                            .Where(b => request.AssignedBranchIds.Contains(b.Id) && b.TenantId == tenantId)
+                            .Select(b => b.Id)
+                            .ToListAsync();
+                        foreach (var branchId in validBranchIds)
                         {
                             _context.BranchStaff.Add(new BranchStaff
                             {
@@ -278,7 +298,11 @@ namespace HexaBill.Api.Modules.Users
 
                     if (request.AssignedRouteIds != null)
                     {
-                        foreach (var routeId in request.AssignedRouteIds)
+                        var validRouteIds = await _context.Routes
+                            .Where(r => request.AssignedRouteIds.Contains(r.Id) && r.TenantId == tenantId)
+                            .Select(r => r.Id)
+                            .ToListAsync();
+                        foreach (var routeId in validRouteIds)
                         {
                             _context.RouteStaff.Add(new RouteStaff
                             {
@@ -361,28 +385,41 @@ namespace HexaBill.Api.Modules.Users
                         return BadRequest(new ApiResponse<UserDto>
                         {
                             Success = false,
-                            Message = "Invalid role. Must be 'Admin' or 'Staff'"
+                            Message = "Invalid role. Must be 'Owner', 'Admin', or 'Staff'"
                         });
                     }
                 }
 
+                // Update DashboardPermissions if provided
+                if (request.DashboardPermissions != null)
+                {
+                    user.DashboardPermissions = string.IsNullOrWhiteSpace(request.DashboardPermissions) ? null : request.DashboardPermissions;
+                }
+
+                // Update PageAccess if provided
+                if (request.PageAccess != null)
+                {
+                    user.PageAccess = string.IsNullOrWhiteSpace(request.PageAccess) ? null : request.PageAccess;
+                }
+
                 await _context.SaveChangesAsync();
 
-                // Update assignments
+                // Update assignments (SECURITY: only IDs belonging to current tenant)
                 if (request.AssignedBranchIds != null)
                 {
-                    // Remove existing
+                    var validBranchIds = await _context.Branches
+                        .Where(b => request.AssignedBranchIds.Contains(b.Id) && b.TenantId == tenantId)
+                        .Select(b => b.Id)
+                        .ToListAsync();
                     var existing = await _context.BranchStaff.Where(bs => bs.UserId == id).ToListAsync();
                     _context.BranchStaff.RemoveRange(existing);
-                    
-                    // Add new
-                    foreach (var branchId in request.AssignedBranchIds)
+                    foreach (var branchId in validBranchIds)
                     {
-                        _context.BranchStaff.Add(new BranchStaff 
-                        { 
-                            UserId = id, 
-                            BranchId = branchId, 
-                            AssignedAt = DateTime.UtcNow 
+                        _context.BranchStaff.Add(new BranchStaff
+                        {
+                            UserId = id,
+                            BranchId = branchId,
+                            AssignedAt = DateTime.UtcNow
                         });
                     }
                     await _context.SaveChangesAsync();
@@ -390,18 +427,19 @@ namespace HexaBill.Api.Modules.Users
 
                 if (request.AssignedRouteIds != null)
                 {
-                    // Remove existing
+                    var validRouteIds = await _context.Routes
+                        .Where(r => request.AssignedRouteIds.Contains(r.Id) && r.TenantId == tenantId)
+                        .Select(r => r.Id)
+                        .ToListAsync();
                     var existingRaw = await _context.RouteStaff.Where(rs => rs.UserId == id).ToListAsync();
                     _context.RouteStaff.RemoveRange(existingRaw);
-                    
-                    // Add new
-                    foreach (var routeId in request.AssignedRouteIds)
+                    foreach (var routeId in validRouteIds)
                     {
-                        _context.RouteStaff.Add(new RouteStaff 
-                        { 
-                            UserId = id, 
-                            RouteId = routeId, 
-                            AssignedAt = DateTime.UtcNow 
+                        _context.RouteStaff.Add(new RouteStaff
+                        {
+                            UserId = id,
+                            RouteId = routeId,
+                            AssignedAt = DateTime.UtcNow
                         });
                     }
                     await _context.SaveChangesAsync();
@@ -414,6 +452,7 @@ namespace HexaBill.Api.Modules.Users
                     var auditLog = new AuditLog
                     {
                         UserId = currentUserId,
+                        TenantId = tenantId,
                         Action = "User Updated",
                         Details = $"Updated user: {user.Email}",
                         CreatedAt = DateTime.UtcNow
@@ -429,6 +468,8 @@ namespace HexaBill.Api.Modules.Users
                     Email = user.Email,
                     Role = user.Role.ToString(),
                     Phone = user.Phone,
+                    DashboardPermissions = user.DashboardPermissions,
+                    PageAccess = user.PageAccess,
                     CreatedAt = user.CreatedAt,
                     LastLoginAt = user.LastLoginAt,
                     LastActiveAt = user.LastActiveAt,
@@ -485,6 +526,7 @@ namespace HexaBill.Api.Modules.Users
                     var auditLog = new AuditLog
                     {
                         UserId = currentUserId,
+                        TenantId = tenantId,
                         Action = "Password Reset",
                         Details = $"Password reset for user: {user.Email}",
                         CreatedAt = DateTime.UtcNow
@@ -569,6 +611,7 @@ namespace HexaBill.Api.Modules.Users
                 var auditLog = new AuditLog
                 {
                     UserId = currentUserId,
+                    TenantId = tenantId,
                     Action = "User Deleted",
                     Details = $"Deleted user: {user.Email}",
                     CreatedAt = DateTime.UtcNow

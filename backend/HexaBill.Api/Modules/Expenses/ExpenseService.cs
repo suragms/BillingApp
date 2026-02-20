@@ -294,106 +294,126 @@ namespace HexaBill.Api.Modules.Expenses
 
         public async Task<ExpenseDto> CreateExpenseAsync(CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null, IReadOnlyList<int>? staffAllowedRouteIds = null)
         {
-            if (staffAllowedBranchIds != null)
+            // CRITICAL FIX: Wrap in transaction to ensure atomicity of expense creation and audit log
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
             {
-                if (staffAllowedBranchIds.Count == 0)
-                    throw new InvalidOperationException("You have no branch assigned. Ask an admin to assign you to a branch before adding expenses.");
-                if (request.BranchId.HasValue && !staffAllowedBranchIds.Contains(request.BranchId.Value))
-                    throw new InvalidOperationException("You can only add expenses to your assigned branch(es).");
+                if (staffAllowedBranchIds != null)
+                {
+                    if (staffAllowedBranchIds.Count == 0)
+                        throw new InvalidOperationException("You have no branch assigned. Ask an admin to assign you to a branch before adding expenses.");
+                    if (request.BranchId.HasValue && !staffAllowedBranchIds.Contains(request.BranchId.Value))
+                        throw new InvalidOperationException("You can only add expenses to your assigned branch(es).");
+                }
+                if (staffAllowedRouteIds != null && request.RouteId.HasValue)
+                {
+                    if (staffAllowedRouteIds.Count == 0 || !staffAllowedRouteIds.Contains(request.RouteId.Value))
+                        throw new InvalidOperationException("You can only add expenses to your assigned route(s).");
+                }
+
+                var category = await _context.ExpenseCategories.FindAsync(request.CategoryId);
+                if (category == null)
+                {
+                    throw new InvalidOperationException($"Category with ID {request.CategoryId} not found");
+                }
+
+                // Determine status: Staff expenses are Pending, Owner/Admin are Approved
+                var isStaff = staffAllowedBranchIds != null;
+                var expenseStatus = isStaff ? ExpenseStatus.Pending : ExpenseStatus.Approved;
+                
+                var expense = new Expense
+                {
+                    OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
+                    TenantId = tenantId, // CRITICAL: Set new TenantId
+                    BranchId = request.BranchId,
+                    RouteId = request.RouteId,
+                    CategoryId = request.CategoryId,
+                    Amount = request.Amount,
+                    Date = request.Date.ToUtcKind(), // Ensure UTC for PostgreSQL
+                    Note = request.Note,
+                    AttachmentUrl = request.AttachmentUrl,
+                    Status = expenseStatus,
+                    RecurringExpenseId = request.RecurringExpenseId,
+                    CreatedBy = userId,
+                    CreatedAt = DateTime.UtcNow
+                };
+                
+                // Auto-approve if owner/admin
+                if (!isStaff)
+                {
+                    expense.ApprovedBy = userId;
+                    expense.ApprovedAt = DateTime.UtcNow;
+                }
+
+                _context.Expenses.Add(expense);
+                await _context.SaveChangesAsync();
+
+                // Create audit log
+                var auditLog = new AuditLog
+                {
+                    OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
+                    TenantId = tenantId, // CRITICAL: Set new TenantId
+                    UserId = userId,
+                    Action = "Expense Created",
+                    Details = $"Category: {category.Name}, Amount: {request.Amount:C}",
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                await _context.Entry(expense).Reference(e => e.Category).LoadAsync();
+
+                await _context.Entry(expense).Reference(e => e.CreatedByUser).LoadAsync();
+                
+                return new ExpenseDto
+                {
+                    Id = expense.Id,
+                    BranchId = expense.BranchId,
+                    BranchName = null,
+                    RouteId = expense.RouteId,
+                    RouteName = null,
+                    CategoryId = expense.CategoryId,
+                    CategoryName = expense.Category.Name,
+                    CategoryColor = expense.Category.ColorCode,
+                    Amount = expense.Amount,
+                    Date = expense.Date,
+                    Note = expense.Note,
+                    AttachmentUrl = expense.AttachmentUrl,
+                    Status = expense.Status.ToString(),
+                    RecurringExpenseId = expense.RecurringExpenseId,
+                    ApprovedBy = expense.ApprovedBy,
+                    ApprovedAt = expense.ApprovedAt,
+                    RejectionReason = expense.RejectionReason,
+                    CreatedByName = expense.CreatedByUser?.Name ?? ""
+                };
             }
-            if (staffAllowedRouteIds != null && request.RouteId.HasValue)
+            catch (Exception ex)
             {
-                if (staffAllowedRouteIds.Count == 0 || !staffAllowedRouteIds.Contains(request.RouteId.Value))
-                    throw new InvalidOperationException("You can only add expenses to your assigned route(s).");
+                await transaction.RollbackAsync();
+                Console.WriteLine($"❌ Error creating expense: {ex.Message}");
+                throw;
             }
-
-            var category = await _context.ExpenseCategories.FindAsync(request.CategoryId);
-            if (category == null)
-            {
-                throw new InvalidOperationException($"Category with ID {request.CategoryId} not found");
-            }
-
-            // Determine status: Staff expenses are Pending, Owner/Admin are Approved
-            var isStaff = staffAllowedBranchIds != null;
-            var expenseStatus = isStaff ? ExpenseStatus.Pending : ExpenseStatus.Approved;
-            
-            var expense = new Expense
-            {
-                OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
-                TenantId = tenantId, // CRITICAL: Set new TenantId
-                BranchId = request.BranchId,
-                RouteId = request.RouteId,
-                CategoryId = request.CategoryId,
-                Amount = request.Amount,
-                Date = request.Date.ToUtcKind(), // Ensure UTC for PostgreSQL
-                Note = request.Note,
-                AttachmentUrl = request.AttachmentUrl,
-                Status = expenseStatus,
-                RecurringExpenseId = request.RecurringExpenseId,
-                CreatedBy = userId,
-                CreatedAt = DateTime.UtcNow
-            };
-            
-            // Auto-approve if owner/admin
-            if (!isStaff)
-            {
-                expense.ApprovedBy = userId;
-                expense.ApprovedAt = DateTime.UtcNow;
-            }
-
-            _context.Expenses.Add(expense);
-            await _context.SaveChangesAsync();
-
-            // Create audit log
-            var auditLog = new AuditLog
-            {
-                OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
-                TenantId = tenantId, // CRITICAL: Set new TenantId
-                UserId = userId,
-                Action = "Expense Created",
-                Details = $"Category: {category.Name}, Amount: {request.Amount:C}",
-                CreatedAt = DateTime.UtcNow
-            };
-
-            _context.AuditLogs.Add(auditLog);
-            await _context.SaveChangesAsync();
-
-            await _context.Entry(expense).Reference(e => e.Category).LoadAsync();
-
-            await _context.Entry(expense).Reference(e => e.CreatedByUser).LoadAsync();
-            
-            return new ExpenseDto
-            {
-                Id = expense.Id,
-                BranchId = expense.BranchId,
-                BranchName = null,
-                RouteId = expense.RouteId,
-                RouteName = null,
-                CategoryId = expense.CategoryId,
-                CategoryName = expense.Category.Name,
-                CategoryColor = expense.Category.ColorCode,
-                Amount = expense.Amount,
-                Date = expense.Date,
-                Note = expense.Note,
-                AttachmentUrl = expense.AttachmentUrl,
-                Status = expense.Status.ToString(),
-                RecurringExpenseId = expense.RecurringExpenseId,
-                ApprovedBy = expense.ApprovedBy,
-                ApprovedAt = expense.ApprovedAt,
-                RejectionReason = expense.RejectionReason,
-                CreatedByName = expense.CreatedByUser?.Name ?? ""
-            };
         }
 
         public async Task<ExpenseDto?> UpdateExpenseAsync(int id, CreateExpenseRequest request, int userId, int tenantId, IReadOnlyList<int>? staffAllowedBranchIds = null, IReadOnlyList<int>? staffAllowedRouteIds = null)
         {
-            var expense = await _context.Expenses
-                .Where(e => e.Id == id && e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
-                .Include(e => e.Category)
-                .Include(e => e.Branch)
-                .Include(e => e.Route)
-                .FirstOrDefaultAsync();
-            if (expense == null) return null;
+            // CRITICAL FIX: Wrap in transaction to ensure atomicity of expense update and audit log
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
+            {
+                var expense = await _context.Expenses
+                    .Where(e => e.Id == id && e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
+                    .Include(e => e.Category)
+                    .Include(e => e.Branch)
+                    .Include(e => e.Route)
+                    .FirstOrDefaultAsync();
+                if (expense == null)
+                {
+                    await transaction.RollbackAsync();
+                    return null;
+                }
             if (staffAllowedBranchIds != null)
             {
                 if (staffAllowedBranchIds.Count == 0) return null;
@@ -421,30 +441,31 @@ namespace HexaBill.Api.Modules.Expenses
             expense.Date = request.Date.ToUtcKind(); // Ensure UTC for PostgreSQL
             expense.Note = request.Note;
             expense.AttachmentUrl = request.AttachmentUrl;
-            expense.RecurringExpenseId = request.RecurringExpenseId;
+                expense.RecurringExpenseId = request.RecurringExpenseId;
 
-            await _context.SaveChangesAsync();
+                await _context.SaveChangesAsync();
 
-            // Create audit log
-            var auditLog = new AuditLog
-            {
-                OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
-                TenantId = tenantId, // CRITICAL: Set new TenantId
-                UserId = userId,
-                Action = "Expense Updated",
-                Details = $"Expense ID: {id}, Category: {category.Name}, Amount: {request.Amount:C}",
-                CreatedAt = DateTime.UtcNow
-            };
+                // Create audit log
+                var auditLog = new AuditLog
+                {
+                    OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
+                    TenantId = tenantId, // CRITICAL: Set new TenantId
+                    UserId = userId,
+                    Action = "Expense Updated",
+                    Details = $"Expense ID: {id}, Category: {category.Name}, Amount: {request.Amount:C}",
+                    CreatedAt = DateTime.UtcNow
+                };
 
-            _context.AuditLogs.Add(auditLog);
-            await _context.SaveChangesAsync();
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
 
-            await _context.Entry(expense).Reference(e => e.Category).LoadAsync();
-            await _context.Entry(expense).Reference(e => e.Branch).LoadAsync();
-            await _context.Entry(expense).Reference(e => e.Route).LoadAsync();
-            await _context.Entry(expense).Reference(e => e.CreatedByUser).LoadAsync();
+                await _context.Entry(expense).Reference(e => e.Category).LoadAsync();
+                await _context.Entry(expense).Reference(e => e.Branch).LoadAsync();
+                await _context.Entry(expense).Reference(e => e.Route).LoadAsync();
+                await _context.Entry(expense).Reference(e => e.CreatedByUser).LoadAsync();
 
-            return new ExpenseDto
+                return new ExpenseDto
             {
                 Id = expense.Id,
                 BranchId = expense.BranchId,
@@ -462,40 +483,63 @@ namespace HexaBill.Api.Modules.Expenses
                 RecurringExpenseId = expense.RecurringExpenseId,
                 ApprovedBy = expense.ApprovedBy,
                 ApprovedAt = expense.ApprovedAt,
-                RejectionReason = expense.RejectionReason,
-                CreatedByName = expense.CreatedByUser?.Name ?? ""
-            };
+                    RejectionReason = expense.RejectionReason,
+                    CreatedByName = expense.CreatedByUser?.Name ?? ""
+                };
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                Console.WriteLine($"❌ Error updating expense: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task<bool> DeleteExpenseAsync(int id, int userId, int tenantId)
         {
-            var expense = await _context.Expenses
-                .Where(e => e.Id == id && e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
-                .Include(e => e.Category)
-                .FirstOrDefaultAsync();
-            if (expense == null) return false;
-
-            var categoryName = expense.Category.Name;
-            var amount = expense.Amount;
-
-            _context.Expenses.Remove(expense);
-            await _context.SaveChangesAsync();
-
-            // Create audit log
-            var auditLog = new AuditLog
+            // CRITICAL FIX: Wrap in transaction to ensure atomicity of expense deletion and audit log
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
             {
-                OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
-                TenantId = tenantId, // CRITICAL: Set new TenantId
-                UserId = userId,
-                Action = "Expense Deleted",
-                Details = $"Expense ID: {id}, Category: {categoryName}, Amount: {amount:C}",
-                CreatedAt = DateTime.UtcNow
-            };
+                var expense = await _context.Expenses
+                    .Where(e => e.Id == id && e.TenantId == tenantId) // CRITICAL: Multi-tenant filter
+                    .Include(e => e.Category)
+                    .FirstOrDefaultAsync();
+                if (expense == null)
+                {
+                    await transaction.RollbackAsync();
+                    return false;
+                }
 
-            _context.AuditLogs.Add(auditLog);
-            await _context.SaveChangesAsync();
+                var categoryName = expense.Category.Name;
+                var amount = expense.Amount;
 
-            return true;
+                _context.Expenses.Remove(expense);
+                await _context.SaveChangesAsync();
+
+                // Create audit log
+                var auditLog = new AuditLog
+                {
+                    OwnerId = tenantId, // CRITICAL: Set legacy OwnerId
+                    TenantId = tenantId, // CRITICAL: Set new TenantId
+                    UserId = userId,
+                    Action = "Expense Deleted",
+                    Details = $"Expense ID: {id}, Category: {categoryName}, Amount: {amount:C}",
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                Console.WriteLine($"❌ Error deleting expense: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task<List<string>> GetExpenseCategoriesAsync()

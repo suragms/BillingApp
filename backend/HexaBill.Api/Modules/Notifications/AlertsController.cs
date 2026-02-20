@@ -53,7 +53,13 @@ namespace HexaBill.Api.Modules.Notifications
         {
             try
             {
-                var count = await _alertService.GetUnreadCountAsync(CurrentTenantId);
+                var tenantId = CurrentTenantId;
+                if (tenantId <= 0 && !IsSystemAdmin)
+                {
+                    return Ok(new ApiResponse<int> { Success = true, Data = 0 });
+                }
+                
+                var count = await _alertService.GetUnreadCountAsync(tenantId);
                 return Ok(new ApiResponse<int>
                 {
                     Success = true,
@@ -63,11 +69,15 @@ namespace HexaBill.Api.Modules.Notifications
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"❌ GetUnreadCount Error: {ex.Message}");
+                if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
+                
                 return StatusCode(500, new ApiResponse<int>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = "An error occurred while retrieving unread count",
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
                 });
             }
         }

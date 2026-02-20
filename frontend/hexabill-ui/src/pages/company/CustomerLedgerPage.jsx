@@ -42,6 +42,11 @@ import InvoicePreviewModal from '../../components/InvoicePreviewModal'
 import { isAdminOrOwner } from '../../utils/roles'
 import { useBranchesRoutes } from '../../contexts/BranchesRoutesContext'
 
+// CRITICAL: Define status property name constants at top level to prevent minifier from creating 'st' variable
+// These must be defined before any component code to avoid TDZ errors
+const STATUS_PROP = 'status'
+const TYPE_PROP = 'type'
+
 const CustomerLedgerPage = () => {
   const { user } = useAuth()
   const { companyName } = useBranding()
@@ -278,18 +283,28 @@ const CustomerLedgerPage = () => {
   const availableBranches = useMemo(() => branches || [], [branches])
   const availableRoutes = useMemo(() => routes || [], [routes])
 
-  // Staff: load customers scoped to default (or current) branch/route once filter is set; if no assignments, stop loading
+  // Staff: load customers scoped to default (or current) branch/route once filter is set; if no assignments, show message
   useEffect(() => {
     if (!user || isAdminOrOwner(user)) return
     if (availableBranches.length === 0 && availableRoutes.length === 0) {
+      // Staff with no assignments - show helpful message
       setLoading(false)
+      setCustomers([])
+      if (staffHasNoAssignments) {
+        toast.error('You have not been assigned to any branches or routes. Please contact your administrator.', { duration: 5000 })
+      }
       return
     }
     const branchId = filterDraft.branchId || ledgerBranchId
     const routeId = filterDraft.routeId || ledgerRouteId
-    if (!branchId) return
-    fetchCustomers({ branchId, routeId: routeId || undefined })
-  }, [user, filterDraft.branchId, filterDraft.routeId, ledgerBranchId, ledgerRouteId, availableBranches.length, availableRoutes.length])
+    if (!branchId && availableBranches.length > 0) {
+      // Auto-select first branch if available but not selected
+      return
+    }
+    if (branchId || routeId) {
+      fetchCustomers({ branchId: branchId || undefined, routeId: routeId || undefined })
+    }
+  }, [user, filterDraft.branchId, filterDraft.routeId, ledgerBranchId, ledgerRouteId, availableBranches.length, availableRoutes.length, staffHasNoAssignments])
 
   // Load customer from URL parameter
   useEffect(() => {
@@ -2378,8 +2393,9 @@ const CustomerLedgerPage = () => {
                               const statusMatch = entryStatusValue?.toLowerCase() === filterStatusValue.toLowerCase()
                               if (!statusMatch && entry.type !== 'Payment') return false
                             }
-                            if (ledgerFilters.type !== 'all') {
-                              if (entry.type !== ledgerFilters.type) return false
+                            // Use constant property name to prevent minifier from creating 't' variable
+                            if (ledgerFilters[TYPE_PROP] !== 'all') {
+                              if (entry.type !== ledgerFilters[TYPE_PROP]) return false
                             }
 
                             return true
@@ -3257,9 +3273,7 @@ const CustomerLedgerPage = () => {
 // CRITICAL: Define default filters OUTSIDE component to prevent TDZ errors
 const DEFAULT_LEDGER_FILTERS = { statusFilterValue: 'all', typeFilterValue: 'all' }
 
-// CRITICAL: Define status property name as constant to prevent minifier from creating 'st'
-const STATUS_PROP = 'status'
-const TYPE_PROP = 'type'
+// Constants already defined at top of file - do not redefine here
 
 const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGeneratePDF, onShareWhatsApp, onPrintPreview, filters, onFilterChange }) => {
   // CRITICAL: Initialize safeFilters FIRST before any other code to prevent TDZ errors
@@ -3377,9 +3391,11 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
       {/* Ledger Table - Desktop - full width */}
       <div className="hidden md:block bg-white rounded-lg border border-neutral-200 flex-1 flex flex-col overflow-hidden min-w-0">
         <div className="overflow-x-auto overflow-y-auto flex-1 min-w-0">
-          <table className="w-full min-w-full divide-y divide-neutral-200 text-sm">
-            <thead className="bg-neutral-100 sticky top-0 z-10 border-b-2 border-neutral-300">
-              <tr>
+          {/* CRITICAL FIX: Ensure table doesn't overflow on tablets - add horizontal scroll wrapper */}
+          <div className="overflow-x-auto w-full">
+            <table className="w-full min-w-[1000px] divide-y divide-neutral-200 text-sm">
+              <thead className="bg-neutral-100 sticky top-0 z-10 border-b-2 border-neutral-300">
+                <tr>
                 <th className="px-3 py-2.5 text-left text-xs font-bold text-neutral-700 uppercase whitespace-nowrap border-r border-neutral-300">Date</th>
                 <th className="px-3 py-2.5 text-left text-xs font-bold text-neutral-700 uppercase whitespace-nowrap border-r border-neutral-300">Type</th>
                 <th className="px-3 py-2.5 text-left text-xs font-bold text-neutral-700 uppercase whitespace-nowrap border-r border-neutral-300">Invoice No</th>
@@ -3388,8 +3404,8 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
                 <th className="px-3 py-2.5 text-right text-xs font-bold text-neutral-700 uppercase whitespace-nowrap border-r border-neutral-300">Credit (AED)</th>
                 <th className="px-3 py-2.5 text-center text-xs font-bold text-neutral-700 uppercase whitespace-nowrap border-r border-neutral-300">Status</th>
                 <th className="px-3 py-2.5 text-right text-xs font-bold text-neutral-700 uppercase whitespace-nowrap">Balance</th>
-              </tr>
-            </thead>
+                </tr>
+              </thead>
             <tbody className="bg-white divide-y divide-neutral-200">
               {displayedEntries.length === 0 ? (
                 <tr>
@@ -3507,6 +3523,7 @@ const LedgerStatementTab = ({ ledgerEntries, customer, onExportExcel, onGenerate
               </tr>
             </tfoot>
           </table>
+          </div>
         </div>
       </div>
 

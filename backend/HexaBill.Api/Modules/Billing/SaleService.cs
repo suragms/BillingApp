@@ -327,21 +327,6 @@ namespace HexaBill.Api.Modules.Billing
             // Log incoming request for debugging
             Console.WriteLine($"📝 CreateSaleInternalAsync called with InvoiceNo: '{request.InvoiceNo ?? "NULL"}' for TenantId: {tenantId}, UserId: {userId}");
                     
-            // CRITICAL FIX: Generate invoice number BEFORE starting transaction
-            // to avoid "transaction aborted" errors
-            string invoiceNo;
-            if (!string.IsNullOrWhiteSpace(request.InvoiceNo))
-            {
-                Console.WriteLine($"🔢 Frontend provided invoice number: {request.InvoiceNo}");
-                invoiceNo = request.InvoiceNo.Trim();
-            }
-            else
-            {
-                // CRITICAL: Auto-generate invoice number with tenantId
-                invoiceNo = await _invoiceNumberService.GenerateNextInvoiceNumberAsync(tenantId);
-                Console.WriteLine($"🔢 Auto-generated invoice number: {invoiceNo} for TenantId: {tenantId}");
-            }
-            
             // NpgsqlRetryingExecutionStrategy does not support user-initiated transactions; wrap in execution strategy.
             var strategy = _context.Database.CreateExecutionStrategy();
             return await strategy.ExecuteAsync(async () =>
@@ -350,6 +335,22 @@ namespace HexaBill.Api.Modules.Billing
             using var transaction = await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
             try
             {
+                // CRITICAL FIX: Generate invoice number INSIDE transaction to prevent race conditions
+                // The advisory lock in InvoiceNumberService will be held during transaction commit
+                string invoiceNo;
+                if (!string.IsNullOrWhiteSpace(request.InvoiceNo))
+                {
+                    Console.WriteLine($"🔢 Frontend provided invoice number: {request.InvoiceNo}");
+                    invoiceNo = request.InvoiceNo.Trim();
+                }
+                else
+                {
+                    // CRITICAL: Auto-generate invoice number with tenantId INSIDE transaction
+                    // This ensures the advisory lock is held until transaction commits
+                    invoiceNo = await _invoiceNumberService.GenerateNextInvoiceNumberAsync(tenantId);
+                    Console.WriteLine($"🔢 Auto-generated invoice number: {invoiceNo} for TenantId: {tenantId}");
+                }
+
                 // IDEMPOTENCY CHECK: If ExternalReference provided, check for duplicate
                 if (!string.IsNullOrWhiteSpace(request.ExternalReference))
                 {
@@ -358,12 +359,14 @@ namespace HexaBill.Api.Modules.Billing
                     if (existingSale != null)
                     {
                         Console.WriteLine($"⚠️ Duplicate external reference detected: {request.ExternalReference}. Returning existing sale ID: {existingSale.Id}");
+                        await transaction.CommitAsync();
                         return await GetSaleByIdAsync(existingSale.Id, tenantId);
                     }
                 }
 
                 // CRITICAL: Check if invoice number already exists (owner-scoped)
                 // FIXED: Only check finalized sales to avoid false positives from draft/stuck invoices
+                // This check happens INSIDE transaction to prevent duplicates
                 var duplicateInvoice = await _context.Sales
                     .FirstOrDefaultAsync(s => s.InvoiceNo == invoiceNo && s.TenantId == tenantId && !s.IsDeleted && s.IsFinalized);
                 
@@ -502,6 +505,45 @@ namespace HexaBill.Api.Modules.Billing
                     throw new InvalidOperationException(string.Join("\n", validationErrors));
                 }
 
+                // CRITICAL FIX: Validate ALL stock availability BEFORE updating any stock
+                // This prevents partial updates where Product A stock is decremented but Product B fails
+                var stockValidationErrors = new List<string>();
+                var productStockChecks = new List<(int ProductId, decimal RequiredQty, string ProductName)>();
+                
+                foreach (var item in request.Items)
+                {
+                    // CRITICAL MULTI-TENANT FIX: Filter product by tenantId to prevent cross-owner access
+                    var product = await _context.Products
+                        .AsNoTracking() // Use AsNoTracking for read-only validation
+                        .FirstOrDefaultAsync(p => p.Id == item.ProductId && p.TenantId == tenantId);
+
+                    if (product == null)
+                    {
+                        stockValidationErrors.Add($"Product with ID {item.ProductId} not found for your account.");
+                        continue;
+                    }
+
+                    // Calculate base quantity
+                    var baseQty = item.Qty * product.ConversionToBase;
+
+                    // Validate stock availability
+                    if (product.StockQty < baseQty)
+                    {
+                        stockValidationErrors.Add($"Insufficient stock for {product.NameEn}. Available: {product.StockQty}, Required: {baseQty}");
+                    }
+                    else
+                    {
+                        productStockChecks.Add((product.Id, baseQty, product.NameEn));
+                    }
+                }
+
+                // If any stock validation fails, throw before updating any stock
+                if (stockValidationErrors.Any())
+                {
+                    throw new InvalidOperationException(string.Join("\n", stockValidationErrors));
+                }
+
+                // Now update stock atomically - all validations passed
                 foreach (var item in request.Items)
                 {
                     // CRITICAL MULTI-TENANT FIX: Filter product by tenantId to prevent cross-owner access
@@ -513,12 +555,6 @@ namespace HexaBill.Api.Modules.Billing
 
                     // Calculate base quantity
                     var baseQty = item.Qty * product.ConversionToBase;
-
-                    // Stock already validated above, but double-check for safety
-                    if (product.StockQty < baseQty)
-                    {
-                        throw new InvalidOperationException($"Insufficient stock for {product.NameEn}. Available: {product.StockQty}, Required: {baseQty}");
-                    }
 
                     // Calculate line totals: Total = qty × price, VAT = Total × vatPercent%, Amount = Total + VAT
                     var rowTotal = item.UnitPrice * item.Qty;

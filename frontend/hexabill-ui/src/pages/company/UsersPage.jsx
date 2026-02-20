@@ -114,6 +114,35 @@ const DashboardAccessControl = ({ selectedPermissions, onToggle, onSelectAll, on
   </div>
 )
 
+const PageAccessControl = ({ selectedPageAccess, onToggle, onSelectAll, onClearAll }) => (
+  <div className="bg-purple-50/50 rounded-lg p-3 border border-purple-100">
+    <div className="flex items-center justify-between mb-3">
+      <h3 className="text-sm font-semibold text-purple-900 flex items-center">
+        <Shield className="h-4 w-4 mr-1.5" />
+        Page access
+      </h3>
+      <div className="flex space-x-2">
+        <button type="button" onClick={onSelectAll} className="text-xs font-medium text-purple-600 hover:text-purple-800">All</button>
+        <span className="text-purple-200">|</span>
+        <button type="button" onClick={onClearAll} className="text-xs font-medium text-purple-600 hover:text-purple-800">None</button>
+      </div>
+    </div>
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+      {PAGE_ACCESS_ITEMS.map(item => {
+        const Icon = item.icon
+        const isSelected = selectedPageAccess.includes(item.id)
+        return (
+          <label key={item.id} className={`flex items-center p-2 rounded-lg cursor-pointer transition-all border ${isSelected ? 'bg-white border-purple-200 shadow-sm' : 'bg-white/40 border-transparent opacity-70 hover:bg-white hover:opacity-100'}`}>
+            <input type="checkbox" checked={isSelected} onChange={() => onToggle(item.id)} className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded cursor-pointer" />
+            <div className={`ml-3 p-1.5 rounded-md ${item.bg}`}><Icon className={`h-3.5 w-3.5 ${item.color}`} /></div>
+            <span className="ml-2 text-xs font-medium text-gray-700">{item.label}</span>
+          </label>
+        )
+      })}
+    </div>
+  </div>
+)
+
 const UserAssignments = ({ branches, routes, assignedBranches, assignedRoutes, setAssignedBranches, setAssignedRoutes }) => (
   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div className="bg-white p-3 rounded-lg border border-gray-200">
@@ -206,6 +235,11 @@ const UsersPage = () => {
     DASHBOARD_ITEMS.map(i => i.id) // Default all on
   )
 
+  // Page access state (which pages Staff can open)
+  const [selectedPageAccess, setSelectedPageAccess] = useState(
+    PAGE_ACCESS_ITEMS.map(i => i.id) // Default all
+  )
+
   const togglePermission = (id) => {
     setSelectedPermissions(prev =>
       prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
@@ -220,10 +254,19 @@ const UsersPage = () => {
     setSelectedPermissions([])
   }
 
+  const togglePageAccess = (id) => {
+    setSelectedPageAccess(prev =>
+      prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
+    )
+  }
+  const selectAllPageAccess = () => setSelectedPageAccess(PAGE_ACCESS_ITEMS.map(i => i.id))
+  const clearAllPageAccess = () => setSelectedPageAccess([])
+
   const openAddModal = () => {
     setUserModalTab('details')
     resetAdd()
     setSelectedPermissions(DASHBOARD_ITEMS.map(i => i.id))
+    setSelectedPageAccess(PAGE_ACCESS_ITEMS.map(i => i.id))
     setAssignedBranches([])
     setAssignedRoutes([])
     setShowAddModal(true)
@@ -331,6 +374,7 @@ const UsersPage = () => {
       const payload = {
         ...data,
         dashboardPermissions: cleanPermissions.join(','),
+        pageAccess: selectedPageAccess.join(','),
         assignedBranchIds: assignedBranches,
         assignedRouteIds: assignedRoutes
       }
@@ -361,6 +405,7 @@ const UsersPage = () => {
       const payload = {
         ...data,
         dashboardPermissions: cleanPermissions.join(','),
+        pageAccess: selectedPageAccess.join(','),
         assignedBranchIds: assignedBranches,
         assignedRouteIds: assignedRoutes
       }
@@ -384,6 +429,26 @@ const UsersPage = () => {
     } finally {
       setLoadingAction(false)
     }
+  }
+
+  const handleDeleteUser = (user) => {
+    if (!window.confirm(`Are you sure you want to delete ${user.name}? This cannot be undone.`)) return
+    setLoadingAction(true)
+    adminAPI.deleteUser(user.id)
+      .then((res) => {
+        if (res?.success) {
+          toast.success('User deleted')
+          fetchUsers()
+        } else {
+          toast.error(res?.message || 'Failed to delete user')
+        }
+      })
+      .catch((err) => {
+        if (!err?._handledByInterceptor) {
+          toast.error(err?.response?.data?.message || 'Cannot delete: user may have associated records')
+        }
+      })
+      .finally(() => setLoadingAction(false))
   }
 
   const handleResetPassword = async (data) => {
@@ -426,6 +491,12 @@ const UsersPage = () => {
 
     setAssignedBranches(user.assignedBranchIds || [])
     setAssignedRoutes(user.assignedRouteIds || [])
+
+    if (user.pageAccess) {
+      setSelectedPageAccess(user.pageAccess.split(',').map(s => s.trim()).filter(Boolean))
+    } else {
+      setSelectedPageAccess(PAGE_ACCESS_ITEMS.map(i => i.id))
+    }
   }
 
   const openPasswordModal = (user) => {
@@ -716,6 +787,15 @@ const UsersPage = () => {
                               <CheckCircle2 className="h-5 w-5" />
                             </button>
                           )}
+                          {user.id !== currentUser?.id && user.role?.toLowerCase() !== 'owner' && (
+                            <button
+                              onClick={() => handleDeleteUser(user)}
+                              className="text-red-600 hover:text-red-900 p-2 hover:bg-red-50 rounded transition"
+                              title="Delete User"
+                            >
+                              <Trash2 className="h-5 w-5" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -899,6 +979,13 @@ const UsersPage = () => {
             >
               Assignments
             </button>
+            <button
+              type="button"
+              onClick={() => setUserModalTab('pageAccess')}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition ${userModalTab === 'pageAccess' ? 'border-purple-600 text-purple-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Page access
+            </button>
           </div>
           <div className="overflow-y-auto min-h-0 flex-1 space-y-3">
             {userModalTab === 'details' && (
@@ -1006,6 +1093,14 @@ const UsersPage = () => {
                 setAssignedRoutes={setAssignedRoutes}
               />
             )}
+            {userModalTab === 'pageAccess' && (
+              <PageAccessControl
+                selectedPageAccess={selectedPageAccess}
+                onToggle={togglePageAccess}
+                onSelectAll={selectAllPageAccess}
+                onClearAll={clearAllPageAccess}
+              />
+            )}
           </div>
           <div className="flex justify-end space-x-2 pt-3 mt-3 border-t border-gray-200 shrink-0">
             <button
@@ -1059,6 +1154,13 @@ const UsersPage = () => {
               className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition ${userModalTab === 'assignments' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
               Assignments
+            </button>
+            <button
+              type="button"
+              onClick={() => setUserModalTab('pageAccess')}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition ${userModalTab === 'pageAccess' ? 'border-purple-600 text-purple-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Page access
             </button>
           </div>
           <div className="overflow-y-auto min-h-0 flex-1 space-y-3">
@@ -1122,6 +1224,14 @@ const UsersPage = () => {
                 assignedRoutes={assignedRoutes}
                 setAssignedBranches={setAssignedBranches}
                 setAssignedRoutes={setAssignedRoutes}
+              />
+            )}
+            {userModalTab === 'pageAccess' && (
+              <PageAccessControl
+                selectedPageAccess={selectedPageAccess}
+                onToggle={togglePageAccess}
+                onSelectAll={selectAllPageAccess}
+                onClearAll={clearAllPageAccess}
               />
             )}
           </div>

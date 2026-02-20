@@ -8,10 +8,10 @@ namespace HexaBill.Api.Models
         public string Role { get; set; } = string.Empty;
         public string? Phone { get; set; }
         public string? DashboardPermissions { get; set; }
+        public string? PageAccess { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime? LastLoginAt { get; set; }
         public DateTime? LastActiveAt { get; set; }
-        public int OwnerId { get; set; }
         public List<int>? AssignedBranchIds { get; set; }
         public List<int>? AssignedRouteIds { get; set; }
     }

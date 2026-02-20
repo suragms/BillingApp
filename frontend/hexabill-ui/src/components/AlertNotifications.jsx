@@ -99,13 +99,13 @@ const AlertNotifications = () => {
     }
   }
 
-  // Poll for new alerts every 30 seconds — only when tab is visible
+  // Poll for new alerts every 60 seconds — only when tab is visible (reduced from 30s to reduce API requests)
   useEffect(() => {
     fetchUnreadCount()
     const poll = () => {
       if (document.visibilityState === 'visible') fetchUnreadCount()
     }
-    const interval = setInterval(poll, 30000)
+    const interval = setInterval(poll, 60000) // Increased from 30s to 60s to reduce API requests
     return () => clearInterval(interval)
   }, [])
 

@@ -266,9 +266,11 @@ namespace HexaBill.Api.Modules.Billing
 
             // Replace invoice placeholders
             var amountInWords = ConvertToWords(sale.GrandTotal);
+            // Format date consistently (dd-MM-yyyy format for UAE)
+            var formattedDate = sale.InvoiceDate.ToString("dd-MM-yyyy");
             processedHtml = processedHtml
                 .Replace("{{invoice_no}}", sale.InvoiceNo)
-                .Replace("{{date}}", sale.InvoiceDate.ToString("dd-MM-yyyy"))
+                .Replace("{{date}}", formattedDate)
                 .Replace("{{customer_name}}", sale.CustomerName ?? "Cash Customer")
                 .Replace("{{customer_trn}}", trnDisplay)
                 .Replace("{{subtotal}}", sale.Subtotal.ToString("N2"))
@@ -415,6 +417,10 @@ namespace HexaBill.Api.Modules.Billing
             public string CompanyPhone { get; set; } = "";
             public string CompanyTrn { get; set; } = "";
             public string Currency { get; set; } = "AED";
+            public decimal VatPercent { get; set; } = 5.0m;
+            public string InvoicePrefix { get; set; } = "INV";
+            public string VatEffectiveDate { get; set; } = "";
+            public string VatLegalText { get; set; } = "";
         }
     }
 }

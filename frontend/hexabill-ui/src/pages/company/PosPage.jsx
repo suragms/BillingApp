@@ -1068,6 +1068,11 @@ const PosPage = () => {
         }
       }
 
+      // Use the route's branch so backend never gets branch/route mismatch (backend validates route.BranchId === request.BranchId)
+      const routeIdNum = selectedRouteId ? parseInt(selectedRouteId, 10) : null
+      const selectedRoute = routeIdNum && routes?.length ? routes.find(r => Number(r.id) === routeIdNum) : null
+      const branchIdNum = selectedRoute?.branchId != null ? Number(selectedRoute.branchId) : (selectedBranchId ? parseInt(selectedBranchId, 10) : null)
+
       const saleData = {
         customerId: selectedCustomer?.id || null,
         items: validCart.map(item => ({
@@ -1088,8 +1093,8 @@ const PosPage = () => {
         notes: notes || null,
         editReason: isEditMode ? editReason : undefined,
         invoiceDate: invoiceDate ? `${invoiceDate}T12:00:00.000Z` : undefined,
-        branchId: selectedBranchId ? parseInt(selectedBranchId, 10) : undefined,
-        routeId: selectedRouteId ? parseInt(selectedRouteId, 10) : undefined
+        branchId: branchIdNum || undefined,
+        routeId: routeIdNum || undefined
       }
 
       // Final validation
@@ -1282,28 +1287,28 @@ const PosPage = () => {
         let errorMsg = 'Failed to save sale'
 
         if (error.response?.status === 400) {
-          // Extract detailed error message from response
-          const responseData = error.response.data
-          console.log('400 Bad Request - Full Response:', responseData)
+          // Extract detailed error message (support both camelCase and PascalCase from backend)
+          const responseData = error.response.data || {}
+          const msg = responseData.message ?? responseData.Message
+          const errs = responseData.errors ?? responseData.Errors
+          const responseJson = JSON.stringify(responseData, null, 2)
+          console.log('400 Bad Request - Full Response:', responseJson)
 
-          if (responseData?.message) {
-            errorMsg = responseData.message
-          } else if (responseData?.errors) {
-            // Handle both array and object formats
-            if (Array.isArray(responseData.errors)) {
-              errorMsg = responseData.errors.join('\n')
-            } else if (typeof responseData.errors === 'object') {
-              // ASP.NET validation errors format: { "field": ["error1", "error2"] }
-              const errorMessages = Object.entries(responseData.errors)
+          if (msg) {
+            errorMsg = msg
+          } else if (errs) {
+            if (Array.isArray(errs)) {
+              errorMsg = errs.join('\n')
+            } else if (typeof errs === 'object') {
+              const errorMessages = Object.entries(errs)
                 .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join(', ') : msgs}`)
                 .join('\n')
               errorMsg = errorMessages || 'Validation failed'
             }
           } else if (responseData?.title) {
-            // ASP.NET problem details format
             errorMsg = responseData.title
           } else {
-            errorMsg = 'Bad request - please check product data, stock, and quantities'
+            errorMsg = 'Bad request - check product/stock, branch-route match, and try again.'
           }
         } else if (error.response?.status === 403) {
           const apiMsg = error.response?.data?.message || ''
@@ -1319,9 +1324,9 @@ const PosPage = () => {
 
         toast.error(errorMsg, { duration: 8000 })
 
-        // Log detailed error for debugging
+        // Log detailed error for debugging (stringify so "Object" shows actual content)
         console.log('Error occurred during save')
-        console.log('Backend Error Response:', error.response?.data)
+        console.log('Backend Error Response:', error.response?.data != null ? JSON.stringify(error.response.data, null, 2) : error.response?.data)
       }
     } finally {
       setLoading(false)

@@ -4,12 +4,14 @@ Author: AI Assistant
 Date: 2024
 */
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using HexaBill.Api.Modules.Auth;
 using HexaBill.Api.Models;
 using HexaBill.Api.Shared.Extensions;
 using HexaBill.Api.Shared.Security;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace HexaBill.Api.Modules.Auth
 {
@@ -20,51 +22,62 @@ namespace HexaBill.Api.Modules.Auth
         private readonly IAuthService _authService;
         private readonly ILoginLockoutService _lockout;
         private readonly IFileUploadService _fileUploadService;
+        private readonly ILogger<AuthController> _logger;
 
-        public AuthController(IAuthService authService, ILoginLockoutService lockout, IFileUploadService fileUploadService)
+        public AuthController(IAuthService authService, ILoginLockoutService lockout, IFileUploadService fileUploadService, ILogger<AuthController> logger)
         {
             _authService = authService;
             _lockout = lockout;
             _fileUploadService = fileUploadService;
+            _logger = logger;
         }
 
         [HttpPost("login")]
         [AllowAnonymous]
-        public async Task<ActionResult<ApiResponse<LoginResponse>>> Login([FromBody] LoginRequest request)
+        public async Task<ActionResult<ApiResponse<LoginResponse>>> Login([FromBody] LoginRequest? request)
         {
             try
             {
-                var email = request?.Email?.Trim().ToLowerInvariant() ?? "";
+                if (request == null)
+                {
+                    return BadRequest(new ApiResponse<LoginResponse> { Success = false, Message = "Request body is required (email and password).", Errors = new List<string>() });
+                }
+                var email = request.Email?.Trim().ToLowerInvariant() ?? "";
+                if (string.IsNullOrEmpty(email))
+                {
+                    return BadRequest(new ApiResponse<LoginResponse> { Success = false, Message = "Email is required.", Errors = new List<string>() });
+                }
                 // BUG #2.7 FIX: Use async lockout check (persistent in PostgreSQL)
                 if (await _lockout.IsLockedOutAsync(email))
+                {
+                    _logger.LogWarning("Login attempt for locked-out email: {Email}", email);
                     return StatusCode(429, new ApiResponse<LoginResponse> { Success = false, Message = "Too many failed attempts. Try again in 15 minutes." });
+                }
 
                 var result = await _authService.LoginAsync(request);
                 if (result == null)
                 {
                     await _lockout.RecordFailedAttemptAsync(email);
+                    _logger.LogWarning("Failed login attempt for email: {Email}", email);
                     return BadRequest(new ApiResponse<LoginResponse> { Success = false, Message = "Invalid email or password", Errors = new List<string>() });
                 }
                 await _lockout.ClearAttemptsAsync(email);
+                _logger.LogInformation("Login successful for user: {UserId} ({Email})", result.UserId, email);
                 return Ok(new ApiResponse<LoginResponse> { Success = true, Message = "Login successful", Data = result });
             }
             catch (Exception ex)
             {
-                // DEBUG: Log error to console
-                Console.WriteLine($"LOGIN ERROR: {ex.Message}");
-                Console.WriteLine(ex.StackTrace);
+                _logger.LogError(ex, "Login error for email: {Email}. Message: {Message}", request?.Email ?? "(null)", ex.Message);
                 if (ex.InnerException != null)
-                {
-                    Console.WriteLine($"INNER: {ex.InnerException.Message}");
-                    Console.WriteLine(ex.InnerException.StackTrace);
-                }
+                    _logger.LogError(ex.InnerException, "Login inner exception: {Message}", ex.InnerException.Message);
 
-                // Do not leak server internals to clients (TEMPORARILY EXPOSED FOR DEBUGGING)
+                var isDevelopment = HttpContext.RequestServices.GetService<IWebHostEnvironment>()?.IsDevelopment()
+                    ?? HttpContext.RequestServices.GetService<IHostEnvironment>()?.IsDevelopment() ?? false;
                 return StatusCode(500, new ApiResponse<LoginResponse>
                 {
                     Success = false,
-                    Message = $"An error occurred during login: {ex.Message}",
-                    Errors = new List<string> { ex.ToString() }
+                    Message = isDevelopment ? $"An error occurred during login: {ex.Message}" : "An error occurred during login. Please try again or contact support.",
+                    Errors = isDevelopment ? new List<string> { ex.ToString() ?? ex.Message } : new List<string>()
                 });
             }
         }
@@ -303,6 +316,7 @@ namespace HexaBill.Api.Modules.Auth
                         Role = user.Role.ToString(), 
                         Name = user.Name, 
                         DashboardPermissions = user.DashboardPermissions,
+                        PageAccess = user.PageAccess,
                         AssignedBranchIds = branchIds,
                         AssignedRouteIds = routeIds
                     }

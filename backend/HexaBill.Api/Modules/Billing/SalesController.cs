@@ -584,7 +584,7 @@ namespace HexaBill.Api.Modules.Billing
         }
 
         [HttpDelete("{id}")]
-        [Authorize(Roles = "Admin,Owner,Staff")] // CRITICAL: Allow Owner role to delete invoices
+        [Authorize(Roles = "Admin,Owner")] // CRITICAL FIX: Restrict Staff from deleting invoices to align with frontend UI
         public async Task<ActionResult<ApiResponse<bool>>> DeleteSale(int id)
         {
             try

@@ -621,6 +621,11 @@ export const expensesAPI = {
 }
 
 export const reportsAPI = {
+  getDashboardBatch: async (params = {}) => {
+    const response = await api.get('/dashboard/batch', { params })
+    return response.data
+  },
+
   getSummaryReport: async (params = {}) => {
     const response = await api.get('/reports/summary', { params })
     return response.data
@@ -733,10 +738,6 @@ export const settingsAPI = {
     const response = await api.put('/settings', settings)
     return response.data
   },
-  getCompanySettings: async () => {
-    const response = await api.get('/settings/company')
-    return response.data
-  },
   clearData: async () => {
     const response = await api.post('/settings/clear-data')
     return response.data
@@ -836,27 +837,32 @@ export const adminAPI = {
   },
 
   getUsers: async (params = {}) => {
-    const response = await api.get('/admin/users', { params })
+    const response = await api.get('/users', { params })
     return response.data
   },
 
   createUser: async (userData) => {
-    const response = await api.post('/admin/users', userData)
+    const response = await api.post('/users', userData)
     return response.data
   },
 
   updateUser: async (id, userData) => {
-    const response = await api.put(`/admin/users/${id}`, userData)
+    const response = await api.put(`/users/${id}`, userData)
     return response.data
   },
 
   resetPassword: async (id, passwordData) => {
-    const response = await api.post(`/admin/users/${id}/reset-password`, passwordData)
+    const response = await api.put(`/users/${id}/reset-password`, passwordData)
     return response.data
   },
 
   getUserActivity: async (userId, limit = 50) => {
-    const response = await api.get(`/admin/users/${userId}/activity`, { params: { limit } })
+    const response = await api.get(`/users/${userId}/activity`, { params: { limit } })
+    return response.data
+  },
+
+  deleteUser: async (id) => {
+    const response = await api.delete(`/users/${id}`)
     return response.data
   },
 
@@ -1129,14 +1135,6 @@ export const backupAPI = {
       responseType: 'blob'
     })
     return response.data
-  },
-  getSchedule: async () => {
-    const response = await api.get('/backup/schedule')
-    return response.data
-  },
-  saveSchedule: async (schedule) => {
-    const response = await api.post('/backup/schedule', schedule)
-    return response.data
   }
 }
 
@@ -1268,6 +1266,11 @@ export const superAdminAPI = {
   },
 
   getTenant: async (id) => {
+    const response = await api.get(`/superadmin/tenant/${id}`)
+    return response.data
+  },
+
+  getTenantDetail: async (id) => {
     const response = await api.get(`/superadmin/tenant/${id}`)
     return response.data
   },

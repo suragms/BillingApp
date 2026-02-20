@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { adminAPI } from '../services'
+import { clearAllCache } from '../services/api'
 import { getApiBaseUrlNoSuffix } from '../services/apiConfig'
 import { useAuth } from '../hooks/useAuth'
 
@@ -68,8 +69,19 @@ export const BrandingProvider = ({ children }) => {
         const primary = data.primaryColor || data.primary_color || '#2563EB'
         const accent = data.accentColor || data.accent_color || '#10B981'
 
+        // Ensure logo URL is full URL (prefix with backend base if relative)
+        // Backend returns relative paths like "/uploads/logo_xxx.png" or full URLs
+        const apiBase = getApiBaseUrlNoSuffix()
+        let fullLogoUrl = logoUrl
+        if (logoUrl && !logoUrl.startsWith('http')) {
+          // If relative path (starts with /uploads), prefix with backend base URL
+          fullLogoUrl = logoUrl.startsWith('/') 
+            ? `${apiBase}${logoUrl}` 
+            : `${apiBase}/uploads/${logoUrl}`
+        }
+
         // Add cache-busting parameter to logo URL to force refresh
-        const logoUrlWithCache = logoUrl ? `${logoUrl}${logoUrl.includes('?') ? '&' : '?'}t=${Date.now()}` : null
+        const logoUrlWithCache = fullLogoUrl ? `${fullLogoUrl}${fullLogoUrl.includes('?') ? '&' : '?'}t=${Date.now()}` : null
 
         setBranding(prev => ({
           ...prev,
@@ -81,9 +93,9 @@ export const BrandingProvider = ({ children }) => {
         }))
 
         document.title = name
-        if (logoUrl) {
-          // Use original URL for favicon but with cache-busting
-          const faviconUrl = `${logoUrl}${logoUrl.includes('?') ? '&' : '?'}t=${Date.now()}`
+        if (fullLogoUrl) {
+          // Use full URL for favicon but with cache-busting
+          const faviconUrl = `${fullLogoUrl}${fullLogoUrl.includes('?') ? '&' : '?'}t=${Date.now()}`
           updateFavicon(faviconUrl)
         }
       } else {
@@ -98,9 +110,10 @@ export const BrandingProvider = ({ children }) => {
     loadBranding()
   }, [loadBranding])
 
-  // Phase 4: After Super Admin impersonation, refetch settings/logo for the selected tenant
+  // After Super Admin impersonation, clear cache and refetch settings/logo for the selected tenant
   useEffect(() => {
     if (impersonatedTenantId != null) {
+      clearAllCache()
       loadBranding()
     }
   }, [impersonatedTenantId, loadBranding])

@@ -231,10 +231,11 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 }
 
                 var tenantId = CurrentTenantId;
-                var fileName = await _fileUploadService.UploadLogoAsync(file, tenantId);
+                // UploadLogoAsync returns relativePath in format "{tenantId}/logo_xxx.ext"
+                var relativePath = await _fileUploadService.UploadLogoAsync(file, tenantId);
                 
-                // Return the full URL path
-                var logoUrl = $"/uploads/{fileName}";
+                // Construct full URL path - relativePath already includes tenant subfolder
+                var logoUrl = $"/uploads/{relativePath}";
                 
                 // Update COMPANY_LOGO for current tenant (each tenant has own logo)
                 var logoSetting = await _context.Settings
@@ -905,10 +906,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         Role = u.Role.ToString(),
                         Phone = u.Phone,
                         DashboardPermissions = u.DashboardPermissions,
+                        PageAccess = u.PageAccess,
                         CreatedAt = u.CreatedAt,
                         LastLoginAt = u.LastLoginAt,
                         LastActiveAt = u.LastActiveAt,
-                        OwnerId = u.TenantId ?? 0,
                         AssignedBranchIds = _context.BranchStaff.Where(bs => bs.UserId == u.Id).Select(bs => bs.BranchId).ToList(),
                         AssignedRouteIds = _context.RouteStaff.Where(rs => rs.UserId == u.Id).Select(rs => rs.RouteId).ToList()
                     })
@@ -1002,8 +1003,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         Role = user.Role.ToString(),
                         Phone = user.Phone,
                         DashboardPermissions = user.DashboardPermissions,
-                        CreatedAt = user.CreatedAt,
-                        OwnerId = user.TenantId ?? 0
+                        PageAccess = user.PageAccess,
+                        CreatedAt = user.CreatedAt
                     }
                 });
             }
@@ -1095,8 +1096,8 @@ namespace HexaBill.Api.Modules.SuperAdmin
                         Role = user.Role.ToString(),
                         Phone = user.Phone,
                         DashboardPermissions = user.DashboardPermissions,
-                        CreatedAt = user.CreatedAt,
-                        OwnerId = user.TenantId ?? 0
+                        PageAccess = user.PageAccess,
+                        CreatedAt = user.CreatedAt
                     }
                 });
             }

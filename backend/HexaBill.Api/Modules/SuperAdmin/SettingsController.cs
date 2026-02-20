@@ -37,6 +37,11 @@ namespace HexaBill.Api.Modules.SuperAdmin
             try
             {
                 var tenantId = CurrentTenantId;
+                if (tenantId <= 0 && !IsSystemAdmin)
+                {
+                    return Forbid();
+                }
+                
                 var settings = await _settingsService.GetOwnerSettingsAsync(tenantId);
                 
                 return Ok(new ServiceResponse<Dictionary<string, string>>
@@ -48,11 +53,18 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"? Error getting settings: {ex.Message}");
+                Console.WriteLine($"❌ Error getting settings: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"❌ Inner Exception: {ex.InnerException.Message}");
+                }
+                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
+                
                 return StatusCode(500, new ServiceResponse<object>
                 {
                     Success = false,
-                    Message = "Failed to retrieve settings"
+                    Message = "Failed to retrieve settings",
+                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
                 });
             }
         }

@@ -34,6 +34,8 @@ namespace HexaBill.Api.Shared.Security
                 return;
             }
 
+            // CRITICAL: Wrap entire font registration in try-catch to prevent native crashes
+            // QuestPDF's FontManager.RegisterFont can crash with access violations if fonts are corrupted or inaccessible
             try
             {
                 var fontsDir = Path.Combine(Directory.GetCurrentDirectory(), "Fonts");
@@ -56,6 +58,7 @@ namespace HexaBill.Api.Shared.Security
                 {
                     try
                     {
+                        // CRITICAL: QuestPDF FontManager can crash with access violations - wrap in try-catch
                         // Keep stream open for QuestPDF
                         var stream = File.OpenRead(notoRegular);
                         _fontStreams.Add(stream);
@@ -63,9 +66,15 @@ namespace HexaBill.Api.Shared.Security
                         _arabicFontFamily = "Noto Sans Arabic";
                         _logger.LogInformation("? Registered Noto Sans Arabic Regular from: {Path}", notoRegular);
                     }
+                    catch (System.AccessViolationException avEx)
+                    {
+                        // CRITICAL: Catch access violations to prevent process crash
+                        _logger.LogError(avEx, "❌ Access violation while registering Noto Sans Arabic Regular - font may be corrupted");
+                        _arabicFontFamily = "Tahoma"; // Fallback
+                    }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "? Failed to register Noto Sans Arabic Regular");
+                        _logger.LogError(ex, "? Failed to register Noto Sans Arabic Regular: {Error}", ex.Message);
                     }
                 }
                 else

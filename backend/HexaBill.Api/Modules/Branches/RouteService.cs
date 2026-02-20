@@ -10,6 +10,7 @@ namespace HexaBill.Api.Modules.Branches
 {
     public interface IRouteService
     {
+        Task<bool> CheckDatabaseConnectionAsync();
         Task<List<RouteDto>> GetRoutesAsync(int tenantId, int? branchId = null);
         Task<RouteDetailDto?> GetRouteByIdAsync(int id, int tenantId);
         Task<RouteDto> CreateRouteAsync(CreateRouteRequest request, int tenantId);
@@ -38,30 +39,51 @@ namespace HexaBill.Api.Modules.Branches
             _context = context;
         }
 
+        public async Task<bool> CheckDatabaseConnectionAsync()
+        {
+            try
+            {
+                return await _context.Database.CanConnectAsync();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public async Task<List<RouteDto>> GetRoutesAsync(int tenantId, int? branchId = null)
         {
-            var query = _context.Routes
-                .AsNoTracking()
-                .Where(r => (tenantId <= 0 || r.TenantId == tenantId) && (!branchId.HasValue || r.BranchId == branchId.Value))
-                .Include(r => r.Branch)
-                .Include(r => r.AssignedStaff);
-            return await query
-                .Select(r => new RouteDto
-                {
-                    Id = r.Id,
-                    BranchId = r.BranchId,
-                    BranchName = r.Branch != null ? r.Branch.Name : "",
-                    TenantId = r.TenantId,
-                    Name = r.Name,
-                    AssignedStaffId = r.AssignedStaffId,
-                    AssignedStaffName = r.AssignedStaff != null ? r.AssignedStaff.Name : null,
-                    CreatedAt = r.CreatedAt,
-                    AssignedStaffIds = r.RouteStaff.Select(rs => rs.UserId).ToList(),
-                    CustomerCount = r.RouteCustomers.Count,
-                    StaffCount = r.RouteStaff.Count
-                })
-                .OrderBy(r => r.BranchName ?? "").ThenBy(r => r.Name)
-                .ToListAsync();
+            try
+            {
+                var query = _context.Routes
+                    .AsNoTracking()
+                    .Where(r => (tenantId <= 0 || r.TenantId == tenantId) && (!branchId.HasValue || r.BranchId == branchId.Value))
+                    .Include(r => r.Branch)
+                    .Include(r => r.AssignedStaff);
+                return await query
+                    .Select(r => new RouteDto
+                    {
+                        Id = r.Id,
+                        BranchId = r.BranchId,
+                        BranchName = r.Branch != null ? r.Branch.Name : "",
+                        TenantId = r.TenantId,
+                        Name = r.Name,
+                        AssignedStaffId = r.AssignedStaffId,
+                        AssignedStaffName = r.AssignedStaff != null ? r.AssignedStaff.Name : null,
+                        CreatedAt = r.CreatedAt,
+                        AssignedStaffIds = r.RouteStaff.Select(rs => rs.UserId).ToList(),
+                        CustomerCount = r.RouteCustomers.Count,
+                        StaffCount = r.RouteStaff.Count
+                    })
+                    .OrderBy(r => r.BranchName ?? "").ThenBy(r => r.Name)
+                    .ToListAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ GetRoutesAsync Error: {ex.Message}");
+                if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+                throw; // Re-throw to be handled by controller
+            }
         }
 
         public async Task<RouteDetailDto?> GetRouteByIdAsync(int id, int tenantId)

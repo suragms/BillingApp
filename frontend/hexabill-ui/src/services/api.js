@@ -41,15 +41,48 @@ const requestThrottle = new Map() // Track last request time per endpoint
 const REQUEST_THROTTLE_MS = 50 // Only throttle very rapid duplicates (< 50ms) - prevents double-clicks
 const MAX_CONCURRENT_REQUESTS = 20 // Increased concurrent requests limit
 
-// Generate request key for deduplication
+// Response caching with TTL to reduce API requests
+const responseCache = new Map()
+const CACHE_TTL = {
+  '/api/reports/summary': 60000, // 60 seconds for dashboard summary
+  '/api/dashboard/batch': 60000, // 60 seconds for dashboard batch
+  '/api/settings': 300000, // 5 minutes for settings (rarely changes)
+  '/api/settings/company': 300000, // 5 minutes for company settings
+  '/api/branches': 120000, // 2 minutes for branches (changes infrequently)
+  '/api/routes': 120000, // 2 minutes for routes (changes infrequently)
+  '/api/alerts/unread-count': 30000, // 30 seconds for alert count
+  default: 30000 // 30 seconds default cache TTL
+}
+
+// Get cache TTL for a URL
+const getCacheTTL = (url) => {
+  for (const [pattern, ttl] of Object.entries(CACHE_TTL)) {
+    if (url.includes(pattern)) return ttl
+  }
+  return CACHE_TTL.default
+}
+
+// Clear cache entry
+const clearCache = (url) => {
+  responseCache.delete(url)
+}
+
+// Clear all cache
+const clearAllCache = () => {
+  responseCache.clear()
+}
+
+// Generate request key for deduplication (never call toUpperCase on undefined)
+// Include tenant ID so Super Admin impersonation does not serve one tenant's cached data to another
 const getRequestKey = (config) => {
   if (!config) {
     return `UNKNOWN_${Date.now()}_${Math.random()}`
   }
-  const method = (config.method || 'GET').toUpperCase()
-  const url = config.url || ''
+  const method = config.method != null && config.method !== '' ? String(config.method).toUpperCase() : 'GET'
+  const url = config.url != null ? String(config.url) : ''
   const params = config.params || {}
-  return `${method}_${url}_${JSON.stringify(params)}`
+  const tenantId = config.headers?.['X-Tenant-Id'] ?? (typeof localStorage !== 'undefined' ? localStorage.getItem('selected_tenant_id') : null) ?? 'default'
+  return `${method}_${url}_${JSON.stringify(params)}_tenant:${tenantId}`
 }
 
 const showThrottledError = (message, isNetworkError = false, options = {}) => {
@@ -83,7 +116,15 @@ const showThrottledError = (message, isNetworkError = false, options = {}) => {
               type: 'button',
               onClick: () => {
                 toast.dismiss(t.id)
-                window.location.reload()
+                // Trigger data refresh events instead of full page reload
+                window.dispatchEvent(new Event('dataUpdated'))
+                window.dispatchEvent(new Event('connectionRestored'))
+                // Small delay then check connection
+                setTimeout(() => {
+                  if (connectionManager.isConnected()) {
+                    toast.success('Connection restored')
+                  }
+                }, 1000)
               },
               className: 'ml-2 px-2 py-1 text-sm font-medium bg-primary-600 text-white rounded hover:bg-primary-700'
             },
@@ -103,27 +144,290 @@ const showThrottledError = (message, isNetworkError = false, options = {}) => {
   }
 }
 
+// CRITICAL: Create axios instance with default method to prevent undefined errors
 const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000, // 30 seconds - show "request taking too long" instead of blank loading
+  method: 'GET', // Default method to prevent undefined errors
   headers: {
     'Content-Type': 'application/json',
   },
 })
 
+// CRITICAL: Ensure defaults.method is ALWAYS set
+// Axios uses this.defaults.method as fallback when config.method is undefined
+// Use normal property assignment (not non-configurable) so axios can merge it properly
+api.defaults.method = 'GET'
+
+// Also ensure it's set on the axios instance itself
+if (!api.defaults.method || typeof api.defaults.method !== 'string') {
+  api.defaults.method = 'GET'
+}
+
+// CRITICAL: Store original axios request method to patch it
+const originalRequest = api.request.bind(api)
+
+// CRITICAL: Patch axios.request to ensure config.method is ALWAYS set before dispatchXhrRequest
+// This is the LOWEST LEVEL - all methods (get, post, etc.) call this
+api.request = function(configOrUrl, config) {
+  // Handle axios.request(url, config) vs axios.request(config) signatures
+  let finalConfig
+  if (typeof configOrUrl === 'string') {
+    // axios.request(url, config) signature
+    finalConfig = config || {}
+    finalConfig.url = configOrUrl
+  } else {
+    // axios.request(config) signature
+    finalConfig = configOrUrl || {}
+  }
+  
+  // CRITICAL: Normalize config IMMEDIATELY - before axios processes it
+  if (!finalConfig || typeof finalConfig !== 'object' || Array.isArray(finalConfig)) {
+    finalConfig = { method: 'GET', url: '', headers: {} }
+  }
+  
+  // CRITICAL: Ensure method is ALWAYS a string before axios sees it
+  // Axios calls toUpperCase() on config.method, so it MUST be a string
+  if (!finalConfig.method || typeof finalConfig.method !== 'string' || finalConfig.method === '') {
+    finalConfig.method = 'GET'
+  } else {
+    // Normalize to uppercase string
+    finalConfig.method = String(finalConfig.method).trim().toUpperCase() || 'GET'
+  }
+  
+  // Ensure url exists
+  if (!finalConfig.url || typeof finalConfig.url !== 'string') {
+    finalConfig.url = finalConfig.url != null ? String(finalConfig.url) : ''
+  }
+  
+  // Ensure headers exists
+  if (!finalConfig.headers || typeof finalConfig.headers !== 'object' || Array.isArray(finalConfig.headers)) {
+    finalConfig.headers = {}
+  }
+  
+  // CRITICAL: Ensure method is set as a normal enumerable property (not non-configurable)
+  // Axios uses Object.assign/mergeConfig which copies enumerable properties
+  // Making it non-configurable prevents axios from copying it to merged config objects
+  finalConfig.method = String(finalConfig.method || 'GET').trim().toUpperCase() || 'GET'
+  
+  // Final validation - ensure method is definitely a string
+  if (typeof finalConfig.method !== 'string' || finalConfig.method === '') {
+    finalConfig.method = 'GET'
+  }
+  
+  // CRITICAL: Wrap config in Proxy to ensure method is ALWAYS available
+  // This prevents axios from calling toUpperCase() on undefined even if it creates new config objects
+  const configProxy = new Proxy(finalConfig, {
+    get(target, prop) {
+      if (prop === 'method') {
+        const value = target[prop]
+        if (value === undefined || value === null || typeof value !== 'string' || value === '') {
+          return 'GET'
+        }
+        return String(value).trim().toUpperCase() || 'GET'
+      }
+      return target[prop]
+    },
+    set(target, prop, value) {
+      if (prop === 'method') {
+        if (value === undefined || value === null || typeof value !== 'string' || value === '') {
+          target[prop] = 'GET'
+        } else {
+          target[prop] = String(value).trim().toUpperCase() || 'GET'
+        }
+      } else {
+        target[prop] = value
+      }
+      return true
+    },
+    has(target, prop) {
+      if (prop === 'method') return true
+      return prop in target
+    }
+  })
+  
+  // CRITICAL: Also ensure defaults.method is set (axios uses this as fallback)
+  if (!api.defaults.method || typeof api.defaults.method !== 'string') {
+    api.defaults.method = 'GET'
+  }
+  
+  // Call original request with proxied config
+  // The Proxy ensures method is always available even if axios creates new config objects
+  return originalRequest(configProxy)
+}
+
+// CRITICAL: Wrap axios methods to ensure config.method is always set
+const originalGet = api.get.bind(api)
+const originalPost = api.post.bind(api)
+const originalPut = api.put.bind(api)
+const originalPatch = api.patch.bind(api)
+const originalDelete = api.delete.bind(api)
+
+// Wrap methods to ensure method is always set (use PLAIN objects so axios mergeConfig never sees undefined method)
+api.get = function(url, config) {
+  if (config === undefined || config === null) {
+    config = {}
+  } else if (typeof config !== 'object' || Array.isArray(config)) {
+    config = {}
+  }
+  const plain = {
+    method: 'GET',
+    url: config.url || url || '',
+    headers: config.headers && typeof config.headers === 'object' && !Array.isArray(config.headers) ? { ...config.headers } : {},
+    params: config.params,
+    ...config
+  }
+  plain.method = 'GET'
+  return originalGet(url, plain)
+}
+
+api.post = function(url, data, config = {}) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) config = {}
+  const normalizedConfig = { ...config, method: 'POST' }
+  try {
+    Object.defineProperty(normalizedConfig, 'method', {
+      value: 'POST',
+      writable: true,
+      enumerable: true,
+      configurable: true
+    })
+  } catch (e) {
+    normalizedConfig.method = 'POST'
+  }
+  return originalPost(url, data, normalizedConfig)
+}
+
+api.put = function(url, data, config = {}) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) config = {}
+  const normalizedConfig = { ...config, method: 'PUT' }
+  try {
+    Object.defineProperty(normalizedConfig, 'method', {
+      value: 'PUT',
+      writable: true,
+      enumerable: true,
+      configurable: true
+    })
+  } catch (e) {
+    normalizedConfig.method = 'PUT'
+  }
+  return originalPut(url, data, normalizedConfig)
+}
+
+api.patch = function(url, data, config = {}) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) config = {}
+  const normalizedConfig = { ...config, method: 'PATCH' }
+  try {
+    Object.defineProperty(normalizedConfig, 'method', {
+      value: 'PATCH',
+      writable: true,
+      enumerable: true,
+      configurable: true
+    })
+  } catch (e) {
+    normalizedConfig.method = 'PATCH'
+  }
+  return originalPatch(url, data, normalizedConfig)
+}
+
+api.delete = function(url, config = {}) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) config = {}
+  const normalizedConfig = { ...config, method: 'DELETE' }
+  try {
+    Object.defineProperty(normalizedConfig, 'method', {
+      value: 'DELETE',
+      writable: true,
+      enumerable: true,
+      configurable: true
+    })
+  } catch (e) {
+    normalizedConfig.method = 'DELETE'
+  }
+  return originalDelete(url, normalizedConfig)
+}
+
 // Request interceptor to add auth token, check connection, and throttle requests
 api.interceptors.request.use(
   (config) => {
-    // CRITICAL: Ensure config exists and has required properties
-    if (!config) {
-      config = {}
+    // CRITICAL: Normalize config IMMEDIATELY so axios never sees undefined method/url (prevents toUpperCase error)
+    // Axios internally calls toUpperCase on config.method in dispatchXhrRequest via resolveConfig/mergeConfig
+    // resolveConfig calls mergeConfig({}, config) which creates a NEW object, so we MUST ensure method is enumerable
+    // This MUST be the FIRST thing we do - before any other checks
+    
+    // Step 1: Ensure config is an object (handle all edge cases)
+    if (config === undefined || config === null) {
+      config = { method: 'GET', url: '', headers: {} }
+    } else if (typeof config !== 'object' || Array.isArray(config)) {
+      config = { method: 'GET', url: '', headers: {} }
     }
-    if (!config.method) {
+    
+    // Step 2: CRITICAL - Ensure method is ALWAYS a valid string BEFORE axios processes it
+    // This prevents "Cannot read properties of undefined (reading 'toUpperCase')" errors
+    // Axios calls resolveConfig which calls mergeConfig({}, config), creating a new object
+    // mergeConfig uses Object.keys() or for...in, so method MUST be enumerable
+    // We set it as a normal property (not Object.defineProperty with non-configurable) so mergeConfig copies it
+    if (config.method === undefined || config.method === null || typeof config.method !== 'string' || config.method === '') {
+      config.method = 'GET'
+    } else {
+      // Normalize method to uppercase string
+      const methodStr = String(config.method).trim()
+      config.method = methodStr ? methodStr.toUpperCase() : 'GET'
+    }
+    
+    // CRITICAL: Also ensure method is set as a normal enumerable property (not non-configurable)
+    // This ensures mergeConfig({}, config) will copy it to the new object
+    // We do this AFTER setting it above to ensure it's definitely there
+    config.method = config.method || 'GET'
+    
+    // Step 3: Ensure url is always a string (axios also accesses this directly)
+    if (config.url === undefined || config.url === null || typeof config.url !== 'string') {
+      config.url = config.url != null ? String(config.url) : ''
+    }
+    
+    // Step 4: Ensure headers object exists
+    if (!config.headers || typeof config.headers !== 'object' || Array.isArray(config.headers)) {
+      config.headers = {}
+    }
+    
+    // Step 5: CRITICAL - Final validation before returning (defensive programming)
+    // This is the last chance to fix it before axios processes it
+    // Use normal property assignment (not Object.defineProperty) so mergeConfig copies it
+    if (typeof config.method !== 'string' || config.method === '') {
       config.method = 'GET'
     }
-    if (!config.url) {
-      config.url = ''
+    
+    // CRITICAL: One final check - ensure method exists and is a string
+    // This is the absolute last chance before axios processes it
+    // Set as normal property so mergeConfig({}, config) copies it
+    if (!config.method || typeof config.method !== 'string') {
+      config.method = 'GET'
     }
+    
+    // CRITICAL: Ensure method is uppercase (axios expects uppercase)
+    config.method = String(config.method || 'GET').trim().toUpperCase() || 'GET'
+    
+    // CRITICAL: Return a PLAIN object so axios mergeConfig copies method correctly.
+    // Never spread config (it may be a Proxy or lose method). Set method explicitly first.
+    const safeMethod = (config && typeof config.method === 'string' && config.method)
+      ? String(config.method).trim().toUpperCase() || 'GET'
+      : 'GET'
+    const plainConfig = {
+      method: safeMethod,
+      url: (config && config.url != null) ? String(config.url) : '',
+      headers: config?.headers && typeof config.headers === 'object' && !Array.isArray(config.headers) ? { ...config.headers } : {},
+      baseURL: config?.baseURL,
+      timeout: config?.timeout,
+      params: config?.params,
+      data: config?.data
+    }
+    // Copy other enumerable keys from config without spreading (avoids Proxy/missing method)
+    if (config && typeof config === 'object') {
+      for (const key of Object.keys(config)) {
+        if (!Object.prototype.hasOwnProperty.call(plainConfig, key))
+          plainConfig[key] = config[key]
+      }
+    }
+    plainConfig.method = String(plainConfig.method || 'GET').trim().toUpperCase() || 'GET'
+    config = plainConfig
 
     // Check if we should allow this request
     if (!connectionManager.shouldAllowRequest()) {
@@ -188,11 +492,85 @@ api.interceptors.request.use(
     config._maxRetries = 3
     config._requestKey = requestKey // Store for cleanup in response interceptor
 
+    // Response caching: Check cache for GET requests (skip if bypassCache flag is set)
+    if (config.method === 'GET' && !config._bypassCache) {
+      const cacheKey = requestKey
+      const cached = responseCache.get(cacheKey)
+      if (cached) {
+        const cacheAge = now - cached.timestamp
+        const ttl = getCacheTTL(config.url || '')
+        if (cacheAge < ttl) {
+          console.log(`✅ Cache hit for ${config.url} (age: ${Math.round(cacheAge / 1000)}s, TTL: ${ttl / 1000}s)`)
+          // Return cached response - CRITICAL: Ensure config.method is always set and uppercase
+          // Create a completely new config object to avoid any mutation issues
+          const cachedConfig = {
+            method: String(config.method || 'GET').trim().toUpperCase() || 'GET',
+            url: String(config.url || ''),
+            headers: config.headers && typeof config.headers === 'object' ? { ...config.headers } : {},
+            baseURL: config.baseURL || api.defaults.baseURL,
+            timeout: config.timeout || api.defaults.timeout,
+            _requestKey: config._requestKey,
+            _requestTime: config._requestTime,
+            _retryCount: config._retryCount || 0
+          }
+          
+          // CRITICAL: Ensure method is uppercase and valid (plain object, no Proxy)
+          cachedConfig.method = String(cachedConfig.method || 'GET').trim().toUpperCase() || 'GET'
+          
+          const cachedResponse = {
+            ...cached.response,
+            config: cachedConfig,
+            data: JSON.parse(JSON.stringify(cached.response.data)) // Deep clone to avoid mutations
+          }
+          return Promise.resolve(cachedResponse)
+        } else {
+          // Cache expired, remove it
+          responseCache.delete(cacheKey)
+          console.log(`⏰ Cache expired for ${config.url} (age: ${Math.round(cacheAge / 1000)}s, TTL: ${ttl / 1000}s)`)
+        }
+      }
+    }
+
     // CRITICAL: Request interceptor must return config, not promise
     // Deduplication will be handled by tracking the request key
+    
+    // FINAL SAFEGUARD: Ensure method is ALWAYS set right before returning
+    // This is the absolute last chance - axios will process this config next
+    // CRITICAL: Set as a normal enumerable property so axios can copy it when merging configs
+    // Use simple property assignment - axios needs to be able to copy this property
+    const methodValue = String(config.method || 'GET').trim().toUpperCase() || 'GET'
+    config.method = methodValue
+    
+    // Ensure it's definitely set and is a string
+    if (typeof config.method !== 'string' || config.method === '') {
+      config.method = 'GET'
+    }
+    
+    // Final normalization - ensure uppercase
+    config.method = String(config.method).trim().toUpperCase() || 'GET'
+    
+    // CRITICAL: Use Object.defineProperty to ensure method is ALWAYS enumerable
+    // This prevents axios from losing it during mergeConfig operations
+    try {
+      Object.defineProperty(config, 'method', {
+        value: String(config.method || 'GET').trim().toUpperCase() || 'GET',
+        writable: true,
+        enumerable: true, // CRITICAL: Must be enumerable for mergeConfig to copy it
+        configurable: true // Allow modification
+      })
+    } catch (e) {
+      // If defineProperty fails, ensure it's set normally
+      config.method = String(config.method || 'GET').trim().toUpperCase() || 'GET'
+    }
+    
     return config
   },
   (error) => {
+    // Ensure rejected config has method/url so error handlers don't throw
+    if (error?.config) {
+      error.config.method = error.config.method || 'GET'
+      error.config.url = error.config.url ?? ''
+    }
     return Promise.reject(error)
   }
 )
@@ -231,6 +609,37 @@ api.interceptors.response.use(
       } catch (_) { /* ignore transform errors */ }
     }
 
+    // Response caching: Cache successful GET responses
+    const respMethod = response.config?.method != null ? String(response.config.method).toUpperCase() : ''
+    if (respMethod === 'GET' && 
+        !response.config?._bypassCache && 
+        response.status >= 200 && 
+        response.status < 300) {
+      const cacheKey = response.config._requestKey || getRequestKey(response.config)
+      const ttl = getCacheTTL(response.config.url || '')
+      responseCache.set(cacheKey, {
+        response: {
+          data: JSON.parse(JSON.stringify(response.data)), // Deep clone
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers
+        },
+        timestamp: Date.now(),
+        ttl
+      })
+      
+      // Clean up expired cache entries periodically
+      if (responseCache.size > 100) {
+        const now = Date.now()
+        for (const [key, cached] of responseCache.entries()) {
+          const cacheAge = now - cached.timestamp
+          if (cacheAge >= cached.ttl) {
+            responseCache.delete(key)
+          }
+        }
+      }
+    }
+
     // Subscription grace period: check for X-Subscription-Grace-Period header
     setSubscriptionGraceFromResponse(response)
 
@@ -263,25 +672,40 @@ api.interceptors.response.use(
     )
 
     // BUG #3 FIX: Automatic retry with exponential backoff for transient errors (500/503/network)
+    // CRITICAL: Never retry 401 (authentication) errors - they will always fail
     const retryableStatuses = [500, 503, 502, 504]
     const isRetryable = isNetworkError || (error.response && retryableStatuses.includes(error.response.status))
     const retryCount = error.config?._retryCount || 0
     const maxRetries = 3
-    const isRetryableMethod = !error.config?.method || ['GET', 'POST', 'PUT', 'PATCH'].includes(error.config.method.toUpperCase())
-    const shouldRetry = isRetryable && retryCount < maxRetries && isRetryableMethod && !error.config?._skipRetry
+    const method = error.config?.method ? String(error.config.method).toUpperCase() : ''
+    const isRetryableMethod = !method || ['GET', 'POST', 'PUT', 'PATCH'].includes(method)
+    // Prevent retry loops on 401 - authentication errors should never be retried
+    const is401Error = error.response?.status === 401
+    const shouldRetry = isRetryable && retryCount < maxRetries && isRetryableMethod && !error.config?._skipRetry && !is401Error
+    
+    // Additional safety: If retry count exceeded, prevent further retries
+    if (retryCount >= maxRetries) {
+      error._handledByInterceptor = true
+      if (!is401Error) {
+        showThrottledError('Request failed after multiple attempts. Please refresh the page.', false)
+      }
+      return Promise.reject(error)
+    }
 
     if (shouldRetry) {
       // Exponential backoff: 2s, 4s, 8s
+      const retryConfig = {
+        ...error.config,
+        _retryCount: retryCount + 1,
+        _isRetry: true
+      }
+      retryConfig.method = (retryConfig.method != null && retryConfig.method !== '') ? String(retryConfig.method).toUpperCase() : 'GET'
+      retryConfig.url = retryConfig.url != null ? String(retryConfig.url) : ''
       const delay = Math.pow(2, retryCount) * 1000
-      console.log(`🔄 Retrying request (attempt ${retryCount + 1}/${maxRetries}) after ${delay}ms: ${error.config?.method} ${error.config?.url}`)
-      
+      console.log(`🔄 Retrying request (attempt ${retryCount + 1}/${maxRetries}) after ${delay}ms: ${retryConfig.method} ${retryConfig.url}`)
+
       return new Promise((resolve) => {
         setTimeout(() => {
-          const retryConfig = {
-            ...error.config,
-            _retryCount: retryCount + 1,
-            _isRetry: true
-          }
           resolve(api.request(retryConfig))
         }, delay)
       })
@@ -420,8 +844,12 @@ api.interceptors.response.use(
     }
 
     // Handle 401 Unauthorized errors
+    // CRITICAL: Never retry 401 errors - prevent infinite retry loops
     if (error.response?.status === 401) {
       connectionManager.markConnected() // Server is responding, just auth issue
+      
+      // Prevent retry loops on 401 - mark as handled immediately
+      error._handledByInterceptor = true
 
       const hadToken = !!(error.config?.headers?.Authorization || localStorage.getItem('token'))
       const authFailure = error.response?.headers?.['x-auth-failure']
@@ -429,6 +857,18 @@ api.interceptors.response.use(
       const tokenExpired = error.response?.headers?.['token-expired'] === 'true'
       const method = (error.config?.method || '').toUpperCase()
       const isMutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+      const retryCount = error.config?._retryCount || 0
+
+      // If this is a retry attempt on 401, immediately logout to prevent loops
+      if (retryCount > 0) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        toast.error('Authentication failed. Please login again.', { duration: 3000 })
+        setTimeout(() => {
+          window.location.href = '/login'
+        }, 1500)
+        return Promise.reject(error)
+      }
 
       // Only logout + redirect when we HAD a token (user was logged in, now session invalid).
       // If we had no token, this is a public/unauthenticated request (e.g. login page) - don't redirect.
@@ -455,7 +895,6 @@ api.interceptors.response.use(
             'Authentication required. Please login again.')
 
         toast.error(message, { duration: 3000 })
-        error._handledByInterceptor = true
 
         // Small delay to let the toast show before redirect
         setTimeout(() => {
@@ -467,9 +906,10 @@ api.interceptors.response.use(
           ? (errorMessage || 'Your session may have expired. Please log in again.')
           : (errorMessage || 'You are not authorized to perform this action')
         showThrottledError(msg)
-        error._handledByInterceptor = true
       }
       // If no token: silent fail (e.g. BrandingProvider on login page) - no toast, no redirect
+      
+      return Promise.reject(error)
     } else if (error.response?.status >= 500) {
       connectionManager.markConnected()
       
@@ -533,3 +973,6 @@ api.interceptors.response.use(
 )
 
 export default api
+
+// Export cache utilities for manual cache invalidation
+export { clearCache, clearAllCache }

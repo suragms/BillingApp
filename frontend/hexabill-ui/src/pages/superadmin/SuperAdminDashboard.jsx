@@ -380,7 +380,7 @@ const SuperAdminDashboard = () => {
             return (
               <div
                 key={m.title}
-                className="bg-white rounded-xl border border-neutral-200 shadow-sm p-6"
+                className="bg-white rounded-xl border border-neutral-200 p-6"
               >
                 <div className="flex items-start justify-between">
                   <div>
@@ -401,7 +401,7 @@ const SuperAdminDashboard = () => {
 
         {/* Platform revenue report: MRR trend, churn, new signups (#45) */}
         {revenueReport && (
-          <div className="mt-8 p-4 sm:p-6 bg-white border border-neutral-200 rounded-xl shadow-sm">
+          <div className="mt-8 p-4 sm:p-6 bg-white border border-neutral-200 rounded-xl">
             <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-4">
               <TrendingUp className="h-5 w-5 text-emerald-600" />
               Platform revenue report
@@ -448,7 +448,7 @@ const SuperAdminDashboard = () => {
         )}
 
         {/* Tenant onboarding tracker: who completed setup, who stuck (#46) */}
-        <div className="mt-8 p-4 sm:p-6 bg-white border border-neutral-200 rounded-xl shadow-sm">
+        <div className="mt-8 p-4 sm:p-6 bg-white border border-neutral-200 rounded-xl">
           <h3 className="font-semibold text-neutral-800 flex items-center gap-2 mb-4">
             <ClipboardCheck className="h-5 w-5 text-blue-600" />
             Tenant onboarding tracker

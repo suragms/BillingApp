@@ -148,9 +148,13 @@ const SalesLedgerPage = () => {
     fetchSalesLedgerRef.current = fetchSalesLedger
   })
 
+  // Refresh data when date range or server-side filters change
   useEffect(() => {
     fetchSalesLedger()
   }, [dateRange, filters.branchId, filters.routeId, filters.staffId])
+  
+  // Client-side filters (date, name, type, status, invoiceNo) are applied in getFilteredLedger()
+  // These don't require API refresh, but we should ensure filteredLedger updates when filters change
 
   useEffect(() => {
     const handleDataUpdate = () => fetchSalesLedgerRef.current?.()
@@ -214,17 +218,30 @@ const SalesLedgerPage = () => {
 
     if (filters.branchId) {
       const bid = parseInt(filters.branchId, 10)
-      filteredLedger = filteredLedger.filter(entry => (entry.branchId || entry.branchID) === bid)
+      if (!isNaN(bid)) {
+        filteredLedger = filteredLedger.filter(entry => {
+          const entryBranchId = entry.branchId || entry.branchID
+          return entryBranchId !== null && entryBranchId !== undefined && parseInt(entryBranchId, 10) === bid
+        })
+      }
     }
     if (filters.routeId) {
       const rid = parseInt(filters.routeId, 10)
-      filteredLedger = filteredLedger.filter(entry => (entry.routeId || entry.routeID) === rid)
+      if (!isNaN(rid)) {
+        filteredLedger = filteredLedger.filter(entry => {
+          const entryRouteId = entry.routeId || entry.routeID
+          return entryRouteId !== null && entryRouteId !== undefined && parseInt(entryRouteId, 10) === rid
+        })
+      }
     }
     if (filters.staffId) {
       const sid = parseInt(filters.staffId, 10)
-      filteredLedger = filteredLedger.filter(entry =>
-        (entry.createdById || entry.createdBy || entry.staffId || entry.userId) === sid
-      )
+      if (!isNaN(sid)) {
+        filteredLedger = filteredLedger.filter(entry => {
+          const entryStaffId = entry.createdById || entry.createdBy || entry.staffId || entry.userId
+          return entryStaffId !== null && entryStaffId !== undefined && parseInt(entryStaffId, 10) === sid
+        })
+      }
     }
 
     if (filters.realPendingMin) {
@@ -259,7 +276,11 @@ const SalesLedgerPage = () => {
     }))
   }
 
-  const filteredLedger = getFilteredLedger()
+  // Memoize filtered ledger to ensure it updates when filters or data change
+  const filteredLedger = React.useMemo(() => {
+    return getFilteredLedger()
+  }, [reportData.salesLedger, filters.date, filters.name, filters.type, filters.status, filters.invoiceNo, filters.branchId, filters.routeId, filters.staffId, filters.realPendingMin, filters.realPendingMax, filters.realGotPaymentMin, filters.realGotPaymentMax])
+  
   const hasActiveFilters = Object.values(filters).some(v => v !== '')
 
   // Pagination state

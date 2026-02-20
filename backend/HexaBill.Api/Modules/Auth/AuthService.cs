@@ -3,6 +3,7 @@ Purpose: Authentication service for user login and JWT token management
 Author: AI Assistant
 Date: 2024
 */
+using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
@@ -162,6 +163,7 @@ namespace HexaBill.Api.Modules.Auth
                 Name = user.Name,
                 CompanyName = companyName,
                 DashboardPermissions = user.DashboardPermissions,
+                PageAccess = user.PageAccess,
                 ExpiresAt = DateTime.UtcNow.AddHours(expiryHours),
                 TenantId = user.TenantId ?? 0,
                 AssignedBranchIds = assignedBranchIds,
@@ -206,6 +208,8 @@ namespace HexaBill.Api.Modules.Auth
                 PasswordHash = passwordHash,
                 Role = role,
                 Phone = request.Phone?.Trim(),
+                DashboardPermissions = request.DashboardPermissions,
+                PageAccess = request.PageAccess,
                 TenantId = tenantId,
                 OwnerId = tenantId, // MIGRATION: Setting legacy OwnerId for compatibility
                 CreatedAt = DateTime.UtcNow
@@ -257,12 +261,19 @@ namespace HexaBill.Api.Modules.Auth
             };
         }
 
+        private string GetJwtSecretKey()
+        {
+            return Environment.GetEnvironmentVariable("JWT_SECRET_KEY")
+                ?? _configuration["JwtSettings:SecretKey"]
+                ?? throw new InvalidOperationException("JWT SecretKey not configured. Set JwtSettings:SecretKey or JWT_SECRET_KEY.");
+        }
+
         public Task<bool> ValidateTokenAsync(string token)
         {
             try
             {
                 var tokenHandler = new JwtSecurityTokenHandler();
-                var key = Encoding.UTF8.GetBytes(_configuration["JwtSettings:SecretKey"]!);
+                var key = Encoding.UTF8.GetBytes(GetJwtSecretKey());
                 
                 tokenHandler.ValidateToken(token, new TokenValidationParameters
                 {
@@ -383,7 +394,7 @@ namespace HexaBill.Api.Modules.Auth
         private string GenerateJwtToken(User user, int? customExpiryHours = null)
         {
             var tokenHandler = new JwtSecurityTokenHandler();
-            var key = Encoding.UTF8.GetBytes(_configuration["JwtSettings:SecretKey"]!);
+            var key = Encoding.UTF8.GetBytes(GetJwtSecretKey());
             var jwtSettings = _configuration.GetSection("JwtSettings");
             var issuer = jwtSettings["Issuer"] ?? "HexaBill.Api";
             var audience = jwtSettings["Audience"] ?? "HexaBill.Api";

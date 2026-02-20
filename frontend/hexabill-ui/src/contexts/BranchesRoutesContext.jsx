@@ -96,9 +96,11 @@ export function BranchesRoutesProvider({ children }) {
     }
   }, [user])
 
-  // Load on mount and when user/tenant changes
+  // Load on mount and when user/tenant changes. On tenant switch, clear state first so we don't show previous tenant's data.
   useEffect(() => {
-    load()
+    setBranches([])
+    setRoutes([])
+    load(true)
   }, [user?.id, impersonatedTenantId])
 
   const refresh = useCallback(() => {

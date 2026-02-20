@@ -94,8 +94,9 @@ const GatewayGroup = ({ group, user, navigate }) => {
     const isOwnerUser = user?.role?.toLowerCase() === 'owner' || user?.role?.toLowerCase() === 'systemadmin'
     const canShowItem = (itemId) => {
         if (isOwnerUser) return true
-        if (user?.dashboardPermissions === null || user?.dashboardPermissions === undefined) return true
-        return user.dashboardPermissions.split(',').includes(itemId)
+        // Guard: no permissions string OR empty string → show everything (legacy/default)
+        if (!user?.dashboardPermissions || user.dashboardPermissions.trim() === '') return true
+        return user.dashboardPermissions.split(',').map(p => p.trim()).includes(itemId)
     }
     const visibleItems = group.items.filter(item => {
         if (item.adminOnly && !isAdmin && !isOwnerUser) return false
@@ -176,18 +177,16 @@ const DashboardTally = () => {
     const lastFetchTimeRef = useRef(0)
     const isFetchingRef = useRef(false)
     const fetchTimeoutRef = useRef(null)
-    const DASHBOARD_THROTTLE_MS = 10000 // 10 seconds minimum between dashboard requests
+    const DASHBOARD_THROTTLE_MS = 60000 // 60 seconds minimum between dashboard requests (increased from 10s to reduce API requests)
 
     // Dashboard Item Permissions Logic
     const canShow = (itemId) => {
         // Only Owners and SystemAdmins bypass all permission checks
         if (isOwner(user)) return true
 
-        // If permissions array doesn't exist (legacy), show everything
-        if (user?.dashboardPermissions === null || user?.dashboardPermissions === undefined) return true
-
-        // Otherwise, check if the specific item ID is in the allowed list
-        return user.dashboardPermissions.split(',').includes(itemId)
+        // Guard: no permissions string OR empty string → show everything (legacy/default)
+        if (!user?.dashboardPermissions || user.dashboardPermissions.trim() === '') return true
+        return user.dashboardPermissions.split(',').map(p => p.trim()).includes(itemId)
     }
 
     // Calculate date range based on selected period (must be before fetchStats)
@@ -230,16 +229,6 @@ const DashboardTally = () => {
 
             if (response?.success && response?.data) {
                 const data = response.data
-                console.log('Dashboard Data Received:', {
-                    salesToday: data.salesToday,
-                    expensesToday: data.expensesToday,
-                    profitToday: data.profitToday,
-                    pendingBills: data.pendingBills,
-                    invoicesToday: data.invoicesToday,
-                    invoicesWeekly: data.invoicesWeekly,
-                    invoicesMonthly: data.invoicesMonthly
-                })
-
                 setStats({
                     salesToday: parseFloat(data.salesToday || data.SalesToday) || 0,
                     returnsToday: parseFloat(data.returnsToday ?? data.ReturnsToday) || 0,
@@ -324,7 +313,7 @@ const DashboardTally = () => {
         fetchStatsThrottled()
         const interval = setInterval(() => {
             if (document.visibilityState === 'visible' && !isFetchingRef.current) fetchStatsThrottled()
-        }, 30000)
+        }, 120000) // Increased from 30s to 120s (2 minutes) to reduce API requests
         let debounceTimer = null
         const handleDataUpdate = () => {
             if (debounceTimer) clearTimeout(debounceTimer)
@@ -768,7 +757,7 @@ const DashboardTally = () => {
                 {/* Right: Gateway Column */}
                 <div className="hidden lg:block lg:w-72 bg-white shadow-lg border-l border-blue-200 rounded-lg overflow-hidden h-fit sticky top-4">
                     <div className="p-4">
-                        <div className="bg-gradient-to-r from-blue-900 to-blue-800 text-white rounded-lg p-3 mb-4 shadow-lg">
+                        <div className="bg-neutral-900 text-white rounded-lg p-3 mb-4 shadow-lg">
                             <h2 className="text-base font-bold text-center">{companyName} Dashboard</h2>
                             <p className="text-xs text-center text-blue-200 mt-0.5">Billing software for business</p>
                         </div>

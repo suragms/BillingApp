@@ -27,6 +27,17 @@ namespace HexaBill.Api.Modules.Branches
             {
                 var tenantId = CurrentTenantId;
                 if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+                
+                // Check database connection
+                if (!await _routeService.CheckDatabaseConnectionAsync())
+                {
+                    return StatusCode(503, new ApiResponse<List<RouteDto>>
+                    {
+                        Success = false,
+                        Message = "Database connection unavailable. Please try again later."
+                    });
+                }
+                
                 var list = await _routeService.GetRoutesAsync(tenantId, branchId);
                 return Ok(new ApiResponse<List<RouteDto>> { Success = true, Data = list });
             }
@@ -35,7 +46,7 @@ namespace HexaBill.Api.Modules.Branches
                 var inner = ex.InnerException?.Message ?? "";
                 Console.WriteLine($"❌ GetRoutes Error: {ex.Message}");
                 if (!string.IsNullOrEmpty(inner)) Console.WriteLine($"❌ Inner: {inner}");
-                Console.WriteLine($"❌ Stack: {ex.StackTrace}");
+                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
                 return StatusCode(500, new ApiResponse<List<RouteDto>>
                 {
                     Success = false,

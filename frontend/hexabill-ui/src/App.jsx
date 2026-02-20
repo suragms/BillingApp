@@ -2,7 +2,8 @@ import React, { useEffect } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import { isSystemAdmin } from './utils/superAdmin'
-import { getApiBaseUrl } from './services/apiConfig'
+import { canAccessPage } from './utils/roles'
+import { getApiBaseUrlNoSuffix } from './services/apiConfig'
 import Login from './pages/Login'
 import Dashboard from './pages/company/DashboardTally'
 import ProductsPage from './pages/company/ProductsPage'
@@ -56,8 +57,8 @@ function App() {
 
     const pingHealth = async () => {
       try {
-        const apiBaseUrl = getApiBaseUrl()
-        await fetch(`${apiBaseUrl}/health`, {
+        const apiBase = getApiBaseUrlNoSuffix()
+        await fetch(`${apiBase}/health`, {
           method: 'GET',
           cache: 'no-cache',
           signal: AbortSignal.timeout(5000) // 5 second timeout
@@ -126,6 +127,22 @@ function App() {
     path === '/branches' || path.startsWith('/branches/') ||
     path === '/routes' || path.startsWith('/routes/')
   if (isStaffOnly && isBranchesOrRoutes) {
+    return <Navigate to="/dashboard" replace />
+  }
+
+  // Staff page-level access: redirect if they don't have permission for this page
+  const getPageIdForPath = (p) => {
+    if (p === '/pos') return 'pos'
+    if (p === '/ledger') return 'invoices'
+    if (p === '/sales-ledger' || p.startsWith('/reports')) return 'reports'
+    if (p === '/products' || p === '/pricelist') return 'products'
+    if (p === '/customers' || p.startsWith('/customers/')) return 'customers'
+    if (p === '/expenses') return 'expenses'
+    return null
+  }
+  const resolvedPageId = getPageIdForPath(path)
+  const staffPageDenied = isStaffOnly && resolvedPageId && !canAccessPage(user, resolvedPageId)
+  if (staffPageDenied) {
     return <Navigate to="/dashboard" replace />
   }
 

@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore;
 using HexaBill.Api.Data;
 using HexaBill.Api.Models;
 using HexaBill.Api.Modules.SuperAdmin;
+using HexaBill.Api.Modules.Reports;
+using HexaBill.Api.Modules.Branches;
 using HexaBill.Api.Shared.Extensions;
 using HexaBill.Api.Shared.Services;
 using HexaBill.Api.Shared.Validation;
@@ -18,11 +20,22 @@ public class DashboardController : TenantScopedController // MULTI-TENANT: Owner
 {
     private readonly AppDbContext _context;
     private readonly ITimeZoneService _timeZoneService;
+    private readonly IReportService _reportService;
+    private readonly IBranchService _branchService;
+    private readonly IRouteService _routeService;
 
-    public DashboardController(AppDbContext context, ITimeZoneService timeZoneService)
+    public DashboardController(
+        AppDbContext context, 
+        ITimeZoneService timeZoneService,
+        IReportService reportService,
+        IBranchService branchService,
+        IRouteService routeService)
     {
         _context = context;
         _timeZoneService = timeZoneService;
+        _reportService = reportService;
+        _branchService = branchService;
+        _routeService = routeService;
     }
 
     [HttpGet]
@@ -134,6 +147,101 @@ public class DashboardController : TenantScopedController // MULTI-TENANT: Owner
         return Ok(response);
     }
 
+    /// <summary>
+    /// Batch endpoint to get dashboard data in one call: summary report, branches, routes, and users
+    /// This reduces API requests from 4+ separate calls to 1 batch call
+    /// GET: api/dashboard/batch
+    /// </summary>
+    [HttpGet("batch")]
+    public async Task<ActionResult<ApiResponse<DashboardBatchDto>>> GetDashboardBatch(
+        [FromQuery] DateTime? fromDate = null,
+        [FromQuery] DateTime? toDate = null)
+    {
+        try
+        {
+            var tenantId = CurrentTenantId;
+            if (tenantId <= 0 && !IsSystemAdmin) return Forbid();
+
+            var userId = int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var uid) ? uid : (int?)null;
+            var role = User.FindFirst(ClaimTypes.Role)?.Value;
+
+            // Fetch all data in parallel for better performance
+            var summaryTask = _reportService.GetSummaryReportAsync(tenantId, fromDate, toDate, null, null, userId, role);
+            var branchesTask = _branchService.GetBranchesAsync(tenantId);
+            var routesTask = _routeService.GetRoutesAsync(tenantId, null);
+            
+            // Get users (Admin/Owner only)
+            Task<List<UserDto>>? usersTask = null;
+            if (IsAdmin)
+            {
+                usersTask = Task.Run(async () =>
+                {
+                    var users = await _context.Users
+                        .Where(u => u.TenantId == tenantId)
+                        .Select(u => new UserDto
+                        {
+                            Id = u.Id,
+                            Name = u.Name,
+                            Email = u.Email,
+                            Role = u.Role.ToString(),
+                            Phone = u.Phone,
+                            DashboardPermissions = u.DashboardPermissions,
+                            PageAccess = u.PageAccess,
+                            CreatedAt = u.CreatedAt,
+                            LastLoginAt = u.LastLoginAt,
+                            LastActiveAt = u.LastActiveAt,
+                            AssignedBranchIds = _context.BranchStaff.Where(bs => bs.UserId == u.Id).Select(bs => bs.BranchId).ToList(),
+                            AssignedRouteIds = _context.RouteStaff.Where(rs => rs.UserId == u.Id).Select(rs => rs.RouteId).ToList()
+                        })
+                        .OrderBy(u => u.Name)
+                        .ToListAsync();
+                    return users;
+                });
+            }
+
+            // Wait for all tasks
+            var summary = await summaryTask;
+            
+            // Hide profit from Staff
+            if (IsStaff && !IsAdmin)
+            {
+                summary.ProfitToday = null;
+            }
+
+            var branches = await branchesTask;
+            var routes = await routesTask;
+            var users = usersTask != null ? await usersTask : new List<UserDto>();
+
+            var batchResponse = new DashboardBatchDto
+            {
+                Summary = summary,
+                Branches = branches,
+                Routes = routes,
+                Users = users
+            };
+
+            return Ok(new ApiResponse<DashboardBatchDto>
+            {
+                Success = true,
+                Message = "Dashboard batch data retrieved successfully",
+                Data = batchResponse
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ GetDashboardBatch Error: {ex.Message}");
+            if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
+            Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
+
+            return StatusCode(500, new ApiResponse<DashboardBatchDto>
+            {
+                Success = false,
+                Message = "An error occurred while retrieving dashboard batch data",
+                Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
+            });
+        }
+    }
+
     [HttpGet("statistics")]
     public async Task<IActionResult> GetDetailedStatistics()
     {
@@ -218,4 +326,12 @@ public class DashboardStatisticsResponse
     public int ExpensesCount { get; set; }
     public int PendingInvoicesCount { get; set; }
     public int LowStockCount { get; set; }
+}
+
+public class DashboardBatchDto
+{
+    public SummaryReportDto Summary { get; set; } = null!;
+    public List<BranchDto> Branches { get; set; } = new();
+    public List<RouteDto> Routes { get; set; } = new();
+    public List<UserDto> Users { get; set; } = new();
 }

@@ -56,6 +56,7 @@ export const AuthProvider = ({ children }) => {
                 role: response.data.Role || parsedUser.role,
                 name: response.data.Name || parsedUser.name,
                 dashboardPermissions: response.data.dashboardPermissions || response.data.DashboardPermissions || parsedUser.dashboardPermissions,
+                pageAccess: response.data.pageAccess ?? response.data.PageAccess ?? parsedUser.pageAccess,
                 companyName: parsedUser.companyName,
                 assignedBranchIds: response.data.assignedBranchIds || response.data.AssignedBranchIds || parsedUser.assignedBranchIds || [],
                 assignedRouteIds: response.data.assignedRouteIds || response.data.AssignedRouteIds || parsedUser.assignedRouteIds || []
@@ -114,6 +115,7 @@ export const AuthProvider = ({ children }) => {
           name: response.data.name || response.data.Name || 'User',
           companyName: response.data.companyName,
           dashboardPermissions: response.data.dashboardPermissions,
+          pageAccess: response.data.pageAccess ?? response.data.PageAccess ?? null,
           tenantId: tenantId,
           assignedBranchIds: response.data.assignedBranchIds || [],
           assignedRouteIds: response.data.assignedRouteIds || []

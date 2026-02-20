@@ -483,80 +483,66 @@ namespace HexaBill.Api.Modules.Reports
                     }
                 }
 
-                // Calculate daily sales trend for last 7 days
+                // Calculate daily sales trend using fromDate/toDate parameters
                 List<DailySalesDto> dailySalesTrend = new List<DailySalesDto>();
                 try
                 {
-                    var sevenDaysAgo = today.AddDays(-7);
-                    var dailySalesQuery = from s in _context.Sales
-                                         where !s.IsDeleted 
-                                             && s.InvoiceDate >= sevenDaysAgo 
-                                             && s.InvoiceDate < today.AddDays(1)
-                                         group s by s.InvoiceDate.Date into g
-                                         select new
-                                         {
-                                             Date = g.Key,
-                                             Sales = g.Sum(s => s.GrandTotal),
-                                             InvoiceCount = g.Count()
-                                         };
+                    // Use provided date range or default to last 7 days
+                    var trendFromDate = startDate;
+                    var trendToDate = endDate;
                     
+                    // If date range is too large (>90 days), limit to last 90 days for performance
+                    var daysDiff = (trendToDate - trendFromDate).TotalDays;
+                    if (daysDiff > 90)
+                    {
+                        trendFromDate = trendToDate.AddDays(-90);
+                        Console.WriteLine($"⚠️ Date range too large ({daysDiff} days), limiting to last 90 days for daily sales trend");
+                    }
+                    
+                    // Build query with proper date range
+                    var dailySalesQuery = _context.Sales
+                        .Where(s => !s.IsDeleted 
+                            && s.InvoiceDate >= trendFromDate 
+                            && s.InvoiceDate < trendToDate.AddDays(1));
+                    
+                    // Apply tenant filter
                     if (tenantId > 0)
                     {
-                        // Need to filter by tenant - adjust query
-                        dailySalesQuery = from s in _context.Sales
-                                         where !s.IsDeleted 
-                                             && s.TenantId == tenantId
-                                             && s.InvoiceDate >= sevenDaysAgo 
-                                             && s.InvoiceDate < today.AddDays(1)
-                                         group s by s.InvoiceDate.Date into g
-                                         select new
-                                         {
-                                             Date = g.Key,
-                                             Sales = g.Sum(s => s.GrandTotal),
-                                             InvoiceCount = g.Count()
-                                         };
+                        dailySalesQuery = dailySalesQuery.Where(s => s.TenantId == tenantId);
                     }
                     
+                    // Apply branch filter if provided
                     if (branchId.HasValue)
                     {
-                        dailySalesQuery = from s in _context.Sales
-                                         where !s.IsDeleted 
-                                             && s.BranchId == branchId.Value
-                                             && s.InvoiceDate >= sevenDaysAgo 
-                                             && s.InvoiceDate < today.AddDays(1)
-                                         group s by s.InvoiceDate.Date into g
-                                         select new
-                                         {
-                                             Date = g.Key,
-                                             Sales = g.Sum(s => s.GrandTotal),
-                                             InvoiceCount = g.Count()
-                                         };
-                        if (tenantId > 0)
-                        {
-                            dailySalesQuery = from s in _context.Sales
-                                             where !s.IsDeleted 
-                                                 && s.TenantId == tenantId
-                                                 && s.BranchId == branchId.Value
-                                                 && s.InvoiceDate >= sevenDaysAgo 
-                                                 && s.InvoiceDate < today.AddDays(1)
-                                             group s by s.InvoiceDate.Date into g
-                                             select new
-                                             {
-                                                 Date = g.Key,
-                                                 Sales = g.Sum(s => s.GrandTotal),
-                                                 InvoiceCount = g.Count()
-                                             };
-                        }
+                        dailySalesQuery = dailySalesQuery.Where(s => s.BranchId == branchId.Value);
                     }
                     
-                    var dailySalesData = await dailySalesQuery.ToListAsync();
+                    // Apply route filter if provided
+                    if (routeId.HasValue)
+                    {
+                        dailySalesQuery = dailySalesQuery.Where(s => s.RouteId == routeId.Value);
+                    }
+                    
+                    // Group by date and calculate totals
+                    var dailySalesData = await dailySalesQuery
+                        .GroupBy(s => s.InvoiceDate.Date)
+                        .Select(g => new
+                        {
+                            Date = g.Key,
+                            Sales = g.Sum(s => s.GrandTotal),
+                            InvoiceCount = g.Count()
+                        })
+                        .OrderBy(x => x.Date)
+                        .ToListAsync();
                     
                     // Fill in missing days with zero sales
-                    for (int i = 6; i >= 0; i--)
+                    var currentDate = trendFromDate.Date;
+                    var endDateForLoop = trendToDate.Date;
+                    
+                    while (currentDate <= endDateForLoop)
                     {
-                        var date = today.AddDays(-i);
-                        var dateStr = date.ToString("yyyy-MM-dd");
-                        var dayData = dailySalesData.FirstOrDefault(d => d.Date.Date == date.Date);
+                        var dateStr = currentDate.ToString("yyyy-MM-dd");
+                        var dayData = dailySalesData.FirstOrDefault(d => d.Date.Date == currentDate);
                         
                         dailySalesTrend.Add(new DailySalesDto
                         {
@@ -564,11 +550,16 @@ namespace HexaBill.Api.Modules.Reports
                             Sales = dayData != null ? dayData.Sales : 0m,
                             InvoiceCount = dayData != null ? dayData.InvoiceCount : 0
                         });
+                        
+                        currentDate = currentDate.AddDays(1);
                     }
+                    
+                    Console.WriteLine($"✅ Daily sales trend calculated for {dailySalesTrend.Count} days (from {trendFromDate:yyyy-MM-dd} to {trendToDate:yyyy-MM-dd})");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error calculating daily sales trend: {ex.Message}");
+                    Console.WriteLine($"❌ Error calculating daily sales trend: {ex.Message}");
+                    if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
                     dailySalesTrend = new List<DailySalesDto>();
                 }
 

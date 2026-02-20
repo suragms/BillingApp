@@ -494,18 +494,26 @@ namespace HexaBill.Api.Modules.Payments
 
         public async Task<bool> UpdatePaymentStatusAsync(int paymentId, PaymentStatus status, int userId, int tenantId)
         {
-            // Add owner filter to the query
-            var payment = await _context.Payments
-                .Where(p => p.Id == paymentId && p.TenantId == tenantId)
-                .Include(p => p.Sale)
-                .Include(p => p.Customer)
-                .FirstOrDefaultAsync();
-            
-            if (payment == null) return false;
+            // CRITICAL FIX: Wrap in transaction to ensure atomicity of payment, sale, and customer updates
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
+            {
+                // Add owner filter to the query
+                var payment = await _context.Payments
+                    .Where(p => p.Id == paymentId && p.TenantId == tenantId)
+                    .Include(p => p.Sale)
+                    .Include(p => p.Customer)
+                    .FirstOrDefaultAsync();
+                
+                if (payment == null)
+                {
+                    await transaction.RollbackAsync();
+                    return false;
+                }
 
-            var oldStatus = payment.Status;
-            payment.Status = status;
-            payment.UpdatedAt = DateTime.UtcNow;
+                var oldStatus = payment.Status;
+                payment.Status = status;
+                payment.UpdatedAt = DateTime.UtcNow;
 
             // CRITICAL FIX: Handle status changes correctly
             // Since CreatePaymentAsync updates Sale.PaidAmount for ALL payment types (including PENDING),
@@ -616,22 +624,38 @@ namespace HexaBill.Api.Modules.Payments
                 CreatedAt = DateTime.UtcNow
             };
 
-            _context.AuditLogs.Add(auditLog);
-            await _context.SaveChangesAsync();
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
 
-            return true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                Console.WriteLine($"❌ Error updating payment status: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task<PaymentDto?> UpdatePaymentAsync(int paymentId, UpdatePaymentRequest request, int userId, int tenantId)
         {
-            // Add owner filter
-            var payment = await _context.Payments
-                .Where(p => p.Id == paymentId && p.TenantId == tenantId)
-                .Include(p => p.Sale)
-                .Include(p => p.Customer)
-                .FirstOrDefaultAsync();
-            
-            if (payment == null) return null;
+            // CRITICAL FIX: Wrap in transaction to ensure atomicity of payment, sale, and customer updates
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
+            {
+                // Add owner filter
+                var payment = await _context.Payments
+                    .Where(p => p.Id == paymentId && p.TenantId == tenantId)
+                    .Include(p => p.Sale)
+                    .Include(p => p.Customer)
+                    .FirstOrDefaultAsync();
+                
+                if (payment == null)
+                {
+                    await transaction.RollbackAsync();
+                    return null;
+                }
 
             var oldAmount = payment.Amount;
             var oldStatus = payment.Status;
@@ -725,36 +749,52 @@ namespace HexaBill.Api.Modules.Payments
                 CreatedAt = DateTime.UtcNow
             };
 
-            _context.AuditLogs.Add(auditLog);
+                _context.AuditLogs.Add(auditLog);
 
-            // CRITICAL FIX: Recalculate customer balance BEFORE SaveChangesAsync
-            // This ensures balance is always accurate after payment update
-            if (payment.CustomerId.HasValue)
-            {
-                var customerService = new HexaBill.Api.Modules.Customers.CustomerService(_context);
-                var customer = await _context.Customers
-                    .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
-                if (customer != null)
+                // CRITICAL FIX: Recalculate customer balance BEFORE SaveChangesAsync
+                // This ensures balance is always accurate after payment update
+                if (payment.CustomerId.HasValue)
                 {
-                    await customerService.RecalculateCustomerBalanceAsync(payment.CustomerId.Value, customer.TenantId ?? 0);
-                    Console.WriteLine($"✅ Customer balance recalculated after payment update. New balance: {customer.Balance}");
+                    var customerService = new HexaBill.Api.Modules.Customers.CustomerService(_context);
+                    var customer = await _context.Customers
+                        .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
+                    if (customer != null)
+                    {
+                        await customerService.RecalculateCustomerBalanceAsync(payment.CustomerId.Value, customer.TenantId ?? 0);
+                        Console.WriteLine($"✅ Customer balance recalculated after payment update. New balance: {customer.Balance}");
+                    }
                 }
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return await GetPaymentByIdAsync(paymentId, tenantId);
             }
-
-            await _context.SaveChangesAsync();
-
-            return await GetPaymentByIdAsync(paymentId, tenantId);
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                Console.WriteLine($"❌ Error updating payment: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task<bool> DeletePaymentAsync(int paymentId, int userId, int tenantId)
         {
-            var payment = await _context.Payments
-                .Where(p => p.Id == paymentId && p.TenantId == tenantId)
-                .Include(p => p.Sale)
-                .Include(p => p.Customer)
-                .FirstOrDefaultAsync();
-            
-            if (payment == null) return false;
+            // CRITICAL FIX: Wrap in transaction to ensure atomicity of payment deletion and sale/customer updates
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
+            {
+                var payment = await _context.Payments
+                    .Where(p => p.Id == paymentId && p.TenantId == tenantId)
+                    .Include(p => p.Sale)
+                    .Include(p => p.Customer)
+                    .FirstOrDefaultAsync();
+                
+                if (payment == null)
+                {
+                    await transaction.RollbackAsync();
+                    return false;
+                }
 
             var wasCleared = payment.Status == PaymentStatus.CLEARED;
             var wasNonVoid = payment.Status != PaymentStatus.VOID;
@@ -825,24 +865,32 @@ namespace HexaBill.Api.Modules.Payments
                 CreatedAt = DateTime.UtcNow
             };
 
-            _context.AuditLogs.Add(auditLog);
+                _context.AuditLogs.Add(auditLog);
 
-            // CRITICAL FIX: Recalculate customer balance BEFORE SaveChangesAsync
-            // This ensures balance is always accurate after payment deletion
-            if (payment.CustomerId.HasValue)
-            {
-                var customerService = new HexaBill.Api.Modules.Customers.CustomerService(_context);
-                var customer = await _context.Customers
-                    .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
-                if (customer != null)
+                // CRITICAL FIX: Recalculate customer balance BEFORE SaveChangesAsync
+                // This ensures balance is always accurate after payment deletion
+                if (payment.CustomerId.HasValue)
                 {
-                    await customerService.RecalculateCustomerBalanceAsync(payment.CustomerId.Value, customer.TenantId ?? 0);
-                    Console.WriteLine($"✅ Customer balance recalculated after payment deletion. New balance: {customer.Balance}");
+                    var customerService = new HexaBill.Api.Modules.Customers.CustomerService(_context);
+                    var customer = await _context.Customers
+                        .FirstOrDefaultAsync(c => c.Id == payment.CustomerId.Value && c.TenantId == tenantId);
+                    if (customer != null)
+                    {
+                        await customerService.RecalculateCustomerBalanceAsync(payment.CustomerId.Value, customer.TenantId ?? 0);
+                        Console.WriteLine($"✅ Customer balance recalculated after payment deletion. New balance: {customer.Balance}");
+                    }
                 }
-            }
 
-            await _context.SaveChangesAsync();
-            return true;
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                Console.WriteLine($"❌ Error deleting payment: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task<List<Models.OutstandingInvoiceDto>> GetOutstandingInvoicesAsync(int customerId, int tenantId)
