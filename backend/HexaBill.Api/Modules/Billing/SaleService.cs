@@ -374,12 +374,14 @@ namespace HexaBill.Api.Modules.Billing
                 {
                     Console.WriteLine($"❌ Invoice {invoiceNo} already exists for owner {tenantId} (ID: {duplicateInvoice.Id}). Throwing error to trigger retry.");
                     
-                    // Send admin alert
+                    // Send admin alert (tenant-specific)
                     await _alertService.CreateAlertAsync(
                         AlertType.DuplicateInvoice,
                         "Duplicate Invoice Number",
                         $"Invoice number {invoiceNo} already exists for owner {tenantId} (Sale ID: {duplicateInvoice.Id})",
-                        AlertSeverity.Error
+                        AlertSeverity.Error,
+                        null,
+                        tenantId
                     );
                     
                     // Throw to trigger retry with new number
@@ -712,12 +714,14 @@ namespace HexaBill.Api.Modules.Billing
                     var cashPayments = request.Payments.Where(p => p.Method.ToUpper() == "CASH").ToList();
                     if (cashPayments.Count > 1)
                     {
-                        // Send admin alert
+                        // Send admin alert (tenant-specific)
                         await _alertService.CreateAlertAsync(
                             AlertType.DuplicatePayment,
                             "Duplicate Cash Payment",
                             $"Multiple cash payments detected for invoice {invoiceNo}. Only first payment will be processed.",
-                            AlertSeverity.Warning
+                            AlertSeverity.Warning,
+                            null,
+                            tenantId
                         );
                         
                         // Keep only first cash payment
@@ -871,7 +875,9 @@ namespace HexaBill.Api.Modules.Billing
                             AlertType.BalanceMismatch,
                             "Failed to update customer balance after invoice creation",
                             $"Invoice: {invoiceNo}, Customer: {request.CustomerId}",
-                            AlertSeverity.Warning);
+                            AlertSeverity.Warning,
+                            null,
+                            tenantId);
                     }
                 }
 
@@ -2085,7 +2091,7 @@ namespace HexaBill.Api.Modules.Billing
                 };
                 _context.AuditLogs.Add(auditLog);
 
-                // Create alert for invoice deletion (for admin tracking)
+                // Create alert for invoice deletion (tenant-specific)
                 await _alertService.CreateAlertAsync(
                     AlertType.InvoiceDeleted,
                     $"Invoice {sale.InvoiceNo} deleted",
@@ -2097,7 +2103,8 @@ namespace HexaBill.Api.Modules.Billing
                         { "GrandTotal", sale.GrandTotal },
                         { "CustomerId", sale.CustomerId ?? 0 },
                         { "DeletedBy", user?.Name ?? "Unknown" }
-                    }
+                    },
+                    tenantId
                 );
 
                 await _context.SaveChangesAsync();
@@ -2123,12 +2130,14 @@ namespace HexaBill.Api.Modules.Billing
                     catch (Exception balanceEx)
                     {
                         Console.WriteLine($"⚠️ Failed to update balance after deletion: {balanceEx.Message}");
-                        // Create alert for admin
+                        // Create alert for admin (tenant-specific)
                         await _alertService.CreateAlertAsync(
                             AlertType.BalanceMismatch,
                             "Failed to update customer balance after invoice deletion",
                             $"Invoice: {sale.InvoiceNo}, Customer: {sale.CustomerId}",
-                            AlertSeverity.Warning);
+                            AlertSeverity.Warning,
+                            null,
+                            tenantId);
                     }
                 }
 

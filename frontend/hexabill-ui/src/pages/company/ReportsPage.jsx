@@ -692,24 +692,15 @@ const ReportsPage = () => {
             status: 'all'
           })
           console.log('Outstanding bills response:', pendingBillsResponse)
-          if (pendingBillsResponse?.success && pendingBillsResponse?.data) {
-            setReportData(prev => ({
-              ...prev,
-              outstandingBills: pendingBillsResponse.data || []
-            }))
-          } else if (pendingBillsResponse?.data && Array.isArray(pendingBillsResponse.data)) {
-            // Handle case where data is directly in response
-            setReportData(prev => ({
-              ...prev,
-              outstandingBills: pendingBillsResponse.data || []
-            }))
-          } else {
-            // No data - set empty array
-            setReportData(prev => ({
-              ...prev,
-              outstandingBills: []
-            }))
-          }
+          // API returns { success, data: { items: [...], totalCount, page, pageSize, totalPages } }
+          const rawData = pendingBillsResponse?.data
+          const bills = Array.isArray(rawData)
+            ? rawData
+            : (rawData?.items ?? [])
+          setReportData(prev => ({
+            ...prev,
+            outstandingBills: bills || []
+          }))
         } catch (error) {
           console.error('Error loading outstanding bills:', error)
           if (!error?._handledByInterceptor) toast.error(error?.response?.data?.message || 'Failed to load outstanding bills')

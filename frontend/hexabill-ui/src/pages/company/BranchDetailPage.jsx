@@ -51,6 +51,8 @@ const BranchDetailPage = () => {
   const [branchStaff, setBranchStaff] = useState([])
   const [showAssignStaffModal, setShowAssignStaffModal] = useState(false)
   const [staffToAssignList, setStaffToAssignList] = useState([])
+  const [assignStaffLoading, setAssignStaffLoading] = useState(false)
+  const [assignStaffLoadError, setAssignStaffLoadError] = useState(null)
   const [assignStaffSaving, setAssignStaffSaving] = useState(false)
   const [removeStaffSavingId, setRemoveStaffSavingId] = useState(null)
   const [showTransferCustomerModal, setShowTransferCustomerModal] = useState(false)
@@ -172,17 +174,24 @@ const BranchDetailPage = () => {
   const routeIdToName = Object.fromEntries((summary?.routes ?? []).map(r => [r.routeId ?? r.id, r.routeName ?? r.name ?? '']))
 
   const openAssignStaffModal = async () => {
+    setShowAssignStaffModal(true)
+    setAssignStaffLoadError(null)
+    setAssignStaffLoading(true)
+    setStaffToAssignList([])
     try {
       const res = await adminAPI.getUsers()
-      const items = res?.success && res?.data ? (res.data?.items ?? (Array.isArray(res.data) ? res.data : [])) : []
+      const rawData = res?.data
+      const items = Array.isArray(rawData) ? rawData : (rawData?.items ?? [])
       const bid = parseInt(id, 10)
       const alreadyAssignedIds = new Set(branchStaff.map(u => u.id))
       const staff = items.filter(u => (u.role || '').toLowerCase() === 'staff' && !alreadyAssignedIds.has(u.id))
       setStaffToAssignList(staff)
-      setShowAssignStaffModal(true)
-    } catch {
-      toast.error('Failed to load users')
-      setStaffToAssignList([])
+    } catch (e) {
+      const msg = e?.response?.data?.message || e?.message || 'Failed to load users'
+      setAssignStaffLoadError(msg)
+      toast.error(msg)
+    } finally {
+      setAssignStaffLoading(false)
     }
   }
 
@@ -662,8 +671,15 @@ const BranchDetailPage = () => {
               onClose={() => !assignStaffSaving && setShowAssignStaffModal(false)}
               size="md"
             >
-              {staffToAssignList.length === 0 ? (
-                <p className="text-neutral-500 py-4">No other staff to assign. All staff are already assigned to this branch.</p>
+              {assignStaffLoading ? (
+                <div className="py-8 flex justify-center"><div className="animate-spin rounded-full h-8 w-8 border-2 border-primary-600 border-t-transparent" /></div>
+              ) : assignStaffLoadError ? (
+                <div className="py-4">
+                  <p className="text-red-600 mb-4">{assignStaffLoadError}</p>
+                  <button type="button" onClick={openAssignStaffModal} className="px-3 py-2 bg-primary-600 text-white rounded text-sm hover:bg-primary-700">Retry</button>
+                </div>
+              ) : staffToAssignList.length === 0 ? (
+                <p className="text-neutral-500 py-4">No other staff to assign. Create Staff users from the Users page first, or all Staff are already assigned to this branch.</p>
               ) : (
                 <ul className="space-y-2 max-h-64 overflow-y-auto">
                   {staffToAssignList.map(u => (

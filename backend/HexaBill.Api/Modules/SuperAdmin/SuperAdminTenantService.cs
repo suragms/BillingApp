@@ -1687,15 +1687,16 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     $@"DELETE FROM ""InvoiceTemplates"" 
                        WHERE ""CreatedBy"" IN (SELECT ""Id"" FROM ""Users"" WHERE ""TenantId"" = {tenantId})");
                 
+                // Delete SaleReturnItems FIRST - has FKs to SaleReturns, SaleItems, Products, DamageCategories
+                // Must run before SaleItems so we don't violate SaleReturnItem.SaleItemId FK
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""SaleReturnItems"" 
+                       WHERE ""SaleReturnId"" IN (SELECT ""Id"" FROM ""SaleReturns"" WHERE ""TenantId"" = {tenantId})");
+                
                 // Delete SaleItems (has FK to Sales)
                 await _context.Database.ExecuteSqlInterpolatedAsync(
                     $@"DELETE FROM ""SaleItems"" 
                        WHERE ""SaleId"" IN (SELECT ""Id"" FROM ""Sales"" WHERE ""TenantId"" = {tenantId})");
-                
-                // Delete SaleReturnItems (has FK to SaleReturns)
-                await _context.Database.ExecuteSqlInterpolatedAsync(
-                    $@"DELETE FROM ""SaleReturnItems"" 
-                       WHERE ""SaleReturnId"" IN (SELECT ""Id"" FROM ""SaleReturns"" WHERE ""TenantId"" = {tenantId})");
                 
                 // Delete PurchaseItems (has FK to Purchases)
                 await _context.Database.ExecuteSqlInterpolatedAsync(
@@ -1729,9 +1730,9 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 await _context.Database.ExecuteSqlInterpolatedAsync(
                     $@"DELETE FROM ""Expenses"" WHERE ""TenantId"" = {tenantId}");
                 
-                // Delete RecurringExpenses
+                // Delete RecurringExpenses (use OwnerId OR TenantId for multi-tenant compatibility)
                 await _context.Database.ExecuteSqlInterpolatedAsync(
-                    $@"DELETE FROM ""RecurringExpenses"" WHERE ""TenantId"" = {tenantId}");
+                    $@"DELETE FROM ""RecurringExpenses"" WHERE ""TenantId"" = {tenantId} OR ""OwnerId"" = {tenantId}");
                 
                 // Delete InventoryTransactions
                 await _context.Database.ExecuteSqlInterpolatedAsync(
@@ -1740,6 +1741,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 // Delete ProductCategories
                 await _context.Database.ExecuteSqlInterpolatedAsync(
                     $@"DELETE FROM ""ProductCategories"" WHERE ""TenantId"" = {tenantId}");
+                
+                // Delete DamageCategories (tenant-scoped, referenced by SaleReturnItem.DamageCategoryId)
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM ""DamageCategories"" WHERE ""TenantId"" = {tenantId}");
                 
                 // Delete UserSessions
                 await _context.Database.ExecuteSqlInterpolatedAsync(
@@ -1808,12 +1813,10 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 await _context.Database.ExecuteSqlInterpolatedAsync(
                     $@"DELETE FROM ""Subscriptions"" WHERE ""TenantId"" = {tenantId}");
                 
-                // AUDIT-1 FIX: Delete Settings by both OwnerId AND TenantId (if TenantId column exists)
-                // Some settings use OwnerId, some might use TenantId
+                // Delete Settings by both OwnerId AND TenantId (Settings has both columns)
                 await _context.Database.ExecuteSqlInterpolatedAsync(
                     $@"DELETE FROM ""Settings"" 
-                       WHERE ""OwnerId"" = {tenantId}");
-                // Note: If Settings table has TenantId column, add: OR ""TenantId"" = {tenantId}
+                       WHERE ""OwnerId"" = {tenantId} OR ""TenantId"" = {tenantId}");
                 
                 // 3. Delete users (SystemAdmin users have TenantId = null, so they won't be affected)
                 // AUDIT-1 FIX: Remove incorrect Role != 0 check - delete all users with this TenantId

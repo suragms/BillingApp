@@ -87,7 +87,7 @@ namespace HexaBill.Api.Modules.Notifications
         {
             try
             {
-                var alert = await _alertService.GetAlertByIdAsync(id);
+                var alert = await _alertService.GetAlertByIdAsync(id, CurrentTenantId);
                 if (alert == null)
                 {
                     return NotFound(new ApiResponse<Alert>
@@ -120,7 +120,7 @@ namespace HexaBill.Api.Modules.Notifications
         {
             try
             {
-                await _alertService.MarkAsReadAsync(id);
+                await _alertService.MarkAsReadAsync(id, CurrentTenantId);
                 return Ok(new ApiResponse<bool>
                 {
                     Success = true,
@@ -156,7 +156,7 @@ namespace HexaBill.Api.Modules.Notifications
                     });
                 }
 
-                await _alertService.MarkAsResolvedAsync(id, userId);
+                await _alertService.MarkAsResolvedAsync(id, userId, CurrentTenantId);
                 return Ok(new ApiResponse<bool>
                 {
                     Success = true,
@@ -180,7 +180,7 @@ namespace HexaBill.Api.Modules.Notifications
         {
             try
             {
-                var count = await _alertService.MarkAllAsReadAsync();
+                var count = await _alertService.MarkAllAsReadAsync(CurrentTenantId);
                 return Ok(new ApiResponse<int>
                 {
                     Success = true,
@@ -233,7 +233,7 @@ namespace HexaBill.Api.Modules.Notifications
         {
             try
             {
-                var count = await _alertService.ClearResolvedAlertsAsync();
+                var count = await _alertService.ClearResolvedAlertsAsync(CurrentTenantId);
                 return Ok(new ApiResponse<int>
                 {
                     Success = true,

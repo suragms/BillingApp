@@ -245,7 +245,7 @@ namespace HexaBill.Api.Modules.Customers
                     customerId, customer.TotalSales, customer.TotalPayments, customer.PendingBalance,
                     actualTotalSales, actualTotalPayments, actualPendingBalance);
 
-                // Create alert for admin
+                // Create alert for admin (tenant-specific)
                 await _alertService.CreateAlertAsync(
                     AlertType.BalanceMismatch,
                     $"Balance mismatch for customer {customer.Name}",
@@ -255,7 +255,8 @@ namespace HexaBill.Api.Modules.Customers
                         { "CustomerId", customerId },
                         { "StoredPending", customer.PendingBalance },
                         { "ActualPending", actualPendingBalance }
-                    });
+                    },
+                    customer.TenantId);
 
                 return new BalanceValidationResult
                 {
@@ -341,7 +342,7 @@ namespace HexaBill.Api.Modules.Customers
                     "Customer {CustomerId} credit limit exceeded: Current={Current}, Additional={Additional}, Limit={Limit}",
                     customerId, customer.PendingBalance, additionalAmount, customer.CreditLimit);
 
-                // Create alert
+                // Create alert (tenant-specific)
                 await _alertService.CreateAlertAsync(
                     AlertType.ValidationError,
                     $"Credit limit exceeded for {customer.Name}",
@@ -351,7 +352,8 @@ namespace HexaBill.Api.Modules.Customers
                         { "CustomerId", customerId },
                         { "AttemptedAmount", additionalAmount },
                         { "CreditLimit", customer.CreditLimit }
-                    });
+                    },
+                    customer.TenantId);
 
                 return false;
             }

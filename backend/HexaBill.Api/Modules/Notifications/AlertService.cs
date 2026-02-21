@@ -15,15 +15,16 @@ namespace HexaBill.Api.Modules.Notifications
 {
     public interface IAlertService
     {
-        Task CreateAlertAsync(AlertType type, string title, string? message = null, AlertSeverity severity = AlertSeverity.Info, Dictionary<string, object>? metadata = null);
+        /// <summary>Create alert. Use tenantId for tenant-specific alerts (invoice, stock, etc.); null/0 for system-wide (backup).</summary>
+        Task CreateAlertAsync(AlertType type, string title, string? message = null, AlertSeverity severity = AlertSeverity.Info, Dictionary<string, object>? metadata = null, int? tenantId = null);
         Task<List<Alert>> GetAlertsAsync(bool unreadOnly = false, int limit = 50, int? tenantId = null);
-        Task<Alert?> GetAlertByIdAsync(int id);
-        Task MarkAsReadAsync(int id);
-        Task MarkAsResolvedAsync(int id, int userId);
+        Task<Alert?> GetAlertByIdAsync(int id, int? tenantId = null); // tenantId required for tenant isolation
+        Task MarkAsReadAsync(int id, int? tenantId = null);
+        Task MarkAsResolvedAsync(int id, int userId, int? tenantId = null);
         Task<int> GetUnreadCountAsync(int? tenantId = null);
-        Task<int> MarkAllAsReadAsync(); // Mark all alerts as read
-        Task<int> MarkAllAsResolvedAsync(int userId, int? tenantId = null); // Mark all alerts as resolved
-        Task<int> ClearResolvedAlertsAsync(); // Delete resolved alerts
+        Task<int> MarkAllAsReadAsync(int? tenantId = null); // tenant-scoped: only current tenant's alerts
+        Task<int> MarkAllAsResolvedAsync(int userId, int? tenantId = null);
+        Task<int> ClearResolvedAlertsAsync(int? tenantId = null); // tenant-scoped: only current tenant's resolved alerts
         Task CheckAndCreateAlertsAsync(); // Background job to check for conditions
         Task DismissSimilarAlertsAsync(AlertType type, DateTime cutoffTime); // Dismiss duplicate alerts
     }
@@ -43,29 +44,31 @@ namespace HexaBill.Api.Modules.Notifications
             _settingsService = settingsService;
         }
 
-        public async Task CreateAlertAsync(AlertType type, string title, string? message = null, AlertSeverity severity = AlertSeverity.Info, Dictionary<string, object>? metadata = null)
+        public async Task CreateAlertAsync(AlertType type, string title, string? message = null, AlertSeverity severity = AlertSeverity.Info, Dictionary<string, object>? metadata = null, int? tenantId = null)
         {
             try
             {
-                // CRITICAL: Prevent duplicate alerts - check for similar alerts in last 5 minutes
+                // CRITICAL: Prevent duplicate alerts - check for similar alerts in last 5 minutes (same tenant)
+                var targetTenantId = tenantId ?? 0;
                 var cutoffTime = DateTime.UtcNow.AddMinutes(-5);
                 var similarAlert = await _context.Alerts
                     .Where(a => a.Type == type.ToString() && 
                                a.Title == title && 
+                               (a.TenantId ?? 0) == targetTenantId &&
                                a.CreatedAt >= cutoffTime)
                     .OrderByDescending(a => a.CreatedAt)
                     .FirstOrDefaultAsync();
 
                 if (similarAlert != null)
                 {
-                    // Similar alert exists recently - don't create duplicate
                     _logger.LogDebug("Similar alert exists (Type: {Type}, Title: {Title}), skipping duplicate", type, title);
                     return;
                 }
 
                 var alert = new Alert
                 {
-                    TenantId = 0, // SYSTEM-LEVEL ALERT: tenantId=0 for system alerts (not owner-specific)
+                    // CRITICAL: tenantId=0 only for system-wide (backup). Tenant-specific alerts MUST have TenantId set.
+                    TenantId = targetTenantId,
                     Type = type.ToString(),
                     Title = title,
                     Message = message,
@@ -114,34 +117,36 @@ namespace HexaBill.Api.Modules.Notifications
             }
         }
 
-        public async Task<Alert?> GetAlertByIdAsync(int id)
+        public async Task<Alert?> GetAlertByIdAsync(int id, int? tenantId = null)
         {
-            return await _context.Alerts
-                .Include(a => a.ResolvedByUser)
-                .FirstOrDefaultAsync(a => a.Id == id);
+            var query = _context.Alerts.Include(a => a.ResolvedByUser).Where(a => a.Id == id);
+            // Tenant isolation: only return if alert belongs to tenant (or system-wide TenantId 0)
+            if (tenantId.HasValue && tenantId.Value > 0)
+                query = query.Where(a => a.TenantId == tenantId.Value || a.TenantId == null || a.TenantId == 0);
+            return await query.FirstOrDefaultAsync();
         }
 
-        public async Task MarkAsReadAsync(int id)
+        public async Task MarkAsReadAsync(int id, int? tenantId = null)
         {
             var alert = await _context.Alerts.FindAsync(id);
-            if (alert != null && !alert.IsRead)
-            {
-                alert.IsRead = true;
-                alert.ReadAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
-            }
+            if (alert == null || alert.IsRead) return;
+            if (tenantId.HasValue && tenantId.Value > 0 && (alert.TenantId ?? 0) > 0 && alert.TenantId != tenantId.Value)
+                return; // Tenant isolation: cannot mark another tenant's alert
+            alert.IsRead = true;
+            alert.ReadAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
         }
 
-        public async Task MarkAsResolvedAsync(int id, int userId)
+        public async Task MarkAsResolvedAsync(int id, int userId, int? tenantId = null)
         {
             var alert = await _context.Alerts.FindAsync(id);
-            if (alert != null && !alert.IsResolved)
-            {
-                alert.IsResolved = true;
-                alert.ResolvedAt = DateTime.UtcNow;
-                alert.ResolvedBy = userId;
-                await _context.SaveChangesAsync();
-            }
+            if (alert == null || alert.IsResolved) return;
+            if (tenantId.HasValue && tenantId.Value > 0 && (alert.TenantId ?? 0) > 0 && alert.TenantId != tenantId.Value)
+                return; // Tenant isolation: cannot resolve another tenant's alert
+            alert.IsResolved = true;
+            alert.ResolvedAt = DateTime.UtcNow;
+            alert.ResolvedBy = userId;
+            await _context.SaveChangesAsync();
         }
 
         public async Task<int> GetUnreadCountAsync(int? tenantId = null)
@@ -160,22 +165,22 @@ namespace HexaBill.Api.Modules.Notifications
             }
         }
 
-        public async Task<int> MarkAllAsReadAsync()
+        public async Task<int> MarkAllAsReadAsync(int? tenantId = null)
         {
             try
             {
-                var unreadAlerts = await _context.Alerts.Where(a => !a.IsRead).ToListAsync();
+                var query = _context.Alerts.Where(a => !a.IsRead);
+                if (tenantId.HasValue && tenantId.Value > 0)
+                    query = query.Where(a => a.TenantId == tenantId.Value || a.TenantId == null || a.TenantId == 0);
+                var unreadAlerts = await query.ToListAsync();
                 var count = unreadAlerts.Count;
-                
                 foreach (var alert in unreadAlerts)
                 {
                     alert.IsRead = true;
                     alert.ReadAt = DateTime.UtcNow;
                 }
-                
                 if (count > 0)
                     await _context.SaveChangesAsync();
-                    
                 return count;
             }
             catch (PostgresException pgEx) when (pgEx.Message.Contains("does not exist"))
@@ -210,18 +215,18 @@ namespace HexaBill.Api.Modules.Notifications
             }
         }
 
-        public async Task<int> ClearResolvedAlertsAsync()
+        public async Task<int> ClearResolvedAlertsAsync(int? tenantId = null)
         {
             try
             {
-                var resolvedAlerts = await _context.Alerts.Where(a => a.IsResolved).ToListAsync();
+                var query = _context.Alerts.Where(a => a.IsResolved);
+                if (tenantId.HasValue && tenantId.Value > 0)
+                    query = query.Where(a => a.TenantId == tenantId.Value || a.TenantId == null || a.TenantId == 0);
+                var resolvedAlerts = await query.ToListAsync();
                 var count = resolvedAlerts.Count;
-                
                 _context.Alerts.RemoveRange(resolvedAlerts);
-                
                 if (count > 0)
                     await _context.SaveChangesAsync();
-                    
                 return count;
             }
             catch (PostgresException pgEx) when (pgEx.Message.Contains("does not exist"))
@@ -307,9 +312,9 @@ namespace HexaBill.Api.Modules.Notifications
 
         private async Task CheckDBMismatchAlertsAsync()
         {
-            // Check product stock mismatches
+            // Check product stock mismatches - PER-TENANT: group by TenantId for isolation
             var products = await _context.Products.ToListAsync();
-            var mismatches = new List<int>();
+            var mismatchesByTenant = new Dictionary<int, List<int>>();
 
             foreach (var product in products)
             {
@@ -319,24 +324,29 @@ namespace HexaBill.Api.Modules.Notifications
 
                 if (Math.Abs(product.StockQty - computedStock) > 0.01m)
                 {
-                    mismatches.Add(product.Id);
+                    var tid = product.TenantId ?? 0;
+                    if (!mismatchesByTenant.ContainsKey(tid)) mismatchesByTenant[tid] = new List<int>();
+                    mismatchesByTenant[tid].Add(product.Id);
                 }
             }
 
-            if (mismatches.Any())
+            foreach (var kv in mismatchesByTenant)
             {
+                var tid = kv.Key;
+                var mismatches = kv.Value;
                 var lastMismatchAlert = await _context.Alerts
-                    .Where(a => a.Type == AlertType.DBMismatch.ToString() && !a.IsResolved)
+                    .Where(a => a.Type == AlertType.DBMismatch.ToString() && !a.IsResolved && (a.TenantId ?? 0) == tid)
                     .OrderByDescending(a => a.CreatedAt)
                     .FirstOrDefaultAsync();
 
                 if (lastMismatchAlert == null || lastMismatchAlert.CreatedAt < DateTime.UtcNow.AddHours(-6))
                 {
-                    await CreateAlertAsync(AlertType.DBMismatch, 
-                        $"Stock mismatch detected for {mismatches.Count} products", 
-                        $"Product IDs: {string.Join(", ", mismatches.Take(10))}", 
+                    await CreateAlertAsync(AlertType.DBMismatch,
+                        $"Stock mismatch detected for {mismatches.Count} products",
+                        $"Product IDs: {string.Join(", ", mismatches.Take(10))}",
                         AlertSeverity.Warning,
-                        new Dictionary<string, object> { { "ProductIds", mismatches } });
+                        new Dictionary<string, object> { { "ProductIds", mismatches } },
+                        tid > 0 ? tid : null);
                 }
             }
         }
@@ -378,11 +388,12 @@ namespace HexaBill.Api.Modules.Notifications
                             { "TenantId", tenantId }
                         };
 
-                        await CreateAlertAsync(AlertType.LowStock, 
-                            $"{lowStockProducts.Count} products below reorder level", 
-                            productList, 
+                        await CreateAlertAsync(AlertType.LowStock,
+                            $"{lowStockProducts.Count} products below reorder level",
+                            productList,
                             AlertSeverity.Warning,
-                            alertMetadata);
+                            alertMetadata,
+                            tenantId);
 
                         // Trigger automation notification (email/WhatsApp)
                         try
@@ -508,30 +519,33 @@ namespace HexaBill.Api.Modules.Notifications
                 var overdueDate = DateTime.UtcNow.AddDays(-overdueDays);
 
                 var overdueInvoices = await _context.Sales
-                    .Where(s => s.PaymentStatus != SalePaymentStatus.Paid && 
+                    .Where(s => s.PaymentStatus != SalePaymentStatus.Paid &&
                                s.CreatedAt < overdueDate &&
                                (s.GrandTotal - s.PaidAmount) > 0)
                     .ToListAsync();
 
-                if (overdueInvoices.Any())
+                foreach (var g in overdueInvoices.GroupBy(s => s.TenantId ?? 0))
                 {
-                    var totalOverdue = overdueInvoices.Sum(s => s.GrandTotal - s.PaidAmount);
+                    var tenantId = g.Key;
+                    var list = g.ToList();
+                    var totalOverdue = list.Sum(s => s.GrandTotal - s.PaidAmount);
                     var lastOverdueAlert = await _context.Alerts
-                        .Where(a => a.Type == AlertType.OverdueInvoice.ToString() && !a.IsResolved)
+                        .Where(a => a.Type == AlertType.OverdueInvoice.ToString() && !a.IsResolved && (a.TenantId ?? 0) == tenantId)
                         .OrderByDescending(a => a.CreatedAt)
                         .FirstOrDefaultAsync();
 
                     if (lastOverdueAlert == null || lastOverdueAlert.CreatedAt < DateTime.UtcNow.AddDays(-1))
                     {
-                        await CreateAlertAsync(AlertType.OverdueInvoice, 
-                            $"{overdueInvoices.Count} invoices overdue (> {overdueDays} days)", 
-                            $"Total overdue amount: {totalOverdue:C}", 
+                        await CreateAlertAsync(AlertType.OverdueInvoice,
+                            $"{list.Count} invoices overdue (> {overdueDays} days)",
+                            $"Total overdue amount: {totalOverdue:C}",
                             AlertSeverity.Warning,
-                            new Dictionary<string, object> { 
-                                { "InvoiceIds", overdueInvoices.Select(s => s.Id).ToList() },
+                            new Dictionary<string, object> {
+                                { "InvoiceIds", list.Select(s => s.Id).ToList() },
                                 { "TotalAmount", totalOverdue },
-                                { "Count", overdueInvoices.Count }
-                            });
+                                { "Count", list.Count }
+                            },
+                            tenantId > 0 ? tenantId : null);
                     }
                 }
             }
@@ -547,20 +561,24 @@ namespace HexaBill.Api.Modules.Notifications
 
         private async Task CheckDuplicateInvoiceAlertsAsync()
         {
-            // Check for duplicate invoice numbers in last 7 days
-            var recentSales = await _context.Sales
+            // Check for duplicate invoice numbers per TENANT (last 7 days)
+            var grouped = await _context.Sales
                 .Where(s => s.CreatedAt > DateTime.UtcNow.AddDays(-7))
-                .GroupBy(s => s.InvoiceNo)
+                .GroupBy(s => new { s.TenantId, s.InvoiceNo })
                 .Where(g => g.Count() > 1)
-                .Select(g => g.Key)
+                .Select(g => new { g.Key.TenantId, InvoiceNo = g.Key.InvoiceNo })
                 .ToListAsync();
 
-            if (recentSales.Any())
+            foreach (var byTenant in grouped.GroupBy(x => x.TenantId ?? 0))
             {
-                await CreateAlertAsync(AlertType.DuplicateInvoice, 
-                    $"Duplicate invoice numbers detected: {string.Join(", ", recentSales)}", 
-                    "Please review invoice creation logic", 
-                    AlertSeverity.Error);
+                var tenantId = byTenant.Key;
+                var dupNos = byTenant.Select(x => x.InvoiceNo).Distinct().ToList();
+                await CreateAlertAsync(AlertType.DuplicateInvoice,
+                    $"Duplicate invoice numbers detected: {string.Join(", ", dupNos)}",
+                    "Please review invoice creation logic",
+                    AlertSeverity.Error,
+                    null,
+                    tenantId > 0 ? tenantId : null);
             }
         }
 
