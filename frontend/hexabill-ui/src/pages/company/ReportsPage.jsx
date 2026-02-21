@@ -1775,7 +1775,7 @@ const ReportsPage = () => {
                       toast.loading('Exporting branch report...')
                       // TODO: Add export endpoint for branch report
                       toast.dismiss()
-                      toast.info('Branch report export coming soon')
+                      toast('Branch report export coming soon')
                     } catch (error) {
                       console.error('Failed to export:', error)
                       toast.dismiss()
@@ -2043,7 +2043,7 @@ const ReportsPage = () => {
                         toast.loading('Exporting aging report...')
                         // TODO: Add export endpoint for aging report
                         toast.dismiss()
-                        toast.info('Aging report export coming soon')
+                        toast('Aging report export coming soon')
                       } catch (error) {
                         console.error('Failed to export:', error)
                         toast.dismiss()
@@ -2785,7 +2785,7 @@ const ReportsPage = () => {
                         toast.loading('Exporting cheque report...')
                         // TODO: Add export endpoint for cheque report
                         toast.dismiss()
-                        toast.info('Cheque report export coming soon')
+                        toast('Cheque report export coming soon')
                       } catch (error) {
                         console.error('Failed to export:', error)
                         toast.dismiss()

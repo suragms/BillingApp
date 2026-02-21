@@ -21,11 +21,13 @@ namespace HexaBill.Api.Modules.Users
     {
         private readonly IAuthService _authService;
         private readonly AppDbContext _context;
+        private readonly ILogger<UsersController> _logger;
 
-        public UsersController(IAuthService authService, AppDbContext context)
+        public UsersController(IAuthService authService, AppDbContext context, ILogger<UsersController> logger)
         {
             _authService = authService;
             _context = context;
+            _logger = logger;
         }
 
         // GET: api/users - Get all users (Admin and Owner)
@@ -497,11 +499,13 @@ namespace HexaBill.Api.Modules.Users
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex, "UpdateUser failed for id={Id}", id);
+                var errMsg = ex.InnerException?.Message ?? ex.Message;
                 return StatusCode(500, new ApiResponse<UserDto>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = errMsg,
+                    Errors = new List<string> { errMsg }
                 });
             }
         }

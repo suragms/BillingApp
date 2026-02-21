@@ -603,6 +603,39 @@ using (var scope = app.Services.CreateScope())
         {
             dbFixLogger?.LogError(ex, "❌ Error checking PageAccess column: {Error}", ex.Message);
         }
+
+        // CRITICAL FIX: Ensure BranchStaff and RouteStaff have Id sequences (fixes PUT /users 500 on PostgreSQL)
+        try
+        {
+            if (db.Database.IsNpgsql())
+            {
+                await db.Database.ExecuteSqlRawAsync(@"
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = 'BranchStaff_Id_seq') THEN
+                            CREATE SEQUENCE ""BranchStaff_Id_seq"";
+                            ALTER TABLE ""BranchStaff"" ALTER COLUMN ""Id"" SET DEFAULT nextval('""BranchStaff_Id_seq""');
+                            PERFORM setval('""BranchStaff_Id_seq""', COALESCE((SELECT MAX(""Id"") FROM ""BranchStaff""), 1));
+                        END IF;
+                    END $$;
+                ");
+                await db.Database.ExecuteSqlRawAsync(@"
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = 'RouteStaff_Id_seq') THEN
+                            CREATE SEQUENCE ""RouteStaff_Id_seq"";
+                            ALTER TABLE ""RouteStaff"" ALTER COLUMN ""Id"" SET DEFAULT nextval('""RouteStaff_Id_seq""');
+                            PERFORM setval('""RouteStaff_Id_seq""', COALESCE((SELECT MAX(""Id"") FROM ""RouteStaff""), 1));
+                        END IF;
+                    END $$;
+                ");
+                dbFixLogger?.LogInformation("✅ BranchStaff/RouteStaff Id sequences ensured");
+            }
+        }
+        catch (Exception seqEx)
+        {
+            dbFixLogger?.LogWarning(seqEx, "BranchStaff/RouteStaff sequence fix skipped (tables may not exist yet): {Error}", seqEx.Message);
+        }
     }
     catch (Exception ex)
     {

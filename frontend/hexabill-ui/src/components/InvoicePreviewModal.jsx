@@ -232,7 +232,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, customerPhone, onClose, onPrin
             document.body.removeChild(a)
           }, 100)
 
-          toast.info('Email client opened. Please attach the downloaded PDF')
+          toast('Email client opened. Please attach the downloaded PDF')
         } finally {
           setLoading(false)
         }

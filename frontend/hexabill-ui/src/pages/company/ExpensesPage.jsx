@@ -1450,7 +1450,7 @@ const ExpensesPage = () => {
             <button
               onClick={() => {
                 // TODO: Open create recurring expense form
-                toast.info('Recurring expense creation coming soon')
+                toast('Recurring expense creation coming soon')
               }}
               className="w-full px-4 py-2 bg-purple-600 text-white rounded-md text-sm font-medium hover:bg-purple-700 flex items-center justify-center min-h-[44px]"
             >
@@ -1480,7 +1480,7 @@ const ExpensesPage = () => {
                         <button
                           onClick={() => {
                             // TODO: Edit recurring expense
-                            toast.info('Edit recurring expense coming soon')
+                            toast('Edit recurring expense coming soon')
                           }}
                           className="text-indigo-600 hover:text-indigo-900"
                         >
@@ -1489,7 +1489,7 @@ const ExpensesPage = () => {
                         <button
                           onClick={() => {
                             // TODO: Delete recurring expense
-                            toast.info('Delete recurring expense coming soon')
+                            toast('Delete recurring expense coming soon')
                           }}
                           className="text-red-600 hover:text-red-900"
                         >

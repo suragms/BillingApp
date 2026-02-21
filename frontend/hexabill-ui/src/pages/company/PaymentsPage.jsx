@@ -420,7 +420,7 @@ const PaymentsPage = () => {
         toast.success('Receipt downloaded successfully')
       } else {
         // For payments without invoices, show receipt modal instead
-        toast.info('Opening receipt preview...')
+        toast('Opening receipt preview...')
         setReceiptPayment(payment)
         setShowReceiptModal(true)
       }

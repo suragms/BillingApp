@@ -426,7 +426,8 @@ const UsersPage = () => {
       }
     } catch (error) {
       console.error('Error updating user:', error)
-      toast.error(error?.response?.data?.message || 'Failed to update user')
+      const msg = error?.response?.data?.message || error?.response?.data?.errors?.[0] || 'Failed to update user'
+      toast.error(msg)
     } finally {
       setLoadingAction(false)
     }
