@@ -29,8 +29,11 @@ namespace HexaBill.Api.ModelBinders
             if (string.IsNullOrEmpty(value))
                 return Task.CompletedTask;
 
-            // Try to parse the datetime
-            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateTime))
+            // CRITICAL: Try YYYY-MM-DD first (API standard), then DD-MM-YYYY (locale fallback)
+            var formats = new[] { "yyyy-MM-dd", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-ddTHH:mm:ssZ", "dd-MM-yyyy", "dd/MM/yyyy" };
+            DateTime dateTime;
+            if ((DateTime.TryParseExact(value.Trim(), formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out dateTime) ||
+                 DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out dateTime)))
             {
                 // CRITICAL FIX: Convert Kind.Unspecified to Kind.Utc for PostgreSQL compatibility
                 if (dateTime.Kind == DateTimeKind.Unspecified)

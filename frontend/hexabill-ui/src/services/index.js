@@ -1,4 +1,13 @@
 import api from './api'
+import { toYYYYMMDD } from '../utils/dateFormat'
+
+/** Normalize fromDate/toDate in params to YYYY-MM-DD for API compatibility */
+const normalizeDateParams = (params = {}) => {
+  const norm = { ...params }
+  if (params.fromDate) norm.fromDate = toYYYYMMDD(params.fromDate)
+  if (params.toDate) norm.toDate = toYYYYMMDD(params.toDate)
+  return norm
+}
 
 export const authAPI = {
   login: async (credentials) => {
@@ -422,8 +431,8 @@ export const customersAPI = {
     if (branchId != null) query.set('branchId', branchId)
     if (routeId != null) query.set('routeId', routeId)
     if (staffId != null) query.set('staffId', staffId)
-    if (fromDate) query.set('fromDate', fromDate)
-    if (toDate) query.set('toDate', toDate)
+    if (fromDate) query.set('fromDate', toYYYYMMDD(fromDate))
+    if (toDate) query.set('toDate', toYYYYMMDD(toDate))
     const url = query.toString() ? `/customers/${id}/ledger?${query}` : `/customers/${id}/ledger`
     const response = await api.get(url)
     return response.data
@@ -446,7 +455,7 @@ export const customersAPI = {
 
   getCustomerStatement: async (id, fromDate, toDate) => {
     const response = await api.get(`/customers/${id}/statement`, {
-      params: { fromDate, toDate },
+      params: { fromDate: toYYYYMMDD(fromDate), toDate: toYYYYMMDD(toDate) },
       responseType: 'blob'
     })
     return response.data
@@ -454,8 +463,8 @@ export const customersAPI = {
 
   getCustomerPendingBillsPdf: async (id, fromDate, toDate) => {
     const params = {}
-    if (fromDate) params.fromDate = fromDate
-    if (toDate) params.toDate = toDate
+    if (fromDate) params.fromDate = toYYYYMMDD(fromDate)
+    if (toDate) params.toDate = toYYYYMMDD(toDate)
     const response = await api.get(`/customers/${id}/pending-bills-pdf`, {
       params,
       responseType: 'blob'
@@ -627,24 +636,24 @@ export const reportsAPI = {
   },
 
   getSummaryReport: async (params = {}) => {
-    const response = await api.get('/reports/summary', { params })
+    const response = await api.get('/reports/summary', { params: normalizeDateParams(params) })
     return response.data
   },
 
   getSalesReport: async (params = {}) => {
-    const response = await api.get('/reports/sales', { params })
+    const response = await api.get('/reports/sales', { params: normalizeDateParams(params) })
     return response.data
   },
   getEnhancedSalesReport: async (params = {}) => {
-    const response = await api.get('/reports/sales-enhanced', { params })
+    const response = await api.get('/reports/sales-enhanced', { params: normalizeDateParams(params) })
     return response.data
   },
   getProductSalesReport: async (params = {}) => {
-    const response = await api.get('/reports/product-sales', { params })
+    const response = await api.get('/reports/product-sales', { params: normalizeDateParams(params) })
     return response.data
   },
   getEnhancedProductSalesReport: async (params = {}) => {
-    const response = await api.get('/reports/products-enhanced', { params })
+    const response = await api.get('/reports/products-enhanced', { params: normalizeDateParams(params) })
     return response.data
   },
   getOutstandingCustomers: async (params = {}) => {
@@ -664,22 +673,21 @@ export const reportsAPI = {
     return response.data
   },
   getComprehensiveSalesLedger: async (params = {}) => {
-    const response = await api.get('/reports/sales-ledger', { params })
+    const response = await api.get('/reports/sales-ledger', { params: normalizeDateParams(params) })
     return response.data
   },
 
   getBranchComparison: async (params = {}) => {
-    const response = await api.get('/reports/branch-comparison', { params })
+    const response = await api.get('/reports/branch-comparison', { params: normalizeDateParams(params) })
     return response.data
   },
   getStaffPerformance: async (params = {}) => {
-    // FIX: Include routeId filter if provided
-    const response = await api.get('/reports/staff-performance', { params })
+    const response = await api.get('/reports/staff-performance', { params: normalizeDateParams(params) })
     return response.data
   },
 
   getChequeReport: async (params = {}) => {
-    const response = await api.get('/reports/cheque', { params })
+    const response = await api.get('/reports/cheque', { params: normalizeDateParams(params) })
     return response.data
   },
 
@@ -689,12 +697,12 @@ export const reportsAPI = {
   },
 
   getPendingBills: async (params = {}) => {
-    const response = await api.get('/reports/pending', { params })
+    const response = await api.get('/reports/pending', { params: normalizeDateParams(params) })
     return response.data
   },
 
   exportPendingBillsPdf: async (params = {}) => {
-    const response = await api.get('/reports/pending-bills/export/pdf', { params, responseType: 'blob' })
+    const response = await api.get('/reports/pending-bills/export/pdf', { params: normalizeDateParams(params), responseType: 'blob' })
     return response.data
   },
 
@@ -709,17 +717,17 @@ export const reportsAPI = {
   },
 
   exportReportPdf: async (params = {}) => {
-    const response = await api.get('/reports/export/pdf', { params, responseType: 'blob' })
+    const response = await api.get('/reports/export/pdf', { params: normalizeDateParams(params), responseType: 'blob' })
     return response.data
   },
 
   exportReportExcel: async (params = {}) => {
-    const response = await api.get('/reports/export/excel', { params, responseType: 'blob' })
+    const response = await api.get('/reports/export/excel', { params: normalizeDateParams(params), responseType: 'blob' })
     return response.data
   },
 
   exportReportCsv: async (params = {}) => {
-    const response = await api.get('/reports/export/csv', { params, responseType: 'blob' })
+    const response = await api.get('/reports/export/csv', { params: normalizeDateParams(params), responseType: 'blob' })
     return response.data
   },
 }
