@@ -654,7 +654,9 @@ app.Use(async (context, next) =>
 {
     var origin = context.Request.Headers.Origin.ToString();
     var isLocalhost = origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) || origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase);
-    if (!string.IsNullOrEmpty(origin) && (isLocalhost || origin.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)))
+    var isVercel = !string.IsNullOrEmpty(origin) && origin.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase);
+    var isHexaBillCompany = !string.IsNullOrEmpty(origin) && (origin.Contains("hexabill.company", StringComparison.OrdinalIgnoreCase));
+    if (!string.IsNullOrEmpty(origin) && (isLocalhost || isVercel || isHexaBillCompany))
     {
         context.Response.Headers.Append("Access-Control-Allow-Origin", origin);
         context.Response.Headers.Append("Access-Control-Allow-Credentials", "true");
