@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Play, AlertCircle, Database } from 'lucide-react'
 import { superAdminAPI } from '../../services'
 import toast from 'react-hot-toast'
+import { showToast } from '../../utils/toast'
 
 /**
  * Read-only SQL console for Super Admin. PRODUCTION_MASTER_TODO #47.
@@ -27,7 +28,7 @@ const SuperAdminSqlConsolePage = () => {
       if (res?.success && res?.data) {
         setResult(res.data)
         if (res.data.truncated) {
-          toast('Result truncated at 1000 rows', { icon: '⚠️' })
+          showToast.warning('Result truncated at 1000 rows')
         }
       } else {
         setError(res?.message || 'Query failed')

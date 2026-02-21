@@ -29,6 +29,7 @@ import { isAdminOrOwner } from '../../utils/roles'
 import { useBranchesRoutes } from '../../contexts/BranchesRoutesContext'
 import { useBranding } from '../../contexts/TenantBrandingContext'
 import toast from 'react-hot-toast'
+import { showToast } from '../../utils/toast'
 import ConfirmDangerModal from '../../components/ConfirmDangerModal'
 
 import { getApiBaseUrl } from '../../services/apiConfig'
@@ -739,9 +740,7 @@ const PosPage = () => {
               document.body.removeChild(a)
 
               toast.dismiss('print-toast')
-              toast('PDF downloaded. Please open it and print manually.', {
-                duration: 5000
-              })
+              showToast.info('PDF downloaded. Please open it and print manually.')
             }
 
             // Clean up iframe and URL after delay
@@ -946,9 +945,7 @@ const PosPage = () => {
         const subject = encodeURIComponent(`Invoice ${invoiceNo}`)
         const body = encodeURIComponent(`Please find invoice ${invoiceNo} attached.\n\nThank you for your business!`)
         window.location.href = `mailto:${email}?subject=${subject}&body=${body}`
-        toast('Email client opened. Please attach the PDF manually if needed.', {
-          duration: 5000
-        })
+        showToast.info('Email client opened. Please attach the PDF manually if needed.')
       }
     }
 

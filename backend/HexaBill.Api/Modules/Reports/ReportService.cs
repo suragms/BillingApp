@@ -455,12 +455,24 @@ namespace HexaBill.Api.Modules.Reports
                             })
                             .ToDictionaryAsync(x => x.BranchId, x => x.Expenses);
 
+                        // Payments by branch (via Sale.BranchId)
+                        var branchPaymentsStats = await _context.Payments
+                            .Where(p => p.TenantId == tenantId && p.SaleId.HasValue
+                                && p.PaymentDate >= startDate && p.PaymentDate < endDate)
+                            .Join(_context.Sales.Where(s => !s.IsDeleted && s.BranchId.HasValue),
+                                p => p.SaleId!.Value, s => s.Id, (p, s) => new { p.Amount, s.BranchId })
+                            .GroupBy(x => x.BranchId!.Value)
+                            .Select(g => new { BranchId = g.Key, Paid = g.Sum(x => (decimal?)x.Amount) ?? 0m })
+                            .ToDictionaryAsync(x => x.BranchId, x => x.Paid);
+
                         // Combine results
                         foreach (var salesStat in branchSalesStats)
                         {
                             var branchName = branchNames.GetValueOrDefault(salesStat.BranchId, "Unknown");
                             var expenses = branchExpensesStats.GetValueOrDefault(salesStat.BranchId, 0m);
+                            var paid = branchPaymentsStats.GetValueOrDefault(salesStat.BranchId, 0m);
                             var profit = salesStat.Sales - expenses;
+                            var unpaid = salesStat.Sales > paid ? salesStat.Sales - paid : 0m;
 
                             branchBreakdown.Add(new DashboardBranchSummaryDto
                             {
@@ -469,7 +481,9 @@ namespace HexaBill.Api.Modules.Reports
                                 Sales = salesStat.Sales,
                                 Expenses = expenses,
                                 Profit = profit,
-                                InvoiceCount = salesStat.InvoiceCount
+                                InvoiceCount = salesStat.InvoiceCount,
+                                UnpaidAmount = unpaid,
+                                PaidAmount = paid
                             });
                         }
 

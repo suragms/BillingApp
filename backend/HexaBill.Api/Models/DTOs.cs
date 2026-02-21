@@ -614,6 +614,8 @@ namespace HexaBill.Api.Models
         public decimal Expenses { get; set; }
         public decimal Profit { get; set; }
         public int InvoiceCount { get; set; }
+        public decimal UnpaidAmount { get; set; }
+        public decimal PaidAmount { get; set; }
     }
 
     public class DailySalesDto
@@ -902,6 +904,10 @@ namespace HexaBill.Api.Models
         public int InvoiceCount { get; set; }
         /// <summary>Number of customer visits recorded in the date range. Used by Route Performance tab.</summary>
         public int VisitCount { get; set; }
+        /// <summary>Total payments received for this route's sales in the period.</summary>
+        public decimal TotalPayments { get; set; }
+        /// <summary>Unpaid amount (sales minus payments) for this route in the period.</summary>
+        public decimal UnpaidAmount { get; set; }
     }
 
     public class BranchSummaryDto
@@ -918,6 +924,8 @@ namespace HexaBill.Api.Models
         public decimal AverageInvoiceSize { get; set; }
         public int InvoiceCount { get; set; }
         public decimal TotalPayments { get; set; }
+        /// <summary>Unpaid/pending amount (TotalSales - TotalPayments) in the period.</summary>
+        public decimal UnpaidAmount { get; set; }
     }
 
     public class BranchComparisonItemDto : BranchSummaryDto

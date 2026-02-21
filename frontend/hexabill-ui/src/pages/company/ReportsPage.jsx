@@ -29,6 +29,7 @@ import { isAdminOrOwner } from '../../utils/roles'
 import { useBranchesRoutes } from '../../contexts/BranchesRoutesContext'
 import { formatCurrency, formatBalance } from '../../utils/currency'
 import toast from 'react-hot-toast'
+import { showToast } from '../../utils/toast'
 import { LoadingCard } from '../../components/Loading'
 import { Input, Select } from '../../components/Form'
 import { reportsAPI, productsAPI, customersAPI, profitAPI, paymentsAPI, adminAPI, returnsAPI } from '../../services'
@@ -167,22 +168,22 @@ const ReportsPage = () => {
   const { user } = useAuth()
 
   const tabs = [
-    { id: 'summary', name: 'Summary', icon: BarChart3 },
-    { id: 'sales', name: 'Sales Report', icon: TrendingUp },
-    { id: 'products', name: 'Product Analysis', icon: PieChart },
-    { id: 'customers', name: 'Customer Report', icon: FileText },
-    { id: 'expenses', name: 'Expenses', icon: TrendingDown },
-    { id: 'branch', name: 'Branch Report', icon: Building2 },
-    { id: 'route', name: 'Route Report', icon: MapPin },
-    { id: 'aging', name: 'Customer Aging', icon: Clock },
-    { id: 'profit-loss', name: 'Profit & Loss', icon: TrendingUp, adminOnly: true },
-    { id: 'branch-profit', name: 'Branch Profit', icon: Building2, adminOnly: true },
-    { id: 'outstanding', name: 'Outstanding Bills', icon: DollarSign },
-    { id: 'returns', name: 'Sales Returns', icon: RotateCcw },
-    { id: 'collections', name: 'Collections (with phone)', icon: Phone },
-    { id: 'cheque', name: 'Cheque Report', icon: ShieldCheck, adminOnly: true }, // FIX: Add Cheque Report tab
-    { id: 'staff', name: 'Staff Performance', icon: Users, adminOnly: true },
-    { id: 'ai', name: 'AI Insights', icon: Eye, adminOnly: true }
+    { id: 'summary', name: 'Summary', shortLabel: 'Summary', icon: BarChart3 },
+    { id: 'sales', name: 'Sales Report', shortLabel: 'Sales', icon: TrendingUp },
+    { id: 'products', name: 'Product Analysis', shortLabel: 'Product', icon: PieChart },
+    { id: 'customers', name: 'Customer Report', shortLabel: 'Customers', icon: FileText },
+    { id: 'expenses', name: 'Expenses', shortLabel: 'Expenses', icon: TrendingDown },
+    { id: 'branch', name: 'Branch Report', shortLabel: 'Branch', icon: Building2 },
+    { id: 'route', name: 'Route Report', shortLabel: 'Route', icon: MapPin },
+    { id: 'aging', name: 'Customer Aging', shortLabel: 'Aging', icon: Clock },
+    { id: 'profit-loss', name: 'Profit & Loss', shortLabel: 'P&L', icon: TrendingUp, adminOnly: true },
+    { id: 'branch-profit', name: 'Branch Profit', shortLabel: 'Branch P&L', icon: Building2, adminOnly: true },
+    { id: 'outstanding', name: 'Outstanding Bills', shortLabel: 'Outstanding', icon: DollarSign },
+    { id: 'returns', name: 'Sales Returns', shortLabel: 'Returns', icon: RotateCcw },
+    { id: 'collections', name: 'Collections (with phone)', shortLabel: 'Collections', icon: Phone },
+    { id: 'cheque', name: 'Cheque Report', shortLabel: 'Cheque', icon: ShieldCheck, adminOnly: true },
+    { id: 'staff', name: 'Staff Performance', shortLabel: 'Staff', icon: Users, adminOnly: true },
+    { id: 'ai', name: 'AI Insights', shortLabel: 'AI', icon: Eye, adminOnly: true }
   ].filter(tab => !tab.adminOnly || isAdminOrOwner(user))
 
   // Update URL when tab changes (with debouncing to prevent request flood)
@@ -1307,7 +1308,7 @@ const ReportsPage = () => {
             {tabs.map((tab) => {
               const Icon = tab.icon
               const active = activeTab === tab.id
-              const label = tab.id === 'collections' ? 'Collections' : tab.name.split(' ')[0]
+              const label = tab.shortLabel || tab.name
               return (
                 <button
                   key={tab.id}
@@ -1775,7 +1776,7 @@ const ReportsPage = () => {
                       toast.loading('Exporting branch report...')
                       // TODO: Add export endpoint for branch report
                       toast.dismiss()
-                      toast('Branch report export coming soon')
+                      showToast.info('Branch report export coming soon')
                     } catch (error) {
                       console.error('Failed to export:', error)
                       toast.dismiss()
@@ -2043,7 +2044,7 @@ const ReportsPage = () => {
                         toast.loading('Exporting aging report...')
                         // TODO: Add export endpoint for aging report
                         toast.dismiss()
-                        toast('Aging report export coming soon')
+                        showToast.info('Aging report export coming soon')
                       } catch (error) {
                         console.error('Failed to export:', error)
                         toast.dismiss()
@@ -2785,7 +2786,7 @@ const ReportsPage = () => {
                         toast.loading('Exporting cheque report...')
                         // TODO: Add export endpoint for cheque report
                         toast.dismiss()
-                        toast('Cheque report export coming soon')
+                        showToast.info('Cheque report export coming soon')
                       } catch (error) {
                         console.error('Failed to export:', error)
                         toast.dismiss()

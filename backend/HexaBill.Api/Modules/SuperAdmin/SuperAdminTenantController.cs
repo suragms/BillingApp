@@ -352,16 +352,17 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
             catch (Exception ex)
             {
+                var msg = ex.InnerException?.Message ?? ex.Message;
+                _logger.LogError(ex, "GetTenant failed for tenant {TenantId}", id);
                 return StatusCode(500, new ApiResponse<TenantDetailDto>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = msg,
+                    Errors = new List<string> { msg }.Concat(ex.InnerException != null && ex.InnerException.Message != msg ? new[] { ex.Message } : Array.Empty<string>()).Where(e => !string.IsNullOrEmpty(e)).ToList()
                 });
             }
         }
 
-        /// <summary>
         /// <summary>
         /// Create new tenant (SystemAdmin only). Returns tenant + client credentials (link, ID, email, password) to give to the client.
         /// </summary>
@@ -709,17 +710,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ DeleteTenant Error: {ex.Message}");
-                Console.WriteLine(ex.StackTrace);
-                if (ex.InnerException != null)
-                {
-                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
-                }
+                var msg = ex.InnerException?.Message ?? ex.Message;
+                _logger.LogError(ex, "DeleteTenant failed for tenant {TenantId}", id);
                 return StatusCode(500, new ApiResponse<object>
                 {
                     Success = false,
-                    Message = "An error occurred while deleting tenant",
-                    Errors = new List<string> { ex.Message, ex.InnerException?.Message ?? "" }.Where(e => !string.IsNullOrEmpty(e)).ToList()
+                    Message = msg,
+                    Errors = new List<string> { msg }.Concat(ex.InnerException != null && ex.InnerException.Message != msg ? new[] { ex.Message } : Array.Empty<string>()).Where(e => !string.IsNullOrEmpty(e)).ToList()
                 });
             }
         }

@@ -148,7 +148,9 @@ const SuperAdminTenantDetailPage = () => {
     } catch (err) {
       console.error('Error loading tenant:', err)
       if (!err?._handledByInterceptor) {
-        setError(err?.response?.data?.message || 'Failed to load company details')
+        const data = err?.response?.data
+        const msg = data?.errors?.[0] || data?.message || 'Failed to load company details'
+        setError(msg)
       }
     } finally {
       setLoading(false)

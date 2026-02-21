@@ -804,11 +804,11 @@ namespace HexaBill.Api.Modules.Customers
                     Console.WriteLine($"⚠️ Warning: BranchId column doesn't exist in Sales table (cached), skipping branch/route/staff filters");
                 }
                 
-                // Apply filters only if column exists
+                // Apply filters only if column exists. Include sales with null BranchId/RouteId so legacy data still shows.
                 if (hasBranchIdColumn)
                 {
-                    if (branchId.HasValue) salesQuery = salesQuery.Where(s => s.BranchId == branchId.Value);
-                    if (routeId.HasValue) salesQuery = salesQuery.Where(s => s.RouteId == routeId.Value);
+                    if (branchId.HasValue) salesQuery = salesQuery.Where(s => s.BranchId == null || s.BranchId == branchId.Value);
+                    if (routeId.HasValue) salesQuery = salesQuery.Where(s => s.RouteId == null || s.RouteId == routeId.Value);
                     if (staffId.HasValue) salesQuery = salesQuery.Where(s => s.CreatedBy == staffId.Value);
                 }
                 

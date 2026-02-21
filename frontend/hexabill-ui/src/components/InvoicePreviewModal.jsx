@@ -3,6 +3,7 @@ import { X, Printer, Download, Share2, Mail, MessageCircle } from 'lucide-react'
 import { salesAPI } from '../services'
 import { formatCurrency } from '../utils/currency'
 import toast from 'react-hot-toast'
+import { showToast } from '../utils/toast'
 import PrintOptionsModal from './PrintOptionsModal'
 import ConfirmDangerModal from './ConfirmDangerModal'
 
@@ -232,7 +233,7 @@ const InvoicePreviewModal = ({ saleId, invoiceNo, customerPhone, onClose, onPrin
             document.body.removeChild(a)
           }, 100)
 
-          toast('Email client opened. Please attach the downloaded PDF')
+          showToast.info('Email client opened. Please attach the downloaded PDF')
         } finally {
           setLoading(false)
         }

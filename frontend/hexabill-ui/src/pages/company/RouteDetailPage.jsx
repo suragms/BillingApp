@@ -344,10 +344,18 @@ const RouteDetailPage = () => {
             <button type="button" onClick={applyDateRange} className="px-3 py-1.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium">Apply</button>
           </div>
           {summary && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
               <div className="bg-white rounded-lg border border-neutral-200 p-4">
                 <p className="text-sm text-neutral-500">Total Sales</p>
                 <p className="text-lg font-semibold text-neutral-900">{formatCurrency(summary.totalSales)}</p>
+              </div>
+              <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                <p className="text-sm text-neutral-500">Paid</p>
+                <p className="text-lg font-semibold text-emerald-600">{formatCurrency(summary.totalPayments ?? 0)}</p>
+              </div>
+              <div className="bg-white rounded-lg border border-neutral-200 p-4">
+                <p className="text-sm text-neutral-500">Unpaid / Pending</p>
+                <p className="text-lg font-semibold text-amber-600">{formatCurrency(summary.unpaidAmount ?? 0)}</p>
               </div>
               <div className="bg-white rounded-lg border border-neutral-200 p-4">
                 <p className="text-sm text-neutral-500">Total Expenses</p>

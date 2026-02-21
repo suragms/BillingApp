@@ -891,8 +891,13 @@ namespace HexaBill.Api.Modules.SuperAdmin
 
             if (tenant == null) return null;
 
-            // Get usage metrics
-            var metrics = await GetTenantUsageMetricsAsync(tenantId);
+            // Get usage metrics (non-blocking: if it fails, still return tenant with null metrics)
+            TenantUsageMetricsDto? metrics = null;
+            try
+            {
+                metrics = await GetTenantUsageMetricsAsync(tenantId);
+            }
+            catch { /* allow tenant detail to load without metrics */ }
 
             // Get users
             var users = await _context.Users
@@ -906,6 +911,14 @@ namespace HexaBill.Api.Modules.SuperAdmin
                     CreatedAt = u.CreatedAt
                 })
                 .ToListAsync();
+
+            // Get subscription (non-blocking: if it fails, still return tenant with null subscription)
+            SubscriptionDto? subscription = null;
+            try
+            {
+                subscription = await _subscriptionService.GetTenantSubscriptionAsync(tenantId);
+            }
+            catch { /* allow tenant detail to load without subscription */ }
 
             return new TenantDetailDto
             {
@@ -927,7 +940,7 @@ namespace HexaBill.Api.Modules.SuperAdmin
                 LogoPath = tenant.LogoPath,
                 UsageMetrics = metrics,
                 Users = users,
-                Subscription = await _subscriptionService.GetTenantSubscriptionAsync(tenantId)
+                Subscription = subscription
             };
         }
 

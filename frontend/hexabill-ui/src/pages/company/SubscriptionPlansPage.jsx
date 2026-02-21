@@ -6,6 +6,7 @@ import { formatCurrency } from '../../utils/currency'
 import { LoadingCard } from '../../components/Loading'
 import Modal from '../../components/Modal'
 import toast from 'react-hot-toast'
+import { showToast } from '../../utils/toast'
 
 const SubscriptionPlansPage = () => {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -29,7 +30,7 @@ const SubscriptionPlansPage = () => {
       setSearchParams({})
       fetchData()
     } else if (cancel === '1') {
-      toast('Payment cancelled.')
+      showToast.info('Payment cancelled.')
       setSearchParams({})
     }
   }, [searchParams])

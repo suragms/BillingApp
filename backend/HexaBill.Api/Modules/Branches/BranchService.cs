@@ -165,16 +165,17 @@ namespace HexaBill.Api.Modules.Branches
             var to = (toDate ?? DateTime.UtcNow).Date.AddDays(1).AddTicks(-1);
 
             var routeIds = await _context.Routes.Where(r => r.BranchId == branchId && (tenantId <= 0 || r.TenantId == tenantId)).Select(r => r.Id).ToListAsync();
-            var salesByRoute = await _context.Sales
-                .Where(s => s.RouteId != null && routeIds.Contains(s.RouteId!.Value) && (tenantId <= 0 || s.TenantId == tenantId) && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
+            // Include sales by RouteId in branch OR by BranchId (so sales without route still count)
+            var salesInBranchFilter = (tenantId <= 0 ? _context.Sales.Where(s => true) : _context.Sales.Where(s => s.TenantId == tenantId))
+                .Where(s => !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to
+                    && (s.BranchId == branchId || (s.RouteId != null && routeIds.Contains(s.RouteId.Value))));
+            var salesByRoute = await salesInBranchFilter
+                .Where(s => s.RouteId != null && routeIds.Contains(s.RouteId!.Value))
                 .GroupBy(s => s.RouteId)
                 .Select(g => new { RouteId = g.Key!.Value, Total = g.Sum(s => s.GrandTotal) })
                 .ToListAsync();
 
-            var saleIdsInBranch = await _context.Sales
-                .Where(s => s.RouteId != null && routeIds.Contains(s.RouteId!.Value) && (tenantId <= 0 || s.TenantId == tenantId) && !s.IsDeleted && s.InvoiceDate >= from && s.InvoiceDate <= to)
-                .Select(s => s.Id)
-                .ToListAsync();
+            var saleIdsInBranch = await salesInBranchFilter.Select(s => s.Id).ToListAsync();
 
             var cogsByRouteList = new List<(int RouteId, decimal Cogs)>();
             if (saleIdsInBranch.Count > 0)
@@ -260,7 +261,10 @@ namespace HexaBill.Api.Modules.Branches
 
             var routeExpensesTotal = routes.Sum(r => r.TotalExpenses);
             var totalExpenses = routeExpensesTotal + branchExpensesTotal;
-            var totalSales = routes.Sum(r => r.TotalSales);
+            // Use full branch sales total (includes sales with BranchId but no RouteId)
+            var totalSales = saleIdsInBranch.Count > 0
+                ? await _context.Sales.Where(s => saleIdsInBranch.Contains(s.Id)).SumAsync(s => s.GrandTotal)
+                : routes.Sum(r => r.TotalSales);
             var totalCogs = routes.Sum(r => r.CostOfGoodsSold);
 
             // Performance metrics
@@ -348,7 +352,8 @@ namespace HexaBill.Api.Modules.Branches
                 CollectionsRatio = collectionsRatio,
                 AverageInvoiceSize = averageInvoiceSize,
                 InvoiceCount = invoiceCount,
-                TotalPayments = totalPayments
+                TotalPayments = totalPayments,
+                UnpaidAmount = totalSales > totalPayments ? totalSales - totalPayments : 0
             };
         }
     }

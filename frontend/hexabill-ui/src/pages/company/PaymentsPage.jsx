@@ -28,6 +28,7 @@ import Modal from '../../components/Modal'
 import { paymentsAPI, customersAPI, salesAPI } from '../../services'
 import { useDebounce } from '../../hooks/useDebounce'
 import toast from 'react-hot-toast'
+import { showToast } from '../../utils/toast'
 
 const PaymentsPage = () => {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -420,7 +421,7 @@ const PaymentsPage = () => {
         toast.success('Receipt downloaded successfully')
       } else {
         // For payments without invoices, show receipt modal instead
-        toast('Opening receipt preview...')
+        showToast.info('Opening receipt preview...')
         setReceiptPayment(payment)
         setShowReceiptModal(true)
       }

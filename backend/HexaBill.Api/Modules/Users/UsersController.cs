@@ -409,13 +409,16 @@ namespace HexaBill.Api.Modules.Users
 
                 await _context.SaveChangesAsync();
 
-                // Update assignments (SECURITY: only IDs belonging to current tenant)
+                // Update assignments (SECURITY: only IDs belonging to current tenant). Empty list = clear all.
                 if (request.AssignedBranchIds != null)
                 {
-                    var validBranchIds = await _context.Branches
-                        .Where(b => request.AssignedBranchIds.Contains(b.Id) && b.TenantId == tenantId)
-                        .Select(b => b.Id)
-                        .ToListAsync();
+                    var branchIds = request.AssignedBranchIds.Where(x => x > 0).ToList();
+                    var validBranchIds = branchIds.Count > 0
+                        ? await _context.Branches
+                            .Where(b => branchIds.Contains(b.Id) && b.TenantId == tenantId)
+                            .Select(b => b.Id)
+                            .ToListAsync()
+                        : new List<int>();
                     var existing = await _context.BranchStaff.Where(bs => bs.UserId == id).ToListAsync();
                     _context.BranchStaff.RemoveRange(existing);
                     foreach (var branchId in validBranchIds)
@@ -432,10 +435,13 @@ namespace HexaBill.Api.Modules.Users
 
                 if (request.AssignedRouteIds != null)
                 {
-                    var validRouteIds = await _context.Routes
-                        .Where(r => request.AssignedRouteIds.Contains(r.Id) && r.TenantId == tenantId)
-                        .Select(r => r.Id)
-                        .ToListAsync();
+                    var routeIds = request.AssignedRouteIds.Where(x => x > 0).ToList();
+                    var validRouteIds = routeIds.Count > 0
+                        ? await _context.Routes
+                            .Where(r => routeIds.Contains(r.Id) && r.TenantId == tenantId)
+                            .Select(r => r.Id)
+                            .ToListAsync()
+                        : new List<int>();
                     var existingRaw = await _context.RouteStaff.Where(rs => rs.UserId == id).ToListAsync();
                     _context.RouteStaff.RemoveRange(existingRaw);
                     foreach (var routeId in validRouteIds)
@@ -469,8 +475,7 @@ namespace HexaBill.Api.Modules.Users
                     }
                     catch (Exception auditEx)
                     {
-                        // Log but don't fail the update if audit fails
-                        Console.WriteLine($"Audit log failed (user update): {auditEx.Message}");
+                        _logger.LogWarning(auditEx, "Audit log failed (user update) for user id={UserId}", id);
                     }
                 }
 

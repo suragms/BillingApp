@@ -579,8 +579,10 @@ const DashboardTally = () => {
                                             <span className="font-medium text-neutral-900">{branch.branchName}</span>
                                             <span className="text-neutral-500">({branch.invoiceCount} invoices)</span>
                                         </div>
-                                        <div className="flex items-center gap-4">
+                                        <div className="flex items-center gap-4 flex-wrap">
                                             <span className="text-neutral-700">Sales: <span className="font-medium">{formatCurrency(branch.sales)}</span></span>
+                                            <span className="text-green-600">Paid: <span className="font-medium">{formatCurrency(branch.paidAmount ?? 0)}</span></span>
+                                            <span className="text-amber-600">Unpaid: <span className="font-medium">{formatCurrency(branch.unpaidAmount ?? 0)}</span></span>
                                             <span className="text-neutral-700">Expenses: <span className="font-medium">{formatCurrency(branch.expenses)}</span></span>
                                             <span className={`font-medium ${branch.profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                                                 Profit: {formatCurrency(branch.profit)}

@@ -439,6 +439,12 @@ namespace HexaBill.Api.Modules.Branches
             var visitCount = await _context.CustomerVisits
                 .Where(v => v.RouteId == routeId && v.VisitDate >= from && v.VisitDate <= to && (tenantId <= 0 || v.TenantId == tenantId))
                 .CountAsync();
+            var totalPayments = invoiceCount > 0
+                ? await _context.Payments
+                    .Where(p => p.SaleId.HasValue && saleIds.Contains(p.SaleId.Value) && p.PaymentDate >= from && p.PaymentDate <= to)
+                    .SumAsync(p => p.Amount)
+                : 0m;
+            var unpaidAmount = totalSales > totalPayments ? totalSales - totalPayments : 0m;
             return new RouteSummaryDto
             {
                 RouteId = route.Id,
@@ -449,7 +455,9 @@ namespace HexaBill.Api.Modules.Branches
                 CostOfGoodsSold = costOfGoodsSold,
                 Profit = totalSales - costOfGoodsSold - totalExpenses,
                 InvoiceCount = invoiceCount,
-                VisitCount = visitCount
+                VisitCount = visitCount,
+                TotalPayments = totalPayments,
+                UnpaidAmount = unpaidAmount
             };
         }
 

@@ -213,7 +213,10 @@ const BranchDetailPage = () => {
         setBranchStaff(items.filter(u => (u.assignedBranchIds || []).includes(bid)))
       } else toast.error(res?.message || 'Failed to assign')
     } catch (e) {
-      if (!e?._handledByInterceptor) toast.error(e?.message || 'Failed to assign')
+      if (!e?._handledByInterceptor) {
+        const msg = e?.response?.data?.message || e?.response?.data?.errors?.[0] || e?.message || 'Failed to assign'
+        toast.error(msg)
+      }
     } finally {
       setAssignStaffSaving(false)
     }
@@ -234,7 +237,10 @@ const BranchDetailPage = () => {
         setBranchStaff(prev => prev.filter(u => u.id !== user.id))
       } else toast.error(res?.message || 'Failed to remove')
     } catch (e) {
-      if (!e?._handledByInterceptor) toast.error(e?.message || 'Failed to remove')
+      if (!e?._handledByInterceptor) {
+        const msg = e?.response?.data?.message || e?.response?.data?.errors?.[0] || e?.message || 'Failed to remove'
+        toast.error(msg)
+      }
     } finally {
       setRemoveStaffSavingId(null)
     }
@@ -522,10 +528,18 @@ const BranchDetailPage = () => {
 
       {activeTab === 'overview' && (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
             <div className="bg-white rounded-lg border border-neutral-200 p-4 relative">
               <p className="text-sm text-neutral-500">Total Sales</p>
               {loading ? <div className="h-7 flex items-center"><div className="animate-spin rounded-full h-4 w-4 border-2 border-primary-600 border-t-transparent" /></div> : <p className="text-lg font-semibold text-neutral-900">{formatCurrency(summary?.totalSales ?? 0)}</p>}
+            </div>
+            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+              <p className="text-sm text-neutral-500">Paid</p>
+              {loading ? <div className="h-7 flex items-center"><div className="animate-spin rounded-full h-4 w-4 border-2 border-primary-600 border-t-transparent" /></div> : <p className="text-lg font-semibold text-emerald-600">{formatCurrency(summary?.totalPayments ?? 0)}</p>}
+            </div>
+            <div className="bg-white rounded-lg border border-neutral-200 p-4">
+              <p className="text-sm text-neutral-500">Unpaid / Pending</p>
+              {loading ? <div className="h-7 flex items-center"><div className="animate-spin rounded-full h-4 w-4 border-2 border-primary-600 border-t-transparent" /></div> : <p className="text-lg font-semibold text-amber-600">{formatCurrency(summary?.unpaidAmount ?? 0)}</p>}
             </div>
             <div className="bg-white rounded-lg border border-neutral-200 p-4">
               <p className="text-sm text-neutral-500">Cost of Goods Sold</p>

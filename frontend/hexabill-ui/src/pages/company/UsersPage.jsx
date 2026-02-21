@@ -399,6 +399,15 @@ const UsersPage = () => {
   }
 
   const handleUpdateUser = async (data) => {
+    if (!data.name?.trim()) {
+      toast.error('Name is required')
+      return
+    }
+    const validRoles = ['Owner', 'Admin', 'Staff']
+    if (data.role && !validRoles.includes(data.role)) {
+      toast.error('Role must be Owner, Admin, or Staff')
+      return
+    }
     try {
       setLoadingAction(true)
       // Filter out profitToday - never assignable to staff
