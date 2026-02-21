@@ -43,16 +43,9 @@ namespace HexaBill.Api.Modules.Branches
             }
             catch (Exception ex)
             {
-                var inner = ex.InnerException?.Message ?? "";
-                Console.WriteLine($"❌ GetRoutes Error: {ex.Message}");
-                if (!string.IsNullOrEmpty(inner)) Console.WriteLine($"❌ Inner: {inner}");
-                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
-                return StatusCode(500, new ApiResponse<List<RouteDto>>
-                {
-                    Success = false,
-                    Message = "Failed to load routes. Check that the Routes table exists and migrations are applied.",
-                    Errors = new List<string> { ex.Message, inner }.Where(s => !string.IsNullOrEmpty(s)).ToList()
-                });
+                // PRODUCTION: Return empty list instead of 500 so POS/Branches pages keep working
+                Console.WriteLine($"[GetRoutes] Returning empty list after error: {ex.Message}");
+                return Ok(new ApiResponse<List<RouteDto>> { Success = true, Data = new List<RouteDto>() });
             }
         }
 

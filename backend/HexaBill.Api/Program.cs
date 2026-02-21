@@ -562,16 +562,20 @@ using (var scope = app.Services.CreateScope())
             startupLogger?.LogWarning("Pending migrations detected: {Count} - {Migrations}", pendingMigrations.Count(), string.Join(", ", pendingMigrations));
         }
         
-        // CRITICAL FIX: Check if PageAccess column exists (for SQLite databases that missed migration)
-        if (!db.Database.IsNpgsql())
+        // CRITICAL FIX: Check if PageAccess column exists (for databases that missed migration)
+        var dbFixLogger = app.Services.GetService<ILoggerFactory>()?.CreateLogger("DatabaseFix");
+        try
         {
-            var dbFixLogger = app.Services.GetService<ILoggerFactory>()?.CreateLogger("DatabaseFix");
-            try
+            dbFixLogger?.LogInformation("Checking for PageAccess column...");
+            if (db.Database.IsNpgsql())
             {
-                dbFixLogger?.LogInformation("Checking for PageAccess column...");
-                
-                // Try direct ALTER TABLE - SQLite will fail silently if column exists
-                // But we'll catch the error to verify
+                // PostgreSQL: use IF NOT EXISTS
+                await db.Database.ExecuteSqlRawAsync(@"ALTER TABLE ""Users"" ADD COLUMN IF NOT EXISTS ""PageAccess"" character varying(500) NULL");
+                dbFixLogger?.LogInformation("✅ PageAccess column ensured (PostgreSQL)");
+            }
+            else
+            {
+                // SQLite
                 try
                 {
                     await db.Database.ExecuteSqlRawAsync("ALTER TABLE Users ADD COLUMN PageAccess TEXT NULL");
@@ -579,15 +583,13 @@ using (var scope = app.Services.CreateScope())
                 }
                 catch (Microsoft.Data.Sqlite.SqliteException sqlEx) when (sqlEx.SqliteErrorCode == 1 && sqlEx.Message.Contains("duplicate column"))
                 {
-                    // Column already exists - this is fine
                     dbFixLogger?.LogInformation("✅ PageAccess column already exists");
                 }
                 catch (Exception ex)
                 {
-                    // Try alternative: check by querying
                     try
                     {
-                        var testQuery = await db.Database.ExecuteSqlRawAsync("SELECT PageAccess FROM Users LIMIT 1");
+                        await db.Database.ExecuteSqlRawAsync("SELECT PageAccess FROM Users LIMIT 1");
                         dbFixLogger?.LogInformation("✅ PageAccess column exists (verified by query)");
                     }
                     catch
@@ -596,10 +598,10 @@ using (var scope = app.Services.CreateScope())
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                dbFixLogger?.LogError(ex, "❌ Error checking PageAccess column: {Error}", ex.Message);
-            }
+        }
+        catch (Exception ex)
+        {
+            dbFixLogger?.LogError(ex, "❌ Error checking PageAccess column: {Error}", ex.Message);
         }
     }
     catch (Exception ex)

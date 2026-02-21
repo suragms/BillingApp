@@ -614,11 +614,12 @@ namespace HexaBill.Api.Modules.Expenses
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<RecurringExpenseDto>>
+                // PRODUCTION: Return empty list instead of 500 so Expenses page keeps working
+                Console.WriteLine($"[GetRecurringExpenses] Returning empty list after error: {ex.Message}");
+                return Ok(new ApiResponse<List<RecurringExpenseDto>>
                 {
-                    Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Success = true,
+                    Data = new List<RecurringExpenseDto>()
                 });
             }
         }

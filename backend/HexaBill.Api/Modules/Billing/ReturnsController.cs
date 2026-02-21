@@ -39,11 +39,11 @@ namespace HexaBill.Api.Modules.Billing
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<SaleReturnDto>
+                return Ok(new ApiResponse<SaleReturnDto>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = ex.Message ?? "Failed to create sale return",
+                    Errors = new List<string> { ex.Message ?? "" }
                 });
             }
         }
@@ -64,11 +64,11 @@ namespace HexaBill.Api.Modules.Billing
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<PurchaseReturnDto>
+                return Ok(new ApiResponse<PurchaseReturnDto>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = ex.Message ?? "Failed to create purchase return",
+                    Errors = new List<string> { ex.Message ?? "" }
                 });
             }
         }
@@ -109,11 +109,12 @@ namespace HexaBill.Api.Modules.Billing
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<object>
+                return Ok(new ApiResponse<object>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = ex.Message ?? "Failed to load sale returns",
+                    Data = new PagedResponse<SaleReturnDto> { Items = new List<SaleReturnDto>(), TotalCount = 0, Page = 1, PageSize = 20, TotalPages = 0 },
+                    Errors = new List<string> { ex.Message ?? "" }
                 });
             }
         }
@@ -133,7 +134,7 @@ namespace HexaBill.Api.Modules.Billing
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<object> { Success = false, Message = ex.Message });
+                return Ok(new ApiResponse<object> { Success = false, Message = ex.Message ?? "Failed to load feature flags", Data = new { returnsRequireApproval = false, returnsEnabled = true } });
             }
         }
 
@@ -182,11 +183,12 @@ namespace HexaBill.Api.Modules.Billing
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<DamageCategoryDto>>
+                return Ok(new ApiResponse<List<DamageCategoryDto>>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = ex.Message ?? "Failed to load damage categories",
+                    Data = new List<DamageCategoryDto>(),
+                    Errors = new List<string> { ex.Message ?? "" }
                 });
             }
         }
@@ -206,11 +208,12 @@ namespace HexaBill.Api.Modules.Billing
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<PurchaseReturnDto>>
+                return Ok(new ApiResponse<List<PurchaseReturnDto>>
                 {
                     Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
+                    Message = ex.Message ?? "Failed to load purchase returns",
+                    Data = new List<PurchaseReturnDto>(),
+                    Errors = new List<string> { ex.Message ?? "" }
                 });
             }
         }

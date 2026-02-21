@@ -24,6 +24,7 @@ import {
 import { useAuth } from '../../hooks/useAuth'
 import { formatCurrency, formatBalance, formatBalanceWithColor } from '../../utils/currency'
 import { isAdminOrOwner } from '../../utils/roles'  // CRITICAL: Multi-tenant role checking
+import { validateEmail } from '../../utils/validation'
 import { useBranchesRoutes } from '../../contexts/BranchesRoutesContext'
 import { LoadingCard, LoadingButton } from '../../components/Loading'
 import { Input, Select, TextArea } from '../../components/Form'
@@ -963,7 +964,7 @@ const CustomersPage = () => {
               type="email"
               placeholder="info@abcrestaurant.com"
               error={errors.email?.message}
-              {...register('email')}
+              {...register('email', { validate: (v) => !v || validateEmail(v) ? true : 'Enter a valid email address' })}
             />
 
             <Input
@@ -1146,7 +1147,7 @@ const CustomersPage = () => {
               type="email"
               placeholder="info@abcrestaurant.com"
               error={errors.email?.message}
-              {...register('email')}
+              {...register('email', { validate: (v) => !v || validateEmail(v) ? true : 'Enter a valid email address' })}
             />
 
             <Input

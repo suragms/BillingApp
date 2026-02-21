@@ -38,7 +38,7 @@ const PosPage = () => {
   const navigate = useNavigate()
   const { user } = useAuth()
   const { companyName } = useBranding()
-  const { branches, routes, staffHasNoAssignments, refresh: refreshBranchesRoutes } = useBranchesRoutes()
+  const { branches, routes, staffHasNoAssignments, loading: branchesRoutesLoading, refresh: refreshBranchesRoutes } = useBranchesRoutes()
   const [searchParams, setSearchParams] = useSearchParams()
   const [products, setProducts] = useState([])
   const [customers, setCustomers] = useState([])
@@ -119,7 +119,10 @@ const PosPage = () => {
 
   const loadCustomers = useCallback(async () => {
     try {
-      const response = await customersAPI.getCustomers({ pageSize: 100 })
+      const params = { pageSize: 100 }
+      if (selectedBranchId) params.branchId = parseInt(selectedBranchId, 10)
+      if (selectedRouteId) params.routeId = parseInt(selectedRouteId, 10)
+      const response = await customersAPI.getCustomers(params)
       if (response.success && response.data?.items) {
         // Dedupe by id so the same customer never appears twice (e.g. after invoice or refetch)
         const byId = new Map()
@@ -129,7 +132,7 @@ const PosPage = () => {
     } catch (error) {
       if (!error?._handledByInterceptor) toast.error('Failed to load customers')
     }
-  }, [])
+  }, [selectedBranchId, selectedRouteId])
 
   // Auto-select branch and route when only one option (all users: Owner, Admin, Staff)
   useEffect(() => {
@@ -1760,10 +1763,10 @@ const PosPage = () => {
                       // Reset route when branch changes
                       setSelectedRouteId('')
                     }}
-                    disabled={branches.length === 0 || (!isAdminOrOwner(user) && branches.length === 1)} // BUG #4 FIX: Disable while loading
+                    disabled={branchesRoutesLoading || branches.length === 0 || (!isAdminOrOwner(user) && branches.length === 1)}
                     className="px-2 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="">{branches.length === 0 ? 'Loading...' : 'Select Branch'}</option>
+                    <option value="">{branchesRoutesLoading ? 'Loading...' : branches.length === 0 ? 'No branches' : 'Select Branch'}</option>
                     {branches.map(b => (
                       <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
@@ -1778,10 +1781,10 @@ const PosPage = () => {
                   <select
                     value={selectedRouteId}
                     onChange={(e) => setSelectedRouteId(e.target.value)}
-                    disabled={routes.length === 0 || !selectedBranchId || (!isAdminOrOwner(user) && (selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : routes).length <= 1)} // BUG #4 FIX: Disable while loading or no branch selected
+                    disabled={branchesRoutesLoading || routes.length === 0 || !selectedBranchId || (!isAdminOrOwner(user) && (selectedBranchId ? routes.filter(r => r.branchId === parseInt(selectedBranchId, 10)) : routes).length <= 1)}
                     className="px-2 py-1.5 border border-neutral-300 rounded-lg text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="">{routes.length === 0 ? 'Loading...' : (selectedBranchId ? 'Select Route' : 'Select Branch first')}</option>
+                    <option value="">{branchesRoutesLoading ? 'Loading...' : routes.length === 0 ? 'No routes' : (selectedBranchId ? 'Select Route' : 'Select Branch first')}</option>
                     {routes
                       // Filter routes by selected branch if a branch is selected
                       .filter(r => !selectedBranchId || r.branchId === parseInt(selectedBranchId))

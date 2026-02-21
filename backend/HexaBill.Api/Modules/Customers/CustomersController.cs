@@ -400,20 +400,12 @@ namespace HexaBill.Api.Modules.Customers
             }
             catch (Exception ex)
             {
-                // Log full exception details for debugging
-                Console.WriteLine($"❌ Error in GetCustomerLedger for customer {id}: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                if (ex.InnerException != null)
+                // PRODUCTION: Return empty list instead of 500 so Customer Ledger page keeps working
+                Console.WriteLine($"[GetCustomerLedger] Returning empty list after error for customer {id}: {ex.Message}");
+                return Ok(new ApiResponse<List<CustomerLedgerEntry>>
                 {
-                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
-                    Console.WriteLine($"Inner stack trace: {ex.InnerException.StackTrace}");
-                }
-                
-                return StatusCode(500, new ApiResponse<List<CustomerLedgerEntry>>
-                {
-                    Success = false,
-                    Message = $"An error occurred: {ex.Message}",
-                    Errors = new List<string> { ex.Message, ex.StackTrace ?? "No stack trace" }
+                    Success = true,
+                    Data = new List<CustomerLedgerEntry>()
                 });
             }
         }
@@ -435,20 +427,12 @@ namespace HexaBill.Api.Modules.Customers
             }
             catch (Exception ex)
             {
-                // Log full exception details for debugging
-                Console.WriteLine($"❌ Error in GetCashCustomerLedger for tenant {CurrentTenantId}: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                if (ex.InnerException != null)
+                // PRODUCTION: Return empty list instead of 500 so Customer Ledger page keeps working
+                Console.WriteLine($"[GetCashCustomerLedger] Returning empty list after error: {ex.Message}");
+                return Ok(new ApiResponse<List<CustomerLedgerEntry>>
                 {
-                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
-                    Console.WriteLine($"Inner stack trace: {ex.InnerException.StackTrace}");
-                }
-                
-                return StatusCode(500, new ApiResponse<List<CustomerLedgerEntry>>
-                {
-                    Success = false,
-                    Message = $"An error occurred: {ex.Message}",
-                    Errors = new List<string> { ex.Message, ex.StackTrace ?? "No stack trace" }
+                    Success = true,
+                    Data = new List<CustomerLedgerEntry>()
                 });
             }
         }

@@ -204,9 +204,13 @@ const DashboardTally = () => {
                 const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
                 return { from: monthStart.toISOString().split('T')[0], to: todayStr }
             }
-            case 'custom':
+            case 'custom': {
                 if (customFromDate && customToDate) return { from: customFromDate, to: customToDate }
-                return { from: todayStr, to: todayStr }
+                // Default to last 7 days when Custom selected but dates not yet picked
+                const weekAgo = new Date(today)
+                weekAgo.setDate(today.getDate() - 6)
+                return { from: weekAgo.toISOString().split('T')[0], to: todayStr }
+            }
             default: return { from: todayStr, to: todayStr }
         }
     }
@@ -284,6 +288,7 @@ const DashboardTally = () => {
 
     const handleRefresh = async () => {
         if (isFetchingRef.current) return
+        lastFetchTimeRef.current = 0 // Bypass throttle so explicit Refresh always fetches fresh data after restart
         isFetchingRef.current = true
         try {
             await fetchStats()
@@ -313,7 +318,7 @@ const DashboardTally = () => {
         fetchStatsThrottled()
         const interval = setInterval(() => {
             if (document.visibilityState === 'visible' && !isFetchingRef.current) fetchStatsThrottled()
-        }, 120000) // Increased from 30s to 120s (2 minutes) to reduce API requests
+        }, 120000) // 2 minutes
         let debounceTimer = null
         const handleDataUpdate = () => {
             if (debounceTimer) clearTimeout(debounceTimer)
@@ -321,9 +326,13 @@ const DashboardTally = () => {
                 if (!isFetchingRef.current) fetchStatsThrottled()
             }, 5000)
         }
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible' && !isFetchingRef.current) fetchStatsThrottled()
+        }
         window.addEventListener('dataUpdated', handleDataUpdate)
         window.addEventListener('paymentCreated', handleDataUpdate)
         window.addEventListener('customerCreated', handleDataUpdate)
+        document.addEventListener('visibilitychange', handleVisibilityChange)
         return () => {
             clearInterval(interval)
             if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current)
@@ -331,6 +340,7 @@ const DashboardTally = () => {
             window.removeEventListener('dataUpdated', handleDataUpdate)
             window.removeEventListener('paymentCreated', handleDataUpdate)
             window.removeEventListener('customerCreated', handleDataUpdate)
+            document.removeEventListener('visibilitychange', handleVisibilityChange)
         }
     }, [user, dateRange, customFromDate, customToDate, selectedBranchId])
 
@@ -440,7 +450,16 @@ const DashboardTally = () => {
                                 This Month
                             </button>
                             <button
-                                onClick={() => setDateRange('custom')}
+                                onClick={() => {
+                                    if (dateRange !== 'custom') {
+                                        const today = new Date()
+                                        const weekAgo = new Date(today)
+                                        weekAgo.setDate(today.getDate() - 6)
+                                        setCustomFromDate(weekAgo.toISOString().split('T')[0])
+                                        setCustomToDate(today.toISOString().split('T')[0])
+                                    }
+                                    setDateRange('custom')
+                                }}
                                 className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
                                     dateRange === 'custom'
                                         ? 'bg-blue-600 text-white'
@@ -573,10 +592,12 @@ const DashboardTally = () => {
                         </div>
                     )}
 
-                    {/* Sales Trend Chart */}
+                    {/* Sales Trend Chart - title reflects selected period */}
                     {dailySalesTrend.length > 0 && (
                         <div className="bg-white rounded-lg border border-neutral-200 p-4">
-                            <h3 className="text-sm font-medium text-neutral-700 mb-3">Sales Trend (Last 7 Days)</h3>
+                            <h3 className="text-sm font-medium text-neutral-700 mb-3">
+                                Sales Trend {dateRange === 'today' ? '(Today)' : dateRange === 'week' ? '(This Week)' : dateRange === 'month' ? '(This Month)' : dateRange === 'custom' && customFromDate && customToDate ? `(${customFromDate} to ${customToDate})` : `(${dailySalesTrend.length} days)`}
+                            </h3>
                             <ResponsiveContainer width="100%" height={150}>
                                 <BarChart data={dailySalesTrend}>
                                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />

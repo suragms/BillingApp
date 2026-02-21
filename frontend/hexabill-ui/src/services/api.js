@@ -250,9 +250,37 @@ api.request = function(configOrUrl, config) {
   if (!api.defaults.method || typeof api.defaults.method !== 'string') {
     api.defaults.method = 'GET'
   }
+
+  // Response cache check - BEFORE calling axios (prevents toUpperCase bug from returning response as config)
+  const method = (finalConfig.method && typeof finalConfig.method === 'string')
+    ? String(finalConfig.method).toUpperCase() : 'GET'
+  if (method === 'GET' && !finalConfig._bypassCache) {
+    const cacheKey = getRequestKey(finalConfig)
+    const cached = responseCache.get(cacheKey)
+    if (cached) {
+      const cacheAge = Date.now() - cached.timestamp
+      const ttl = getCacheTTL(finalConfig.url || '')
+      if (cacheAge < ttl) {
+        const cachedConfig = {
+          method: 'GET',
+          url: String(finalConfig.url || ''),
+          headers: finalConfig.headers || {},
+          _requestKey: cacheKey
+        }
+        const cachedResponse = {
+          data: JSON.parse(JSON.stringify(cached.response.data)),
+          status: cached.response.status || 200,
+          statusText: cached.response.statusText || 'OK',
+          headers: cached.response.headers || {},
+          config: cachedConfig
+        }
+        return Promise.resolve(cachedResponse)
+      }
+      responseCache.delete(cacheKey)
+    }
+  }
   
   // Call original request with proxied config
-  // The Proxy ensures method is always available even if axios creates new config objects
   return originalRequest(configProxy)
 }
 
@@ -492,44 +520,9 @@ api.interceptors.request.use(
     config._maxRetries = 3
     config._requestKey = requestKey // Store for cleanup in response interceptor
 
-    // Response caching: Check cache for GET requests (skip if bypassCache flag is set)
-    if (config.method === 'GET' && !config._bypassCache) {
-      const cacheKey = requestKey
-      const cached = responseCache.get(cacheKey)
-      if (cached) {
-        const cacheAge = now - cached.timestamp
-        const ttl = getCacheTTL(config.url || '')
-        if (cacheAge < ttl) {
-          console.log(`✅ Cache hit for ${config.url} (age: ${Math.round(cacheAge / 1000)}s, TTL: ${ttl / 1000}s)`)
-          // Return cached response - CRITICAL: Ensure config.method is always set and uppercase
-          // Create a completely new config object to avoid any mutation issues
-          const cachedConfig = {
-            method: String(config.method || 'GET').trim().toUpperCase() || 'GET',
-            url: String(config.url || ''),
-            headers: config.headers && typeof config.headers === 'object' ? { ...config.headers } : {},
-            baseURL: config.baseURL || api.defaults.baseURL,
-            timeout: config.timeout || api.defaults.timeout,
-            _requestKey: config._requestKey,
-            _requestTime: config._requestTime,
-            _retryCount: config._retryCount || 0
-          }
-          
-          // CRITICAL: Ensure method is uppercase and valid (plain object, no Proxy)
-          cachedConfig.method = String(cachedConfig.method || 'GET').trim().toUpperCase() || 'GET'
-          
-          const cachedResponse = {
-            ...cached.response,
-            config: cachedConfig,
-            data: JSON.parse(JSON.stringify(cached.response.data)) // Deep clone to avoid mutations
-          }
-          return Promise.resolve(cachedResponse)
-        } else {
-          // Cache expired, remove it
-          responseCache.delete(cacheKey)
-          console.log(`⏰ Cache expired for ${config.url} (age: ${Math.round(cacheAge / 1000)}s, TTL: ${ttl / 1000}s)`)
-        }
-      }
-    }
+    // REMOVED: Cache short-circuit from request interceptor - it was returning a response object
+    // as "config" which caused axios to call config.method.toUpperCase() on undefined.
+    // Cache is handled in response interceptor (store) and in api.request (check) - see api.request patch below.
 
     // CRITICAL: Request interceptor must return config, not promise
     // Deduplication will be handled by tracking the request key

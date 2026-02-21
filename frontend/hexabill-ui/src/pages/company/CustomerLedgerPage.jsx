@@ -404,6 +404,7 @@ const CustomerLedgerPage = () => {
   // If customer selected but has no branchId/routeId, fetch full customer and set branch/route
   useEffect(() => {
     if (!selectedCustomer?.id) return
+    if (selectedCustomer.id === 'cash' || selectedCustomer.id === 0) return // Cash customer has no DB record
     if (selectedCustomer.branchId != null || selectedCustomer.routeId != null) return
     let cancelled = false
     customersAPI.getCustomer(selectedCustomer.id)

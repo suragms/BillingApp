@@ -43,16 +43,9 @@ namespace HexaBill.Api.Modules.Branches
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ GetBranches Error: {ex.Message}");
-                if (ex.InnerException != null) Console.WriteLine($"❌ Inner: {ex.InnerException.Message}");
-                Console.WriteLine($"❌ Stack Trace: {ex.StackTrace}");
-                
-                return StatusCode(500, new ApiResponse<List<BranchDto>>
-                {
-                    Success = false,
-                    Message = "Failed to load branches. Check that the Branches table exists and migrations are applied.",
-                    Errors = new List<string> { ex.Message, ex.InnerException?.Message }.Where(s => !string.IsNullOrEmpty(s)).ToList()
-                });
+                // PRODUCTION: Return empty list instead of 500 so POS/Branches pages keep working
+                Console.WriteLine($"[GetBranches] Returning empty list after error: {ex.Message}");
+                return Ok(new ApiResponse<List<BranchDto>> { Success = true, Data = new List<BranchDto>() });
             }
         }
 

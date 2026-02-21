@@ -138,6 +138,10 @@ function App() {
     if (p === '/products' || p === '/pricelist') return 'products'
     if (p === '/customers' || p.startsWith('/customers/')) return 'customers'
     if (p === '/expenses') return 'expenses'
+    if (p === '/users') return 'users'
+    if (p === '/settings') return 'settings'
+    if (p === '/backup') return 'backup'
+    if (p === '/purchases') return 'purchases'
     return null
   }
   const resolvedPageId = getPageIdForPath(path)
