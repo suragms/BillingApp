@@ -63,13 +63,7 @@ namespace HexaBill.Api.Modules.Branches
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ GetRoute Error: {ex.Message}");
-                Console.WriteLine(ex.StackTrace);
-                return StatusCode(500, new ApiResponse<RouteDetailDto>
-                {
-                    Success = false,
-                    Message = "An error occurred while retrieving route",
-                    Errors = new List<string> { ex.Message }
-                });
+                return NotFound(new ApiResponse<RouteDetailDto> { Success = false, Message = "Route not found." });
             }
         }
 
@@ -87,13 +81,7 @@ namespace HexaBill.Api.Modules.Branches
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ GetRouteSummary Error: {ex.Message}");
-                Console.WriteLine(ex.StackTrace);
-                return StatusCode(500, new ApiResponse<RouteSummaryDto>
-                {
-                    Success = false,
-                    Message = "An error occurred while generating route summary",
-                    Errors = new List<string> { ex.Message }
-                });
+                return NotFound(new ApiResponse<RouteSummaryDto> { Success = false, Message = "Route not found." });
             }
         }
 

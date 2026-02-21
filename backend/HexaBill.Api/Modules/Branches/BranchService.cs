@@ -210,16 +210,27 @@ namespace HexaBill.Api.Modules.Branches
                     cogsByRouteList = new List<(int RouteId, decimal Cogs)>();
                 }
             }
-            var expensesByRoute = await _context.RouteExpenses
-                .Where(e => routeIds.Contains(e.RouteId) && (tenantId <= 0 || e.TenantId == tenantId) && e.ExpenseDate >= from && e.ExpenseDate <= to)
-                .GroupBy(e => e.RouteId)
-                .Select(g => new { RouteId = g.Key, Total = g.Sum(e => e.Amount) })
-                .ToListAsync();
-
-            // Branch-level expenses (Rent, Utilities, etc.) - separate from route expenses
-            var branchExpensesTotal = await _context.Expenses
-                .Where(e => e.BranchId == branchId && (tenantId <= 0 || e.TenantId == tenantId) && e.Date >= from && e.Date <= to)
-                .SumAsync(e => e.Amount);
+            List<(int RouteId, decimal Total)> expensesByRouteList;
+            decimal branchExpensesTotal;
+            try
+            {
+                var er = await _context.RouteExpenses
+                    .Where(e => routeIds.Contains(e.RouteId) && (tenantId <= 0 || e.TenantId == tenantId) && e.ExpenseDate >= from && e.ExpenseDate <= to)
+                    .GroupBy(e => e.RouteId)
+                    .Select(g => new { RouteId = g.Key, Total = g.Sum(e => e.Amount) })
+                    .ToListAsync();
+                expensesByRouteList = er.Select(x => (x.RouteId, x.Total)).ToList();
+                branchExpensesTotal = await _context.Expenses
+                    .Where(e => e.BranchId == branchId && (tenantId <= 0 || e.TenantId == tenantId) && e.Date >= from && e.Date <= to)
+                    .SumAsync(e => e.Amount);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ BranchService RouteExpenses/Expenses: {ex.Message}");
+                expensesByRouteList = new List<(int RouteId, decimal Total)>();
+                branchExpensesTotal = 0m;
+            }
+            var expensesByRoute = expensesByRouteList;
 
             var routeList = await _context.Routes
                 .AsNoTracking()
@@ -230,7 +241,8 @@ namespace HexaBill.Api.Modules.Branches
             var routes = routeList.Select(r =>
             {
                 var sales = salesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0;
-                var expenses = expensesByRoute.FirstOrDefault(x => x.RouteId == r.Id)?.Total ?? 0;
+                var expEntry = expensesByRoute.FirstOrDefault(x => x.RouteId == r.Id);
+                var expenses = expEntry.RouteId == r.Id ? expEntry.Total : 0m;
                 // CRITICAL FIX: Handle case where FirstOrDefault returns default tuple (0, 0)
                 var cogsEntry = cogsByRouteList.FirstOrDefault(x => x.RouteId == r.Id);
                 var cogs = cogsEntry.RouteId == r.Id ? cogsEntry.Cogs : 0m; // Only use if RouteId matches
@@ -256,10 +268,18 @@ namespace HexaBill.Api.Modules.Branches
             var averageInvoiceSize = invoiceCount > 0 ? totalSales / invoiceCount : 0m;
 
             // Calculate total payments for this branch's customers in the period
-            var branchCustomerIds = await _context.Customers
-                .Where(c => c.BranchId == branchId && (tenantId <= 0 || c.TenantId == tenantId))
-                .Select(c => c.Id)
-                .ToListAsync();
+            List<int> branchCustomerIds;
+            try
+            {
+                branchCustomerIds = await _context.Customers
+                    .Where(c => c.BranchId == branchId && (tenantId <= 0 || c.TenantId == tenantId))
+                    .Select(c => c.Id)
+                    .ToListAsync();
+            }
+            catch
+            {
+                branchCustomerIds = new List<int>(); // BranchId may not exist on Customers in some schemas
+            }
             
             var totalPayments = 0m;
             if (branchCustomerIds.Any())

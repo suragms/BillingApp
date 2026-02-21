@@ -710,7 +710,24 @@ app.UseStaticFiles(new StaticFileOptions
     RequestPath = "/uploads",
     OnPrepareResponse = ctx =>
     {
-        // CRITICAL FIX: Add cache headers for images
+        // CORS: Static files bypass CORS middleware - add Allow-Origin for cross-origin loads (e.g. www.hexabill.company)
+        var origin = ctx.Context.Request.Headers.Origin.ToString();
+        var isAllowed = !string.IsNullOrEmpty(origin) && (
+            origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) ||
+            origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase) ||
+            origin.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase) ||
+            origin.Contains("hexabill.company", StringComparison.OrdinalIgnoreCase));
+        if (isAllowed)
+        {
+            ctx.Context.Response.Headers.Append("Access-Control-Allow-Origin", origin);
+            ctx.Context.Response.Headers.Append("Access-Control-Allow-Credentials", "true");
+        }
+        else if (string.IsNullOrEmpty(origin))
+        {
+            // No Origin (e.g. img src, redirect) - allow any origin for public assets
+            ctx.Context.Response.Headers.Append("Access-Control-Allow-Origin", "*");
+        }
+        // Cache headers for images
         var path = ctx.File.Name;
         if (path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || 
             path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) || 
@@ -718,7 +735,6 @@ app.UseStaticFiles(new StaticFileOptions
             path.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) ||
             path.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
         {
-            // Cache images for 1 year (with cache busting via query params)
             ctx.Context.Response.Headers.Append("Cache-Control", "public, max-age=31536000, immutable");
         }
     }
@@ -730,24 +746,29 @@ app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/uploads"))
     {
-        // Check if file exists before calling next
         var requestPath = context.Request.Path.Value ?? "";
         if (requestPath.Contains("logo", StringComparison.OrdinalIgnoreCase) ||
             requestPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
             requestPath.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
             requestPath.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase))
         {
-            // Remove /uploads prefix to get relative path
             var relativePath = requestPath.StartsWith("/uploads/") 
                 ? requestPath.Substring("/uploads/".Length) 
                 : requestPath.TrimStart('/');
-            
             var filePath = Path.Combine(uploadsPath, relativePath);
-            var fileExists = File.Exists(filePath);
-            
-            if (!fileExists)
+            if (!File.Exists(filePath))
             {
-                // Return 204 No Content for missing logos/images (frontend will show fallback)
+                var origin = context.Request.Headers.Origin.ToString();
+                var isAllowed = !string.IsNullOrEmpty(origin) && (
+                    origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase) ||
+                    origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase) ||
+                    origin.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase) ||
+                    origin.Contains("hexabill.company", StringComparison.OrdinalIgnoreCase));
+                if (isAllowed)
+                {
+                    context.Response.Headers.Append("Access-Control-Allow-Origin", origin);
+                    context.Response.Headers.Append("Access-Control-Allow-Credentials", "true");
+                }
                 context.Response.StatusCode = 204;
                 context.Response.ContentLength = 0;
                 await context.Response.CompleteAsync();

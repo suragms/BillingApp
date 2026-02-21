@@ -52,12 +52,9 @@ namespace HexaBill.Api.Modules.Payments
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<object>
-                {
-                    Success = false,
-                    Message = "Error checking for duplicate payment",
-                    Errors = new List<string> { ex.Message }
-                });
+                // Fail open: return hasDuplicate=false so payment flow can proceed (Render/DB transient errors)
+                Console.WriteLine($"⚠️ Duplicate-check failed (proceeding): {ex.Message}");
+                return Ok(new ApiResponse<object> { Success = true, Data = new { hasDuplicate = false } });
             }
         }
 

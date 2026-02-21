@@ -184,6 +184,11 @@ namespace HexaBill.Api.Modules.Payments
                 }
             }
 
+            // CRITICAL: NpgsqlRetryingExecutionStrategy does not support user-initiated transactions.
+            // Wrap in execution strategy so the transaction is retriable (fixes 400 Bad Request on Render).
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
+            {
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
@@ -490,6 +495,7 @@ namespace HexaBill.Api.Modules.Payments
                 _logger.LogError(ex, "Error creating payment");
                 throw;
             }
+            });
         }
 
         public async Task<bool> UpdatePaymentStatusAsync(int paymentId, PaymentStatus status, int userId, int tenantId)

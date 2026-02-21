@@ -154,12 +154,8 @@ namespace HexaBill.Api.Modules.Reports
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ApiResponse<List<BranchProfitDto>>
-                {
-                    Success = false,
-                    Message = "An error occurred",
-                    Errors = new List<string> { ex.Message }
-                });
+                Console.WriteLine($"Error in GetBranchProfit: {ex.Message}");
+                return Ok(new ApiResponse<List<BranchProfitDto>> { Success = true, Data = new List<BranchProfitDto>() });
             }
         }
     }

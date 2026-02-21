@@ -110,7 +110,7 @@ namespace HexaBill.Api.Modules.Branches
             {
                 Id = r.Id,
                 BranchId = r.BranchId,
-                BranchName = r.Branch.Name,
+                BranchName = r.Branch?.Name ?? "",
                 TenantId = r.TenantId,
                 Name = r.Name,
                 AssignedStaffId = r.AssignedStaffId,
@@ -443,7 +443,7 @@ namespace HexaBill.Api.Modules.Branches
             {
                 RouteId = route.Id,
                 RouteName = route.Name,
-                BranchName = route.Branch.Name,
+                BranchName = route.Branch?.Name ?? "",
                 TotalSales = totalSales,
                 TotalExpenses = totalExpenses,
                 CostOfGoodsSold = costOfGoodsSold,

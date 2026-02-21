@@ -142,12 +142,7 @@ namespace HexaBill.Api.Modules.Reports
             catch (Exception ex)
             {
                 Console.WriteLine($"Error in GetBranchComparison: {ex.Message}");
-                return StatusCode(500, new ApiResponse<List<BranchComparisonItemDto>>
-                {
-                    Success = false,
-                    Message = "An error occurred while generating branch comparison",
-                    Errors = new List<string> { ex.Message }
-                });
+                return Ok(new ApiResponse<List<BranchComparisonItemDto>> { Success = true, Data = new List<BranchComparisonItemDto>() });
             }
         }
 

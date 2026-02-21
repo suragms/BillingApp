@@ -345,11 +345,14 @@ namespace HexaBill.Api.Modules.Users
         // PUT: api/users/{id} - Update user (Admin and Owner)
         [HttpPut("{id}")]
         [Authorize(Roles = "Admin,Owner,SystemAdmin")]
-        public async Task<ActionResult<ApiResponse<UserDto>>> UpdateUser(int id, [FromBody] UpdateUserRequest request)
+        public async Task<ActionResult<ApiResponse<UserDto>>> UpdateUser(int id, [FromBody] UpdateUserRequest? request)
         {
+            if (request == null)
+            {
+                return BadRequest(new ApiResponse<UserDto> { Success = false, Message = "Request body is required" });
+            }
             try
             {
-                // CRITICAL FIX: Filter by owner_id for multi-tenant isolation
                 var tenantId = CurrentTenantId;
                 var user = await _context.Users
                     .FirstOrDefaultAsync(u => u.Id == id && u.TenantId == tenantId); // SECURITY: Only update users belonging to current owner
@@ -445,20 +448,28 @@ namespace HexaBill.Api.Modules.Users
                     await _context.SaveChangesAsync();
                 }
 
-                // Create audit log
+                // Create audit log (OwnerId required by schema)
                 var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
                 if (userIdClaim != null && int.TryParse(userIdClaim.Value, out int currentUserId))
                 {
-                    var auditLog = new AuditLog
+                    try
                     {
-                        UserId = currentUserId,
-                        TenantId = tenantId,
-                        Action = "User Updated",
-                        Details = $"Updated user: {user.Email}",
-                        CreatedAt = DateTime.UtcNow
-                    };
-                    _context.AuditLogs.Add(auditLog);
-                    await _context.SaveChangesAsync();
+                        _context.AuditLogs.Add(new AuditLog
+                        {
+                            UserId = currentUserId,
+                            OwnerId = tenantId,
+                            TenantId = tenantId,
+                            Action = "User Updated",
+                            Details = $"Updated user: {user.Email}",
+                            CreatedAt = DateTime.UtcNow
+                        });
+                        await _context.SaveChangesAsync();
+                    }
+                    catch (Exception auditEx)
+                    {
+                        // Log but don't fail the update if audit fails
+                        Console.WriteLine($"Audit log failed (user update): {auditEx.Message}");
+                    }
                 }
 
                 var userDto = new UserDto
